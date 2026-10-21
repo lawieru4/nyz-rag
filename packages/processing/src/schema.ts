@@ -1,7 +1,9 @@
 // Drizzle 表结构定义；修改后运行 pnpm db:generate 生成迁移。列名由 casing: "snake_case" 自动映射。
 import { sql } from "drizzle-orm";
-import { boolean, check, customType, doublePrecision, index, integer, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
-import type { ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus } from "@nyz-rag/types";
+import { boolean, check, customType, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
+import type {
+  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus,
+} from "@nyz-rag/types";
 
 // pgvector 列不限维度，以支持不同 Embedding 模型；drizzle 内置 vector 类型要求固定维度，因此自定义。
 const vector = customType<{ data: number[]; driverData: string }>({
@@ -19,6 +21,7 @@ export const dataSources = pgTable("data_sources", {
   kind: text().$type<DataSourceRecord["kind"]>().notNull(),
   frequency: text().notNull().default(""),
   status: text().$type<DataSourceRecord["status"]>().notNull(),
+  syncState: jsonb().$type<ArticleSourceSyncState>().notNull().default({}),
   createdAt: timestamptz().notNull().defaultNow(),
   syncedAt: timestamptz(),
 }, (table) => [
@@ -47,6 +50,18 @@ export const documents = pgTable("documents", {
   url: text().notNull(),
   content: text().notNull().default(""),
   rawHtml: text(),
+  // 文章 API 来源：来源标识、原始详情 JSON（解析器升级时据此重新解析）与解析结果。
+  externalId: text(),
+  rawJson: jsonb(),
+  sourceUpdatedAt: timestamptz(),
+  markdown: text(),
+  author: text(),
+  category: text(),
+  tags: text().array().notNull().default(sql`'{}'::text[]`),
+  publishedAt: timestamptz(),
+  contentHash: text(),
+  parserVersion: integer(),
+  metadata: jsonb().$type<ArticleMetadata>(),
   status: text().$type<DocumentStatus>().notNull(),
   processingStatus: text().$type<DocumentProcessingStatus>().notNull().default("pending"),
   processingError: text(),
@@ -63,6 +78,8 @@ export const documents = pgTable("documents", {
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   unique("documents_source_id_url_key").on(table.sourceId, table.url),
+  unique("documents_source_id_external_id_key").on(table.sourceId, table.externalId),
+  index("documents_published_at_idx").on(table.publishedAt.desc()),
   index("documents_status_idx").on(table.status),
   index("documents_updated_at_idx").on(table.updatedAt.desc()),
   check("documents_status_check", sql`${table.status} IN ('pending', 'processing', 'ready', 'failed')`),
@@ -75,6 +92,10 @@ export const documentChunks = pgTable("document_chunks", {
   documentId: text().notNull().references(() => documents.id, { onDelete: "cascade" }),
   chunkIndex: integer().notNull(),
   content: text().notNull(),
+  // 向量化时拼接在正文前的上下文前缀。
+  context: text().notNull().default(""),
+  sectionPath: text().array().notNull().default(sql`'{}'::text[]`),
+  contentType: text().$type<NonNullable<DocumentChunkRecord["contentType"]>>().notNull().default("text"),
   tokenEstimate: integer().notNull(),
   providerId: text(),
   model: text(),
@@ -84,6 +105,7 @@ export const documentChunks = pgTable("document_chunks", {
 }, (table) => [
   unique("document_chunks_document_id_chunk_index_key").on(table.documentId, table.chunkIndex),
   check("document_chunks_chunk_index_check", sql`${table.chunkIndex} >= 0`),
+  check("document_chunks_content_type_check", sql`${table.contentType} IN ('text', 'table')`),
   check("document_chunks_embedding_check", sql`(${table.embedding} IS NULL) = (${table.dimensions} IS NULL)`),
 ]);
 

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import type { ArticleDetail } from "./article/parse.js";
 import type {
-  ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
+  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
@@ -18,12 +19,13 @@ const outer = (table: string, column: string) => sql.raw(`"${table}"."${column}"
 
 // ---- 数据源与采集任务 ----
 
+const { syncState: _syncState, ...sourceTableColumns } = getTableColumns(dataSources);
 const sourceColumns = {
-  ...getTableColumns(dataSources),
+  ...sourceTableColumns,
   documentCount: sql<number>`(SELECT count(*)::int FROM ${documents} WHERE ${documents.sourceId} = ${outer("data_sources", "id")} AND ${documents.status} = 'ready')`,
 };
 
-type SourceRow = typeof dataSources.$inferSelect & { documentCount: number };
+type SourceRow = Omit<typeof dataSources.$inferSelect, "syncState"> & { documentCount: number };
 const toSource = (row: SourceRow): DataSourceRecord => ({
   id: row.id, name: row.name, url: row.url, kind: row.kind, frequency: row.frequency, status: row.status,
   documentCount: row.documentCount, updatedAt: iso(row.syncedAt) ?? null,
@@ -47,6 +49,15 @@ export async function createSource(input: CreateSourceRequest, db: Executor = ge
 export async function updateSourceStatus(id: string, status: DataSourceRecord["status"], db: Executor = getDb()): Promise<DataSourceRecord | null> {
   const updated = await db.update(dataSources).set({ status }).where(eq(dataSources.id, id)).returning({ id: dataSources.id });
   return updated.length ? getSource(id, db) : null;
+}
+
+export async function getSourceSyncState(id: string, db: Executor = getDb()): Promise<ArticleSourceSyncState> {
+  const [row] = await db.select({ syncState: dataSources.syncState }).from(dataSources).where(eq(dataSources.id, id));
+  return row?.syncState ?? {};
+}
+
+export async function saveSourceSyncState(id: string, state: ArticleSourceSyncState, db: Executor = getDb()): Promise<void> {
+  await db.update(dataSources).set({ syncState: state }).where(eq(dataSources.id, id));
 }
 
 export async function markSourceSynced(id: string, db: Executor = getDb()): Promise<void> {
@@ -91,15 +102,17 @@ export async function getStats(db: Executor = getDb()): Promise<KnowledgeStats> 
 
 // ---- 文档与切片 ----
 
-const { content: _content, rawHtml: _rawHtml, ...documentColumns } = getTableColumns(documents);
+// 列表不读取正文、原始内容与解析结果等大字段。
+const { content: _content, rawHtml: _rawHtml, rawJson: _rawJson, markdown: _markdown, metadata: _metadata, ...documentColumns } = getTableColumns(documents);
 const summaryColumns = {
   ...documentColumns,
   chunkCount: sql<number>`(SELECT count(*)::int FROM ${documentChunks} WHERE ${documentChunks.documentId} = ${outer("documents", "id")})`,
 };
 
-type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawHtml"> & { chunkCount: number };
+type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawHtml" | "rawJson" | "markdown" | "metadata"> & { chunkCount: number };
 const toSummary = (row: SummaryRow): DocumentSummary => compact<DocumentSummary>({
-  id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, status: row.status,
+  id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, externalId: row.externalId, author: row.author, category: row.category,
+  tags: row.tags, publishedAt: iso(row.publishedAt) ?? null, parserVersion: row.parserVersion, status: row.status,
   processingStatus: row.processingStatus, processingError: row.processingError,
   embedding: compact<DocumentEmbeddingRecord>({
     status: row.embeddingStatus, providerId: row.embeddingProviderId ?? undefined, model: row.embeddingModel ?? undefined, dimensions: row.embeddingDimensions ?? undefined,
@@ -124,8 +137,10 @@ export async function listDocuments(filter: { query?: string; sourceId?: string;
 }
 
 export async function listDocumentChunks(documentId: string, db: Executor = getDb()): Promise<DocumentChunkRecord[]> {
-  const rows = await db.select({ id: documentChunks.id, index: documentChunks.chunkIndex, content: documentChunks.content, tokenEstimate: documentChunks.tokenEstimate })
-    .from(documentChunks).where(eq(documentChunks.documentId, documentId)).orderBy(asc(documentChunks.chunkIndex));
+  const rows = await db.select({
+    id: documentChunks.id, index: documentChunks.chunkIndex, content: documentChunks.content, tokenEstimate: documentChunks.tokenEstimate,
+    context: documentChunks.context, sectionPath: documentChunks.sectionPath, contentType: documentChunks.contentType,
+  }).from(documentChunks).where(eq(documentChunks.documentId, documentId)).orderBy(asc(documentChunks.chunkIndex));
   return rows;
 }
 
@@ -135,9 +150,12 @@ export async function getDocumentSummary(id: string, db: Executor = getDb()): Pr
 }
 
 export async function getDocument(id: string, db: Executor = getDb()): Promise<DocumentRecord | null> {
-  const [row] = await db.select({ ...summaryColumns, content: documents.content, rawHtml: documents.rawHtml }).from(documents).where(eq(documents.id, id));
+  const [row] = await db.select({ ...summaryColumns, content: documents.content, rawHtml: documents.rawHtml, markdown: documents.markdown, metadata: documents.metadata })
+    .from(documents).where(eq(documents.id, id));
   if (!row) return null;
-  return compact<DocumentRecord>({ ...toSummary(row), content: row.content, rawHtml: row.rawHtml ?? undefined, chunks: await listDocumentChunks(id, db) });
+  return compact<DocumentRecord>({
+    ...toSummary(row), content: row.content, markdown: row.markdown, rawHtml: row.rawHtml, metadata: row.metadata, chunks: await listDocumentChunks(id, db),
+  });
 }
 
 /** 在事务内锁定文档行，用于切片和向量化回写前的一致性校验。 */
@@ -147,8 +165,36 @@ export async function lockDocument(tx: Executor, id: string) {
   return row ?? null;
 }
 
-export async function upsertDocument(tx: Executor, input: { sourceId: string; url: string; title: string; content: string; rawHtml?: string; status: DocumentStatus }): Promise<string> {
-  const values = { title: input.title, content: input.content, rawHtml: input.rawHtml ?? null, status: input.status };
+/** 读取重新清洗切片所需的原始内容；调用前应先用 lockDocument 锁定。 */
+export async function getProcessingInput(tx: Executor, id: string) {
+  const [row] = await tx.select({ title: documents.title, content: documents.content, rawJson: documents.rawJson }).from(documents).where(eq(documents.id, id));
+  return row ? { title: row.title, content: row.content, rawJson: row.rawJson as ArticleDetail | null } : null;
+}
+
+/** 文章 API 来源已入库的文章：articleKey → 来源 updateTime（毫秒），用于增量同步。 */
+export async function listArticleVersions(sourceId: string, db: Executor = getDb()): Promise<Map<string, number | null>> {
+  const rows = await db.select({ externalId: documents.externalId, sourceUpdatedAt: documents.sourceUpdatedAt })
+    .from(documents).where(and(eq(documents.sourceId, sourceId), isNotNull(documents.externalId)));
+  return new Map(rows.map((row) => [row.externalId!, row.sourceUpdatedAt?.getTime() ?? null]));
+}
+
+export interface UpsertDocumentInput {
+  sourceId: string;
+  url: string;
+  title: string;
+  content: string;
+  rawHtml?: string;
+  externalId?: string;
+  rawJson?: ArticleDetail;
+  sourceUpdatedAt?: Date | null;
+  status: DocumentStatus;
+}
+
+export async function upsertDocument(tx: Executor, input: UpsertDocumentInput): Promise<string> {
+  const values = {
+    title: input.title, content: input.content, rawHtml: input.rawHtml ?? null, externalId: input.externalId ?? null, rawJson: input.rawJson ?? null,
+    sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
+  };
   const [row] = await tx.insert(documents)
     .values({ id: randomUUID(), sourceId: input.sourceId, url: input.url, ...values })
     .onConflictDoUpdate({ target: [documents.sourceId, documents.url], set: { ...values, updatedAt: sql`now()` } })
@@ -158,15 +204,32 @@ export async function upsertDocument(tx: Executor, input: { sourceId: string; ur
 
 const resetEmbedding = { embeddingProviderId: null, embeddingModel: null, embeddingDimensions: null, embeddingChunkCount: 0 };
 
+/** 清洗结果：正文必填；文章来源同时更新解析出的字段。 */
+export interface DocumentContentUpdate {
+  content: string;
+  title?: string;
+  markdown?: string | null;
+  author?: string | null;
+  category?: string | null;
+  tags?: string[];
+  publishedAt?: Date | null;
+  contentHash?: string | null;
+  parserVersion?: number | null;
+  metadata?: ArticleMetadata | null;
+}
+
 /** 替换正文与全部切片；旧切片的向量随之删除，向量状态重置为待向量化。 */
-export async function replaceDocumentChunks(tx: Executor, documentId: string, content: string, chunks: DocumentChunkRecord[]): Promise<void> {
+export async function replaceDocumentChunks(tx: Executor, documentId: string, update: DocumentContentUpdate, chunks: DocumentChunkRecord[]): Promise<void> {
   await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
   await tx.update(documents).set({
-    content, processingStatus: "chunked", processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
+    ...update, processingStatus: "chunked", processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
     embeddingStatus: "pending", ...resetEmbedding, embeddingError: null, embeddingUpdatedAt: null, updatedAt: sql`now()`,
   }).where(eq(documents.id, documentId));
   if (!chunks.length) return;
-  await tx.insert(documentChunks).values(chunks.map((chunk) => ({ id: chunk.id, documentId, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate })));
+  await tx.insert(documentChunks).values(chunks.map((chunk) => ({
+    id: chunk.id, documentId, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate,
+    context: chunk.context ?? "", sectionPath: chunk.sectionPath ?? [], contentType: chunk.contentType ?? "text",
+  })));
 }
 
 export async function setProcessingState(id: string, status: DocumentProcessingStatus, error: string | null = null, db: Executor = getDb()): Promise<void> {

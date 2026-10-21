@@ -177,6 +177,11 @@ app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", async (request, re
   const { name, url, kind, frequency } = request.body ?? {};
   if (!name?.trim() || !url?.trim()) return reply.code(400).send({ error: "name and url are required" });
   if (kind !== "文章 API" && kind !== "网页站点") return reply.code(400).send({ error: "kind must be 文章 API or 网页站点" });
+  let parsed: URL;
+  try { parsed = new URL(url.trim()); } catch { return reply.code(400).send({ error: "url must be a valid http(s) URL" }); }
+  if (!["http:", "https:"].includes(parsed.protocol)) return reply.code(400).send({ error: "url must be a valid http(s) URL" });
+  // 地址会展示在管理端并写入日志，文章接口 token 只能通过 Worker 环境变量 NYZ_ARTICLE_TOKEN 提供。
+  if (kind === "文章 API" && parsed.searchParams.has("token")) return reply.code(400).send({ error: "文章 API 地址不能包含 token，请在 Worker 环境变量 NYZ_ARTICLE_TOKEN 中配置" });
   return createSource({ name: name.trim(), url: url.trim(), kind, frequency: frequency ?? "" });
 });
 

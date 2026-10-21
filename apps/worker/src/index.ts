@@ -1,15 +1,20 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  closeDatabase, embedChunks, getSource, getTask, listDocumentChunks, listModelProviders, lockDocument, markSourceSynced, migrate, replaceDocumentChunks,
-  saveDocumentEmbeddings, selectEmbeddingProvider, setEmbeddingState, setProcessingState, updateTask, upsertDocument, withTransaction, type Executor,
+  closeDatabase, createArticleClient, embedChunks, embeddingInput, getProcessingInput, getSource, getSourceSyncState, getTask, listArticleVersions, listDocumentChunks,
+  listModelProviders, lockDocument, markSourceSynced, migrate, prepareDocument, replaceDocumentChunks, saveDocumentEmbeddings, saveSourceSyncState,
+  selectEmbeddingProvider, setEmbeddingState, setProcessingState, syncArticles, updateTask, upsertDocument, withTransaction, type Executor,
 } from "@nyz-rag/processing";
-import type { DataSourceRecord, DocumentChunkRecord } from "@nyz-rag/types";
+import type { DataSourceRecord } from "@nyz-rag/types";
 
 const connection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
 const maxPages = Math.max(1, Math.min(100, Number.parseInt(process.env.CRAWL_MAX_PAGES ?? "20", 10) || 20));
 const requestDelayMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_DELAY_MS ?? "1000", 10) || 1000);
 const requestTimeoutMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_TIMEOUT_MS ?? "15000", 10) || 15000);
+// 文章 API：单次同步最多处理的文章数，以及头部扫描在连续多少页无变化后结束。
+const articleSyncLimit = Math.max(1, Math.min(5000, Number.parseInt(process.env.NYZ_ARTICLE_SYNC_LIMIT ?? "200", 10) || 200));
+const articleOverlapPages = Math.max(1, Math.min(20, Number.parseInt(process.env.NYZ_ARTICLE_OVERLAP_PAGES ?? "2", 10) || 2));
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message.slice(0, 500) : fallback;
 
 function extractPage(html: string, url: string) {
@@ -28,24 +33,13 @@ function extractPage(html: string, url: string) {
   return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links, rawHtml: html };
 }
 
-function splitIntoChunks(content: string, documentId: string): DocumentChunkRecord[] {
-  const size = 800;
-  const overlap = 120;
-  const chunks: DocumentChunkRecord[] = [];
-  for (let start = 0; start < content.length; start += size - overlap) {
-    const value = content.slice(start, start + size).trim();
-    if (!value) continue;
-    chunks.push({ id: `${documentId}-${chunks.length + 1}`, index: chunks.length, content: value, tokenEstimate: Math.ceil(value.length / 2) });
-  }
-  return chunks;
-}
-
-/** 在调用方事务内清洗并重新切片；旧切片与向量一并替换。 */
+/** 在调用方事务内清洗并重新切片；旧切片与向量一并替换。文章来源从原始 JSON 重新解析。 */
 async function processDocument(tx: Executor, documentId: string) {
-  const document = await lockDocument(tx, documentId);
-  if (!document) throw new Error("document not found");
-  const content = document.content.replace(/\s+/g, " ").trim();
-  await replaceDocumentChunks(tx, documentId, content, splitIntoChunks(content, documentId));
+  if (!await lockDocument(tx, documentId)) throw new Error("document not found");
+  const input = await getProcessingInput(tx, documentId);
+  if (!input) throw new Error("document not found");
+  const { update, chunks } = prepareDocument(documentId, input);
+  await replaceDocumentChunks(tx, documentId, update, chunks);
 }
 
 async function embedDocument(documentId: string) {
@@ -60,7 +54,7 @@ async function embedDocument(documentId: string) {
       return { version: target.processingVersion, chunks };
     });
     const provider = selectEmbeddingProvider(await listModelProviders());
-    const vectors = await embedChunks(provider, chunks.map((chunk) => chunk.content));
+    const vectors = await embedChunks(provider, chunks.map(embeddingInput));
     await withTransaction(async (tx) => {
       const target = await lockDocument(tx, documentId);
       if (!target || target.processingStatus !== "chunked" || target.processingVersion !== version) {
@@ -88,8 +82,40 @@ async function fetchHtml(url: string, userAgent: string) {
   return { html: await response.text(), url: response.url || url };
 }
 
-async function crawl(source: DataSourceRecord, taskId: string) {
-  if (source.kind !== "网页站点") throw new Error("文章 API 来源尚未配置 API 认证与文章标识，暂不支持采集");
+async function syncArticleSource(source: DataSourceRecord, taskId: string) {
+  const client = createArticleClient({ listUrl: source.url, token: process.env.NYZ_ARTICLE_TOKEN ?? "", timeoutMs: requestTimeoutMs });
+  const result = await syncArticles({
+    client,
+    known: await listArticleVersions(source.id),
+    state: await getSourceSyncState(source.id),
+    limit: articleSyncLimit,
+    overlapPages: articleOverlapPages,
+    pause: () => delay(requestDelayMs),
+    saveState: (state) => saveSourceSyncState(source.id, state),
+    onProgress: (count) => updateTask(taskId, { progress: Math.min(95, Math.round(count / articleSyncLimit * 100)) }),
+    process: async (item) => {
+      const detail = await client.detail(item._key);
+      const documentId = await withTransaction(async (tx) => {
+        const id = await upsertDocument(tx, {
+          sourceId: source.id, externalId: detail._key, url: client.articleUrl(detail._key), title: detail.title?.trim() || detail._key, content: "",
+          rawJson: detail, sourceUpdatedAt: detail.updateTime ? new Date(detail.updateTime) : null, status: "ready",
+        });
+        await processDocument(tx, id);
+        return id;
+      });
+      await autoEmbedDocument(documentId);
+    },
+  });
+  console.info(`Source ${source.id}: ${result.processed} articles synced, ${result.failures.length} failed, ${result.pages} list pages${result.limitReached ? ", limit reached" : ""}`);
+  if (result.failures.length && !result.processed) throw new Error(`${result.failures.length} 篇文章同步失败：${result.failures[0].error}`);
+  const notes = [
+    result.failures.length ? `${result.failures.length} 篇失败，下次同步重试（${result.failures[0].articleKey}：${result.failures[0].error}）` : "",
+    result.limitReached ? `已达单次上限 ${articleSyncLimit} 篇，再次同步继续` : "",
+  ].filter(Boolean);
+  return { count: result.processed, note: notes.length ? notes.join("；") : null };
+}
+
+async function crawlSite(source: DataSourceRecord, taskId: string) {
   const baseUrl = new URL(source.url);
   if (!["http:", "https:"].includes(baseUrl.protocol)) throw new Error("Only HTTP and HTTPS sources are supported");
   const userAgent = "NYZ-RAG-Bot/1.0 (+contact site administrator)";
@@ -148,10 +174,11 @@ async function syncSource(sourceId: string, taskId: string) {
   if (!task || !source) throw new Error("source or task not found");
   await updateTask(taskId, { status: "运行中", progress: 0, error: null });
   try {
-    const count = await crawl(source, taskId);
+    const { count, note } = source.kind === "文章 API" ? await syncArticleSource(source, taskId) : { count: await crawlSite(source, taskId), note: null };
     await withTransaction(async (tx) => {
       await markSourceSynced(sourceId, tx);
-      await updateTask(taskId, { status: "已完成", progress: 100 }, tx);
+      // 部分失败或达到单次上限时任务仍算完成，说明写在 error 字段供管理端展示。
+      await updateTask(taskId, { status: "已完成", progress: 100, error: note }, tx);
     });
     return count;
   } catch (error) {

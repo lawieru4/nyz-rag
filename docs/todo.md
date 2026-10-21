@@ -83,22 +83,23 @@
 
 ## 四、采集、清洗与切片
 
-- [ ] 文章 API 数据源：配置 token、articleKey，调用文章详情接口；token 不写入 URL、日志与错误信息
-- [ ] ProseMirror/Tiptap 解析器（纯函数）：生成 `content_json`、`markdown`、`plain_text`，未知节点记录到 `unknown_node_types` 并继续。以 `scripts/nyz-articles/parse.mjs`（v3）为原型移植到 Worker 并补充单元测试
-- [ ] 章节角色：相关阅读、本文链接不进入检索语料，提取为关联文章与 DOI；延伸思考不做向量化，用作推荐追问
-- [ ] 文首元信息（作者/转载源/关键词/场景，`[[双链]]`）与项目导读信息（项目名称/负责人/承担单位）提取为结构化字段，不进入正文；引用时标注原始转载源
-- [ ] 误用标题（超长、以句末或冒号结尾）降级为段落，标题文字计入切片；从标题解析机构与期刊
-- [ ] 列表接口增量同步：列表含置顶文章且非严格按时间排序，按 `updateTime` 判断变化并扫描重叠窗口，不能遇到已知文章即停止；支持断点续传；处理 `invalidToken` 与 VIP 文章
+- [x] 文章 API 数据源：来源地址为文章列表接口（如 `…/nyzfoxx/article?tagKey=…`），详情接口为同路径 `/articleDetail`；token 只从 Worker 环境变量 `NYZ_ARTICLE_TOKEN` 读取，API 拒绝带 token 的地址，错误信息不含 URL
+- [x] ProseMirror/Tiptap 解析器（纯函数，`packages/processing/src/article/parse.ts`）：由 `parse.mjs`（v3）移植，200 篇样本输出一致；生成 Markdown 与纯文本，未知节点记录到 `metadata.unknownNodeTypes` 并继续
+- [x] 章节角色：相关阅读、本文链接不进入正文与切片，提取为 `relatedArticleKeys` 与 DOI；延伸思考不做向量化，提取为 `metadata.followUpQuestions`
+- [ ] 文首元信息（作者/转载源/关键词/场景，`[[双链]]`）与项目导读信息（项目名称/负责人/承担单位）提取为结构化字段，不进入正文；引用时标注原始转载源。（文首元信息已完成，存于 `metadata.sourceMeta`；项目导读信息与引用标注未做）
+- [ ] 误用标题（超长、以句末或冒号结尾）降级为段落，标题文字计入切片；从标题解析机构与期刊。（降级已完成；机构与期刊解析未做）
+- [x] 列表接口增量同步：按 `updateTime` 判断变化，置顶文章不参与停止判断，连续 `NYZ_ARTICLE_OVERLAP_PAGES` 页无变化才停止；单次上限 `NYZ_ARTICLE_SYNC_LIMIT`，回填进度与失败文章记录在 `data_sources.sync_state`，下次继续；`invalidToken`、401/403 中止同步，无正文（VIP/无权限）的文章记为失败
 - [ ] 近似去重（MinHash 等）：同一论文的多版改写只保留一篇或合并
 - [ ] PDF 附件解析（样本中 21 篇报告导读、项目导读的完整内容在附件中）
 - [ ] 与数据提供方确认转载内容的使用授权（样本中 85.5% 转载自微信公众号并经 AI 改写）
-- [ ] 保存原始 JSON 与 `parser_version`，解析器升级时只重新解析和切片
-- [ ] 文档补充字段：`canonical_url`、`author`、`category`、`published_at`、`content_hash`、`parse_status`、`parse_error` 等
+- [x] 保存原始 JSON（`documents.raw_json`）与 `parser_version`；「重新处理」用当前解析器重新解析和切片，无需再次请求接口
+- [ ] 文档补充字段：`canonical_url`、`author`、`category`、`published_at`、`content_hash`、`parse_status`、`parse_error` 等。（已加 `external_id`、`author`、`category`、`tags`、`published_at`、`source_updated_at`、`content_hash`、`markdown`、`metadata`；解析状态复用 `processing_status`/`processing_error`；`canonical_url` 未做）
 - [ ] 去重：URL、canonical URL、内容 hash
 - [ ] 网页正文提取改用 Cheerio + Readability 替代正则。依赖：`cheerio`、`@mozilla/readability`（及 DOM 实现）
 - [ ] robots.txt 按 User-agent 分组完整解析 Disallow/Allow 规则
-- [ ] 结构化切片：按标题与段落切分，使用 Token 计数替代字符估算；表格整块保留；过短章节并入相邻章节。不再用 `replace(/\s+/g, " ")` 折叠正文
-- [ ] 向量化前为 chunk 添加上下文前缀：以文章标题为主（通常含机构与期刊），附章节与关键词；模板章节名单独几乎不提供信息。保存 `section_path`、`content_type`、节点范围
+- [x] 结构化切片（`packages/processing/src/chunking.ts`）：同章节累积约 800 字，过短章节并入下一节，表格不超过两倍目标长度时整块保留（更长按行切分并重复表头），超长段落按句切分；网页按行切分，不再折叠空白
+- [ ] 精确 Token 计数：当前为估算（中日韩字符计 1，其余约 3.5 字符计 1），精确计数需引入分词器依赖
+- [x] 向量化前为 chunk 添加上下文前缀（文章标题、章节、前 8 个关键词），存于 `document_chunks.context`；保存 `section_path`、`content_type`。节点范围未保存
 - [ ] Worker 拆分为独立阶段任务（采集 → 解析 → 切片 → 向量化），各阶段可单独重试
 - [ ] 图片与附件元数据单独保存（`document_assets`），默认不参与 Embedding
 

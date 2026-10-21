@@ -1,4 +1,9 @@
 export { closeDatabase, getDb, getPool, migrate, withTransaction, type Database, type Executor, type Transaction } from "./db.js";
 export { embedChunks, selectEmbeddingProvider } from "./embedding.js";
+export * from "./chunking.js";
+export { articleDocumentUpdate, prepareDocument } from "./prepare.js";
+export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleListItem } from "./article/client.js";
+export { parseArticle, PARSER_VERSION, type ArticleBlock, type ArticleDetail, type ParsedArticle } from "./article/parse.js";
+export { syncArticles, type ArticleSyncOptions, type ArticleSyncResult } from "./article/sync.js";
 export * from "./repository.js";
 export * as schema from "./schema.js";
