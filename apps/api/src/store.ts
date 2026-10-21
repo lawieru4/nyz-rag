@@ -1,9 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { DataSourceRecord, DocumentRecord, KnowledgeSnapshot, CrawlTaskRecord } from "@nyz-rag/types";
+import type { DataSourceRecord, DocumentRecord, KnowledgeSnapshot, CrawlTaskRecord, KnowledgeBaseRecord } from "@nyz-rag/types";
 
 const storePath = resolve(process.env.NYZ_STORE_PATH ?? "../../.nyz-data/knowledge.json");
-const seed: KnowledgeSnapshot = { sources: [], documents: [], tasks: [], stats: { documents: 0, sources: 0, processingTasks: 0, lastUpdated: null } };
+type StoreSnapshot = KnowledgeSnapshot & { knowledgeBases: KnowledgeBaseRecord[] };
+const seed: StoreSnapshot = { sources: [], documents: [], tasks: [], knowledgeBases: [], stats: { documents: 0, sources: 0, processingTasks: 0, lastUpdated: null } };
 
 async function persist(snapshot: KnowledgeSnapshot) {
   snapshot.stats = {
@@ -16,16 +17,17 @@ async function persist(snapshot: KnowledgeSnapshot) {
   await writeFile(storePath, JSON.stringify(snapshot, null, 2));
 }
 
-export async function readStore(): Promise<KnowledgeSnapshot> {
+export async function readStore(): Promise<StoreSnapshot> {
   try {
-    return JSON.parse(await readFile(storePath, "utf8")) as KnowledgeSnapshot;
+    const snapshot = JSON.parse(await readFile(storePath, "utf8")) as Partial<StoreSnapshot>;
+    return { ...structuredClone(seed), ...snapshot, knowledgeBases: snapshot.knowledgeBases ?? [] };
   } catch {
     await persist(structuredClone(seed));
     return structuredClone(seed);
   }
 }
 
-export async function updateStore(mutator: (snapshot: KnowledgeSnapshot) => void) {
+export async function updateStore(mutator: (snapshot: StoreSnapshot) => void) {
   const snapshot = await readStore();
   mutator(snapshot);
   await persist(snapshot);

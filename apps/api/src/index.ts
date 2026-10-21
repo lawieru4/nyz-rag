@@ -2,7 +2,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
-import type { ApiHealth, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, SearchResult } from "@nyz-rag/types";
+import type { ApiHealth, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, SearchResult, SaveKnowledgeBaseRequest } from "@nyz-rag/types";
 import { readStore, updateStore } from "./store.js";
 
 const app = Fastify({ logger: true });
@@ -69,6 +69,36 @@ app.delete<{ Params: { id: string } }>("/api/admin/documents/:id", async (reques
     }
   });
   return reply.code(204).send();
+});
+
+app.get("/api/admin/knowledge-bases", async () => (await readStore()).knowledgeBases);
+
+app.post<{ Body: SaveKnowledgeBaseRequest }>("/api/admin/knowledge-bases", async (request, reply) => {
+  const input = request.body;
+  if (!input?.name?.trim()) return reply.code(400).send({ error: "name is required" });
+  if (!Number.isInteger(input.topK) || input.topK < 1 || input.topK > 100 || !Number.isFinite(input.similarityThreshold) || input.similarityThreshold < 0 || input.similarityThreshold > 1 || !Number.isInteger(input.maxContextLength) || input.maxContextLength < 256) {
+    return reply.code(400).send({ error: "knowledge base settings are invalid" });
+  }
+  const now = new Date().toISOString();
+  const knowledgeBase = { ...input, name: input.name.trim(), id: crypto.randomUUID(), createdAt: now, updatedAt: now };
+  await updateStore((snapshot) => snapshot.knowledgeBases.unshift(knowledgeBase));
+  return reply.code(201).send(knowledgeBase);
+});
+
+app.patch<{ Params: { id: string }; Body: SaveKnowledgeBaseRequest }>("/api/admin/knowledge-bases/:id", async (request, reply) => {
+  const input = request.body;
+  if (!input?.name?.trim()) return reply.code(400).send({ error: "name is required" });
+  if (!Number.isInteger(input.topK) || input.topK < 1 || input.topK > 100 || !Number.isFinite(input.similarityThreshold) || input.similarityThreshold < 0 || input.similarityThreshold > 1 || !Number.isInteger(input.maxContextLength) || input.maxContextLength < 256) {
+    return reply.code(400).send({ error: "knowledge base settings are invalid" });
+  }
+  let updated;
+  await updateStore((snapshot) => {
+    const index = snapshot.knowledgeBases.findIndex((item) => item.id === request.params.id);
+    if (index < 0) return;
+    updated = snapshot.knowledgeBases[index] = { ...snapshot.knowledgeBases[index], ...input, name: input.name.trim(), updatedAt: new Date().toISOString() };
+  });
+  if (!updated) return reply.code(404).send({ error: "knowledge base not found" });
+  return updated;
 });
 
 app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", async (request, reply) => {

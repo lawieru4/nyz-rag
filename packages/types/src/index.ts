@@ -87,3 +87,19 @@ export interface DocumentListResponse {
   documents: DocumentRecord[];
   total: number;
 }
+
+export interface KnowledgeBaseRecord {
+  id: string;
+  name: string;
+  description: string;
+  topK: number;
+  similarityThreshold: number;
+  rerankEnabled: boolean;
+  maxContextLength: number;
+  prompt: string;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SaveKnowledgeBaseRequest = Omit<KnowledgeBaseRecord, "id" | "createdAt" | "updatedAt">;
