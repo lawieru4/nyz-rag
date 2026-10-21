@@ -22,6 +22,17 @@ export interface ChatErrorResponse {
 export type ChatResponse = ChatSuccessResponse | ChatErrorResponse;
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
+export type EmbeddingStatus = "pending" | "queued" | "processing" | "ready" | "failed";
+
+export interface DocumentEmbeddingRecord {
+  status: EmbeddingStatus;
+  providerId?: string;
+  model?: string;
+  dimensions?: number;
+  chunkCount: number;
+  updatedAt?: string;
+  error?: string;
+}
 
 export interface DocumentRecord {
   id: string;
@@ -33,6 +44,7 @@ export interface DocumentRecord {
   processingStatus?: "pending" | "cleaning" | "chunked" | "failed";
   processingError?: string;
   chunks?: DocumentChunkRecord[];
+  embedding?: DocumentEmbeddingRecord;
   status: DocumentStatus;
   createdAt: string;
   updatedAt: string;
@@ -156,3 +168,9 @@ export interface ModelProviderRecord {
 }
 
 export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt">;
+
+export interface KnowledgeStoreSnapshot extends KnowledgeSnapshot {
+  knowledgeBases: KnowledgeBaseRecord[];
+  chatLogs: ChatLogRecord[];
+  modelProviders: ModelProviderRecord[];
+}

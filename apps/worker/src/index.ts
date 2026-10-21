@@ -1,23 +1,12 @@
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import type { CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentRecord, KnowledgeSnapshot } from "@nyz-rag/types";
+import { closeVectorStore, deleteDocumentVectors, embedChunks, readSnapshot, replaceDocumentVectors, selectEmbeddingProvider, updateSnapshot } from "@nyz-rag/processing";
+import type { CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentRecord } from "@nyz-rag/types";
 
 const connection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
-const storePath = resolve(process.env.NYZ_STORE_PATH ?? "../../.nyz-data/knowledge.json");
 const maxPages = Math.max(1, Math.min(100, Number.parseInt(process.env.CRAWL_MAX_PAGES ?? "20", 10) || 20));
 const requestDelayMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_DELAY_MS ?? "1000", 10) || 1000);
 const requestTimeoutMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_TIMEOUT_MS ?? "15000", 10) || 15000);
-
-async function loadSnapshot() {
-  return JSON.parse(await readFile(storePath, "utf8")) as KnowledgeSnapshot;
-}
-
-async function saveSnapshot(snapshot: KnowledgeSnapshot) {
-  await mkdir(dirname(storePath), { recursive: true });
-  await writeFile(storePath, JSON.stringify(snapshot, null, 2));
-}
 
 function extractPage(html: string, url: string) {
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
@@ -48,12 +37,51 @@ function splitIntoChunks(content: string, documentId: string): DocumentChunkReco
 }
 
 async function processDocument(document: DocumentRecord) {
+  await deleteDocumentVectors(document.id);
   document.processingStatus = "cleaning";
   delete document.processingError;
   document.content = document.content.replace(/\s+/g, " ").trim();
   document.processingStatus = "chunked";
   document.chunks = splitIntoChunks(document.content, document.id);
+  document.embedding = { status: "pending", chunkCount: 0 };
   document.updatedAt = new Date().toISOString();
+}
+
+async function embedDocument(documentId: string) {
+  try {
+    let document: DocumentRecord | undefined;
+    const snapshot = await updateSnapshot((current) => {
+      const target = current.documents.find((item) => item.id === documentId);
+      if (!target) throw new Error("Document no longer exists");
+      if (target.processingStatus !== "chunked" || !target.chunks?.length) throw new Error("Document must have chunks before embedding");
+      target.embedding = { status: "processing", chunkCount: 0, updatedAt: new Date().toISOString() };
+      document = structuredClone(target);
+    });
+    const provider = selectEmbeddingProvider(snapshot.modelProviders);
+    const chunks = document!.chunks!;
+    const vectors = await embedChunks(provider, chunks.map((chunk) => chunk.content));
+    await updateSnapshot(async (current) => {
+      const target = current.documents.find((item) => item.id === documentId);
+      if (!target || target.processingStatus !== "chunked" || JSON.stringify(target.chunks) !== JSON.stringify(chunks)) {
+        throw new Error("Document changed during embedding; retry after processing finishes");
+      }
+      await replaceDocumentVectors(documentId, chunks, vectors, provider);
+      target.embedding = { status: "ready", providerId: provider.id, model: provider.embeddingModel, dimensions: vectors[0].length, chunkCount: chunks.length, updatedAt: new Date().toISOString() };
+    });
+  } catch (error) {
+    await updateSnapshot((current) => {
+      const target = current.documents.find((item) => item.id === documentId);
+      if (target) target.embedding = { status: "failed", chunkCount: 0, error: error instanceof Error ? error.message.slice(0, 500) : "Embedding failed", updatedAt: new Date().toISOString() };
+    });
+    throw error;
+  }
+}
+
+async function autoEmbedDocument(documentId: string) {
+  const snapshot = await readSnapshot();
+  if (!snapshot.modelProviders.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
+  // An embedding failure remains retryable without discarding successfully crawled content.
+  await embedDocument(documentId).catch(() => console.error(`Embedding failed for document ${documentId}`));
 }
 
 async function fetchHtml(url: string, userAgent: string) {
@@ -63,7 +91,7 @@ async function fetchHtml(url: string, userAgent: string) {
   return { html: await response.text(), url: response.url || url };
 }
 
-async function crawl(source: DataSourceRecord, task: CrawlTaskRecord, snapshot: KnowledgeSnapshot) {
+async function crawl(source: DataSourceRecord, task: CrawlTaskRecord) {
   if (source.kind !== "网页站点") throw new Error("文章 API 来源尚未配置 API 认证与文章标识，暂不支持采集");
   const baseUrl = new URL(source.url);
   if (!["http:", "https:"].includes(baseUrl.protocol)) throw new Error("Only HTTP and HTTPS sources are supported");
@@ -89,35 +117,56 @@ async function crawl(source: DataSourceRecord, task: CrawlTaskRecord, snapshot: 
     const page = extractPage(html, finalUrl);
     if (page.title && page.content) {
       const now = new Date().toISOString();
-      const existing = snapshot.documents.find((document) => document.sourceId === source.id && document.url === finalUrl);
-       const document: DocumentRecord = existing ?? { id: crypto.randomUUID(), sourceId: source.id, title: page.title, url: finalUrl, content: page.content, rawHtml: page.rawHtml, processingStatus: "pending", chunks: [], status: "ready", createdAt: now, updatedAt: now };
-       Object.assign(document, { title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" as const, processingStatus: "pending" as const, updatedAt: now });
-       await processDocument(document);
-      if (!existing) snapshot.documents.unshift(document);
+      let documentId = "";
+      await updateSnapshot(async (current) => {
+        const existing = current.documents.find((document) => document.sourceId === source.id && document.url === finalUrl);
+        const document: DocumentRecord = existing ?? { id: crypto.randomUUID(), sourceId: source.id, title: page.title, url: finalUrl, content: page.content, status: "ready", createdAt: now, updatedAt: now };
+        Object.assign(document, { title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" as const });
+        await processDocument(document);
+        if (!existing) current.documents.unshift(document);
+        documentId = document.id;
+      });
+      await autoEmbedDocument(documentId);
       processed += 1;
     }
     for (const link of page.links) if (!visited.has(link) && !pending.includes(link) && new URL(link).pathname === baseUrl.pathname) pending.push(link);
     task.progress = Math.min(95, Math.round(processed / maxPages * 100));
-    await saveSnapshot(snapshot);
+    await updateSnapshot((current) => {
+      const target = current.tasks.find((item) => item.id === task.id);
+      if (target) target.progress = task.progress;
+    });
     if (pending.length && processed < maxPages) await new Promise((resolveDelay) => setTimeout(resolveDelay, requestDelayMs));
   }
   if (!processed) throw new Error("No article content found; expected a page with a title and readable text");
   return processed;
 }
 
-const worker = new Worker("document-processing", async (job) => {
-  const snapshot = await loadSnapshot();
+const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
+const worker = new Worker(queueName, async (job) => {
+  if (job.name === "embed-document") {
+    await embedDocument(job.data.documentId);
+    return { status: "embedded", documentId: job.data.documentId };
+  }
+  const snapshot = await readSnapshot();
   if (job.name === "reprocess-document") {
     const document = snapshot.documents.find((item) => item.id === job.data.documentId);
     if (!document) throw new Error("document not found");
     try {
-      await processDocument(document);
-      await saveSnapshot(snapshot);
-      return { status: "chunked", documentId: document.id, chunks: document.chunks?.length ?? 0 };
+      const processed = await updateSnapshot(async (current) => {
+        const target = current.documents.find((item) => item.id === document.id);
+        if (!target) throw new Error("document not found");
+        await processDocument(target);
+      });
+      await autoEmbedDocument(document.id);
+      return { status: "chunked", documentId: document.id, chunks: processed.documents.find((item) => item.id === document.id)?.chunks?.length ?? 0 };
     } catch (error) {
-      document.processingStatus = "failed";
-      document.processingError = error instanceof Error ? error.message.slice(0, 500) : "Document processing failed";
-      await saveSnapshot(snapshot);
+      await updateSnapshot((current) => {
+        const target = current.documents.find((item) => item.id === document.id);
+        if (target) {
+          target.processingStatus = "failed";
+          target.processingError = error instanceof Error ? error.message.slice(0, 500) : "Document processing failed";
+        }
+      });
       throw error;
     }
   }
@@ -127,20 +176,33 @@ const worker = new Worker("document-processing", async (job) => {
   task.status = "运行中";
   task.progress = 0;
   delete task.error;
-  await saveSnapshot(snapshot);
+  await updateSnapshot((current) => {
+    const target = current.tasks.find((item) => item.id === task.id);
+    if (target) Object.assign(target, task);
+  });
   try {
-    const count = await crawl(source, task, snapshot);
+    const count = await crawl(source, task);
     const now = new Date().toISOString();
-    source.documentCount = snapshot.documents.filter((document) => document.sourceId === source.id && document.status === "ready").length;
     source.updatedAt = now;
     task.status = "已完成";
     task.progress = 100;
-    await saveSnapshot(snapshot);
+    await updateSnapshot((current) => {
+      const targetSource = current.sources.find((item) => item.id === source.id);
+      if (targetSource) {
+        targetSource.documentCount = current.documents.filter((document) => document.sourceId === source.id && document.status === "ready").length;
+        targetSource.updatedAt = now;
+      }
+      const targetTask = current.tasks.find((item) => item.id === task.id);
+      if (targetTask) Object.assign(targetTask, task);
+    });
     return { status: "ready", documentsProcessed: count };
   } catch (error) {
     task.status = "失败";
     task.error = error instanceof Error ? error.message.slice(0, 500) : "Unknown crawl error";
-    await saveSnapshot(snapshot);
+    await updateSnapshot((current) => {
+      const target = current.tasks.find((item) => item.id === task.id);
+      if (target) Object.assign(target, task);
+    });
     throw error;
   }
 }, { connection, concurrency: 1 });
@@ -148,7 +210,7 @@ const worker = new Worker("document-processing", async (job) => {
 worker.on("completed", (job) => console.info(`Job ${job.id} completed`));
 worker.on("failed", (job, error) => console.error(`Job ${job?.id} failed`, error.message));
 
-const shutdown = async () => { await worker.close(); await connection.quit(); };
+const shutdown = async () => { await worker.close(); await connection.quit(); await closeVectorStore(); };
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
-console.info("NYZ RAG worker listening on document-processing queue");
+console.info(`NYZ RAG worker listening on ${queueName} queue`);

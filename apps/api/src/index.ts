@@ -2,14 +2,21 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
-import type { ApiHealth, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
+import { closeVectorStore, deleteDocumentVectors, selectEmbeddingProvider } from "@nyz-rag/processing";
+import type { ApiHealth, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, DocumentRecord, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
 import { readStore, updateStore } from "./store.js";
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.API_PORT ?? 3000);
 const queueConnection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
-const documentQueue = new Queue("document-processing", { connection: queueConnection });
+const documentQueue = new Queue(process.env.DOCUMENT_QUEUE_NAME ?? "document-processing", { connection: queueConnection });
 const queryTerms = (value: string) => value.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]{2}/gi) ?? [];
+
+async function hasDocumentJob(document: DocumentRecord) {
+  if (await documentQueue.getJob(`document-${document.id}`)) return true;
+  const activeJobs = await documentQueue.getJobs(["active"]);
+  return activeJobs.some((job) => job.name === "sync-source" && job.data.sourceId === document.sourceId);
+}
 
 await app.register(cors, { origin: true });
 
@@ -35,7 +42,7 @@ app.post<{ Body: ChatRequest; Reply: ChatResponse }>("/api/chat", async (request
   const answer = matches.length ? `根据知识库中的《${matches[0].document.title}》，${matches[0].document.content.slice(0, 180)}${matches[0].document.content.length > 180 ? "……" : ""}` : "知识库中暂未找到与问题直接匹配的文章，请尝试更具体的关键词。";
   const sources = matches.map(({ document }) => ({ documentId: document.id, title: document.title, url: document.url }));
   const log = { id: crypto.randomUUID(), question, answer, sources, rating: null, createdAt: new Date().toISOString() };
-  await updateStore((current) => current.chatLogs.unshift(log));
+  await updateStore((current) => { current.chatLogs.unshift(log); });
   return { messageId: log.id, answer, sources };
 });
 
@@ -87,32 +94,61 @@ app.get<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, 
 });
 
 app.post<{ Params: { id: string } }>("/api/admin/documents/:id/reprocess", async (request, reply) => {
-  const snapshot = await readStore();
-  const document = snapshot.documents.find((item) => item.id === request.params.id);
-  if (!document) return reply.code(404).send({ error: "document not found" });
-  document.processingStatus = "pending";
-  delete document.processingError;
-  await updateStore((current) => {
-    const target = current.documents.find((item) => item.id === request.params.id);
-    if (target) {
-      target.processingStatus = "pending";
-      delete target.processingError;
+  let error: { code: number; error: string } | undefined;
+  await updateStore(async (current) => {
+    const document = current.documents.find((item) => item.id === request.params.id);
+    if (!document) { error = { code: 404, error: "document not found" }; return; }
+    if (await hasDocumentJob(document)) {
+      error = { code: 409, error: "document already has a processing job" }; return;
     }
+    await documentQueue.add("reprocess-document", { documentId: document.id }, { jobId: `document-${document.id}`, removeOnComplete: true, removeOnFail: true });
+    document.processingStatus = "pending";
+    delete document.processingError;
   });
-  await documentQueue.add("reprocess-document", { documentId: document.id });
-  return { status: "queued", documentId: document.id };
+  if (error) return reply.code(error.code).send({ error: error.error });
+  return reply.code(202).send({ status: "queued", documentId: request.params.id });
+});
+
+app.post<{ Params: { id: string } }>("/api/admin/documents/:id/embed", async (request, reply) => {
+  let error: { code: number; error: string } | undefined;
+  await updateStore(async (current) => {
+    const document = current.documents.find((item) => item.id === request.params.id);
+    if (!document) { error = { code: 404, error: "document not found" }; return; }
+    if (await hasDocumentJob(document)) {
+      error = { code: 409, error: "document already has a processing job" }; return;
+    }
+    if (document.processingStatus !== "chunked" || !document.chunks?.length) {
+      error = { code: 409, error: "请先完成文档清洗与切片" }; return;
+    }
+    try {
+      const provider = selectEmbeddingProvider(current.modelProviders);
+      if (!process.env[provider.credentialEnv]?.trim()) throw new Error(`请在 API 和 Worker 环境配置 ${provider.credentialEnv}`);
+      if (!process.env.DATABASE_URL) throw new Error("请配置 DATABASE_URL 后再执行向量化");
+    } catch (cause) {
+      error = { code: 409, error: cause instanceof Error ? cause.message : "Embedding configuration is invalid" }; return;
+    }
+    await documentQueue.add("embed-document", { documentId: document.id }, { jobId: `document-${document.id}`, removeOnComplete: true, removeOnFail: true });
+    document.embedding = { status: "queued", chunkCount: 0, updatedAt: new Date().toISOString() };
+  });
+  if (error) return reply.code(error.code).send({ error: error.error });
+  return reply.code(202).send({ status: "queued", documentId: request.params.id });
 });
 
 app.delete<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, reply) => {
-  const snapshot = await readStore();
-  if (!snapshot.documents.some((item) => item.id === request.params.id)) return reply.code(404).send({ error: "document not found" });
-
-  await updateStore((current) => {
+  let error: { code: number; error: string } | undefined;
+  await updateStore(async (current) => {
+    const document = current.documents.find((item) => item.id === request.params.id);
+    if (!document) { error = { code: 404, error: "document not found" }; return; }
+    if (await hasDocumentJob(document)) {
+      error = { code: 409, error: "document already has a processing job" }; return;
+    }
+    await deleteDocumentVectors(document.id);
     current.documents = current.documents.filter((item) => item.id !== request.params.id);
     for (const source of current.sources) {
       source.documentCount = current.documents.filter((item) => item.sourceId === source.id && item.status === "ready").length;
     }
   });
+  if (error) return reply.code(error.code).send({ error: error.error });
   return reply.code(204).send();
 });
 
@@ -126,7 +162,7 @@ app.post<{ Body: SaveKnowledgeBaseRequest }>("/api/admin/knowledge-bases", async
   }
   const now = new Date().toISOString();
   const knowledgeBase = { ...input, name: input.name.trim(), id: crypto.randomUUID(), createdAt: now, updatedAt: now };
-  await updateStore((snapshot) => snapshot.knowledgeBases.unshift(knowledgeBase));
+  await updateStore((snapshot) => { snapshot.knowledgeBases.unshift(knowledgeBase); });
   return reply.code(201).send(knowledgeBase);
 });
 
@@ -201,7 +237,7 @@ app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", async (request, re
   const { name, url, kind, frequency } = request.body ?? {};
   if (!name?.trim() || !url?.trim()) return reply.code(400).send({ error: "name and url are required" });
   const source = { id: crypto.randomUUID(), name: name.trim(), url: url.trim(), kind, frequency, status: "已暂停" as const, documentCount: 0, updatedAt: null };
-  await updateStore((snapshot) => snapshot.sources.unshift(source));
+  await updateStore((snapshot) => { snapshot.sources.unshift(source); });
   return source;
 });
 
@@ -211,7 +247,7 @@ app.post<{ Params: { id: string } }>("/api/admin/sources/:id/sync", async (reque
   if (!source) return reply.code(404).send({ error: "source not found" });
   if (source.status !== "运行中") return reply.code(409).send({ error: "source is paused" });
   const task = { id: `CR-${Date.now().toString().slice(-8)}`, sourceId: source.id, sourceName: source.name, status: "等待中" as const, progress: 0, createdAt: new Date().toISOString() };
-  await updateStore((current) => current.tasks.unshift(task));
+  await updateStore((current) => { current.tasks.unshift(task); });
   await documentQueue.add("sync-source", { sourceId: source.id, taskId: task.id });
   return task;
 });
@@ -238,6 +274,14 @@ app.post<{ Body: { query?: string } }>("/api/search", async (request) => {
   }).filter((result) => result.score > 0).sort((a, b) => b.score - a.score);
   return { query, results, total: results.length };
 });
+
+app.addHook("onClose", async () => {
+  await documentQueue.close();
+  await queueConnection.quit();
+  await closeVectorStore();
+});
+process.once("SIGINT", () => void app.close());
+process.once("SIGTERM", () => void app.close());
 
 try {
   await app.listen({ host: "0.0.0.0", port });
