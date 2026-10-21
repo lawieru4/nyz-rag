@@ -64,21 +64,21 @@
 
 ## 三、检索与 RAG 问答
 
-- [ ] 在 `packages/processing` 定义统一 Provider 接口：`EmbeddingModel`（`embedDocuments` / `embedQuery`）、`ChatModel`（`streamChat`）、`RerankModel`（`rerank`）
-- [ ] 模型配置补充 Chat / Rerank 模型、温度、最大 Token，并接入运行时
-- [ ] 向量检索：按维度建立 HNSW 部分表达式索引（如 `((embedding::vector(1024))) WHERE dimensions = 1024`），或由知识库固定维度
-- [ ] 关键词检索：应用层生成重叠二元组写入 `tsvector`（`simple` 配置）替代字符串包含匹配；`pg_trgm` 需先验证当前 locale 下的中文效果，中文分词插件后续评估
-- [ ] 索引与查询统一做 NFKC 规范化（化学式上下标 `Na₀.₉` → `Na0.9`）
+- [x] 在 `packages/processing` 定义统一 Provider 接口（`models.ts`）：`EmbeddingModel`（`embedDocuments` / `embedQuery`）、`ChatModel`（`streamChat`，解析 SSE 与 usage）、`RerankModel`（`rerank`，兼容 `results` / `output.results`）
+- [x] 模型配置补充温度、最大 Token；Chat / Rerank 模型接入运行时（均使用默认供应商）
+- [ ] 向量检索：已实现（`vectorSearchChunks`，按 Embedding 模型与维度过滤，余弦相似度，知识库阈值过滤）；按维度建立 HNSW 部分表达式索引（如 `((embedding::vector(1024))) WHERE dimensions = 1024`）或由知识库固定维度尚未做，当前为精确扫描
+- [x] 关键词检索：应用层生成重叠二元组，经 `array_to_tsvector` 写入 `document_chunks.search_vector`（GIN），不经过数据库分词器；按最少见的 8 个词项筛选候选、BM25 重排。实测 `text[]` + GIN 慢约 40 倍，未采用。`pg_trgm`、中文分词插件后续按评估集再评估
+- [x] 索引与查询统一做 NFKC 规范化（化学式上下标 `Na₀.₉` → `na0.9`），词项规则变化后运行 `pnpm db:reindex-search`
 - [ ] 摘要级向量：对文章摘要单独向量化，支持先召回文章、再召回切片
 - [ ] 元数据过滤：发布时间、分类、标签、场景（固定词表）参与过滤；关键词、机构、期刊、项目负责人用于关键词加权
-- [ ] 回答引用同时标注 nyzdata 文章与原始转载源
+- [x] 回答引用同时标注 nyzdata 文章与原始转载源（`sources[].repostSource`，来自 `metadata.sourceMeta`）
 - [ ] 建立 50 条以上带标注的真实问题评估集，作为切片与检索调整的回归基线
-- [ ] 混合召回、合并去重、Rerank，参数读取知识库配置（向量/关键词 Top K 20，Rerank 后 5～8，送入模型 3～6）
-- [ ] Prompt 组装：使用知识库回答提示词与上下文最大长度
+- [x] 混合召回（向量/关键词各 20 条）、RRF 合并去重（前 30 条）、可选 Rerank，取知识库 `topK` 条送入模型；向量检索或 Rerank 失败时降级。问题改写未做
+- [x] Prompt 组装：知识库回答提示词 + 引用规则，参考资料按文章编号分组，按上下文最大长度截取
 - [ ] 会话接口：`POST /api/chat/sessions`、`GET /api/chat/sessions`、`GET /api/chat/sessions/:id/messages`
 - [ ] SSE 流式问答 `GET /api/chat/sessions/:id/stream`，事件 `token` / `source` / `done`
-- [ ] 记录 `message_sources`（chunk、score、rerank_score、引用顺序）及检索耗时、首 Token 耗时、总耗时
-- [ ] 用户端：流式输出、引用展示、重新生成、复制回答；管理端问答详情展示召回片段与耗时
+- [x] 记录引用来源（`message_sources`，含转载源）与召回片段（`message_chunks`：chunk、引用编号、RRF/向量/关键词/Rerank 得分、摘录），以及检索耗时、首 Token 耗时、总耗时与 Token 用量
+- [ ] 用户端：流式输出、引用展示、重新生成、复制回答；管理端问答详情展示召回片段与耗时。（引用编号与转载源展示、管理端召回片段与耗时已完成；流式输出、重新生成、复制未做）
 - [ ] `GET /api/documents/:id` 文章详情接口与用户端文章页
 
 ## 四、采集、清洗与切片

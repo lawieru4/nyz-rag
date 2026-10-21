@@ -7,12 +7,27 @@ export interface ApiHealth {
 export interface ChatRequest {
   question: string;
   conversationId?: string;
+  /** 使用的知识库配置；省略时使用最近创建的知识库，没有知识库时使用默认参数。 */
+  knowledgeBaseId?: string;
 }
+
+/** 回答引用的文章，顺序即回答中的引用编号 [1]、[2]…… */
+export interface ChatSource {
+  documentId: string;
+  title: string;
+  url: string;
+  /** 文章的原始转载源。 */
+  repostSource?: string;
+}
+
+/** generated：由 Chat 模型生成；extractive：未配置或调用失败时直接摘录原文片段。 */
+export type ChatAnswerMode = "generated" | "extractive";
 
 export interface ChatSuccessResponse {
   messageId: string;
   answer: string;
-  sources: Array<{ documentId: string; title: string; url: string }>;
+  answerMode: ChatAnswerMode;
+  sources: ChatSource[];
 }
 
 export interface ChatErrorResponse {
@@ -214,11 +229,36 @@ export type SaveKnowledgeBaseRequest = Omit<KnowledgeBaseRecord, "id" | "created
 
 export type ChatFeedbackRating = "positive" | "negative";
 
+/** 送入模型的召回片段及各路得分。 */
+export interface ChatRetrievedChunk {
+  chunkId: string;
+  documentId: string;
+  /** 对应回答中的引用编号。 */
+  citation: number;
+  title: string;
+  sectionPath: string[];
+  excerpt: string;
+  /** 合并（RRF）得分。 */
+  score: number;
+  vectorScore?: number;
+  keywordScore?: number;
+  rerankScore?: number;
+}
+
 export interface ChatLogRecord {
   id: string;
   question: string;
   answer: string;
-  sources: ChatSuccessResponse["sources"];
+  answerMode: ChatAnswerMode;
+  knowledgeBaseId?: string;
+  model?: string;
+  retrievalMs?: number;
+  firstTokenMs?: number;
+  totalMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  sources: ChatSource[];
+  chunks: ChatRetrievedChunk[];
   rating: ChatFeedbackRating | null;
   createdAt: string;
 }
@@ -240,6 +280,9 @@ export interface ModelProviderRecord {
   chatModel: string;
   embeddingModel: string;
   rerankModel: string;
+  /** Chat 模型的采样温度（0～2）与单次回答最大 Token 数。 */
+  temperature: number;
+  maxTokens: number;
   credentialEnv: string;
   enabled: boolean;
   isDefault: boolean;
@@ -247,4 +290,6 @@ export interface ModelProviderRecord {
   updatedAt: string;
 }
 
-export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt">;
+/** temperature 与 maxTokens 省略时新建使用默认值（0.3 / 1024），更新保持不变。 */
+export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt" | "temperature" | "maxTokens">
+  & Partial<Pick<ModelProviderRecord, "temperature" | "maxTokens">>;

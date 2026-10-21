@@ -1,8 +1,8 @@
 import type { ModelProviderRecord } from "@nyz-rag/types";
+import { providerCredential, providerUrl } from "./provider.js";
 
 const BATCH_SIZE = 32;
 const REQUEST_TIMEOUT_MS = 30_000;
-const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 
 export function selectEmbeddingProvider(providers: ModelProviderRecord[]): ModelProviderRecord {
   const candidates = providers.filter((provider) =>
@@ -17,30 +17,6 @@ export function selectEmbeddingProvider(providers: ModelProviderRecord[]): Model
   }
 
   return candidates[0];
-}
-
-function isKnownOpenAI(provider: ModelProviderRecord): boolean {
-  return [provider.name, provider.provider].some((value) => value.trim().toLowerCase() === "openai");
-}
-
-function getEmbeddingUrl(provider: ModelProviderRecord): string {
-  const configuredBaseUrl = provider.baseUrl.trim();
-  const baseUrl = configuredBaseUrl || (isKnownOpenAI(provider) ? OPENAI_API_BASE_URL : "");
-  if (!baseUrl) {
-    throw new Error("An embedding API base URL is required for this provider.");
-  }
-
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    throw new Error("The embedding API base URL is invalid.");
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("The embedding API base URL must use HTTP or HTTPS.");
-  }
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}/embeddings`;
-  return url.toString();
 }
 
 function readEmbeddingResponse(payload: unknown, expectedCount: number): number[][] {
@@ -79,11 +55,7 @@ function readEmbeddingResponse(payload: unknown, expectedCount: number): number[
 }
 
 export async function embedChunks(provider: ModelProviderRecord, inputs: string[]): Promise<number[][]> {
-  const credentialName = provider.credentialEnv.trim();
-  const apiKey = credentialName ? process.env[credentialName]?.trim() : undefined;
-  if (!apiKey) {
-    throw new Error("The configured embedding API credential is missing.");
-  }
+  const apiKey = providerCredential(provider, "embedding");
 
   const model = provider.embeddingModel.trim();
   if (!model) {
@@ -93,7 +65,7 @@ export async function embedChunks(provider: ModelProviderRecord, inputs: string[
     throw new Error("Embedding inputs must be strings.");
   }
 
-  const url = getEmbeddingUrl(provider);
+  const url = providerUrl(provider, "embeddings", "embedding");
   const vectors: number[][] = [];
   let dimensions: number | undefined;
 

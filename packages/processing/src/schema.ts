@@ -2,7 +2,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, customType, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus,
+  ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus,
 } from "@nyz-rag/types";
 
 // pgvector 列不限维度，以支持不同 Embedding 模型；drizzle 内置 vector 类型要求固定维度，因此自定义。
@@ -11,6 +11,9 @@ const vector = customType<{ data: number[]; driverData: string }>({
   toDriver: (value) => `[${value.join(",")}]`,
   fromDriver: (value) => JSON.parse(value) as number[],
 });
+
+// 只用于写入（array_to_tsvector）与 @@ 查询，不读取到应用层。
+const tsvector = customType<{ data: string; driverData: string }>({ dataType: () => "tsvector" });
 
 const timestamptz = () => timestamp({ withTimezone: true });
 
@@ -96,6 +99,9 @@ export const documentChunks = pgTable("document_chunks", {
   context: text().notNull().default(""),
   sectionPath: text().array().notNull().default(sql`'{}'::text[]`),
   contentType: text().$type<NonNullable<DocumentChunkRecord["contentType"]>>().notNull().default("text"),
+  // 关键词检索词项（NFKC 规范化后的中文重叠二元组与英文/数字词）：由 search-terms.ts 在应用层生成，
+  // 经 array_to_tsvector 写入，不经过数据库分词器，与 locale 无关。
+  searchVector: tsvector().notNull().default(sql`''::tsvector`),
   tokenEstimate: integer().notNull(),
   providerId: text(),
   model: text(),
@@ -104,6 +110,7 @@ export const documentChunks = pgTable("document_chunks", {
   embeddedAt: timestamptz(),
 }, (table) => [
   unique("document_chunks_document_id_chunk_index_key").on(table.documentId, table.chunkIndex),
+  index("document_chunks_search_vector_idx").using("gin", table.searchVector),
   check("document_chunks_chunk_index_check", sql`${table.chunkIndex} >= 0`),
   check("document_chunks_content_type_check", sql`${table.contentType} IN ('text', 'table')`),
   check("document_chunks_embedding_check", sql`(${table.embedding} IS NULL) = (${table.dimensions} IS NULL)`),
@@ -136,6 +143,8 @@ export const modelProviders = pgTable("model_providers", {
   chatModel: text().notNull(),
   embeddingModel: text().notNull().default(""),
   rerankModel: text().notNull().default(""),
+  temperature: doublePrecision().notNull().default(0.3),
+  maxTokens: integer().notNull().default(1024),
   credentialEnv: text().notNull(),
   enabled: boolean().notNull().default(false),
   isDefault: boolean().notNull().default(false),
@@ -143,17 +152,29 @@ export const modelProviders = pgTable("model_providers", {
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("model_providers_single_default_idx").on(table.isDefault).where(sql`${table.isDefault}`),
+  check("model_providers_temperature_check", sql`${table.temperature} BETWEEN 0 AND 2`),
+  check("model_providers_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
 ]);
 
 export const chatMessages = pgTable("chat_messages", {
   id: text().primaryKey(),
   question: text().notNull(),
   answer: text().notNull(),
+  answerMode: text().$type<ChatAnswerMode>().notNull().default("extractive"),
+  // 知识库可能被删除，不设外键。
+  knowledgeBaseId: text(),
+  model: text(),
+  retrievalMs: integer(),
+  firstTokenMs: integer(),
+  totalMs: integer(),
+  promptTokens: integer(),
+  completionTokens: integer(),
   rating: text().$type<ChatFeedbackRating>(),
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   index("chat_messages_created_at_idx").on(table.createdAt.desc()),
   check("chat_messages_rating_check", sql`${table.rating} IN ('positive', 'negative')`),
+  check("chat_messages_answer_mode_check", sql`${table.answerMode} IN ('generated', 'extractive')`),
 ]);
 
 // 文档删除后仍保留问答记录中的引用标题与链接，因此 document_id 不设外键。
@@ -163,4 +184,21 @@ export const messageSources = pgTable("message_sources", {
   documentId: text().notNull(),
   title: text().notNull(),
   url: text().notNull(),
+  repostSource: text(),
+}, (table) => [primaryKey({ columns: [table.messageId, table.position] })]);
+
+// 送入模型的召回片段；切片会随重新处理变化，因此保存摘录与章节，chunk_id 不设外键。
+export const messageChunks = pgTable("message_chunks", {
+  messageId: text().notNull().references(() => chatMessages.id, { onDelete: "cascade" }),
+  position: integer().notNull(),
+  chunkId: text().notNull(),
+  documentId: text().notNull(),
+  citation: integer().notNull(),
+  title: text().notNull(),
+  sectionPath: text().array().notNull().default(sql`'{}'::text[]`),
+  excerpt: text().notNull(),
+  score: doublePrecision().notNull(),
+  vectorScore: doublePrecision(),
+  keywordScore: doublePrecision(),
+  rerankScore: doublePrecision(),
 }, (table) => [primaryKey({ columns: [table.messageId, table.position] })]);

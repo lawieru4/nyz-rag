@@ -1,5 +1,9 @@
 export { closeDatabase, getDb, getPool, migrate, withTransaction, type Database, type Executor, type Transaction } from "./db.js";
 export { embedChunks, selectEmbeddingProvider } from "./embedding.js";
+export { hasProviderCredential } from "./provider.js";
+export * from "./models.js";
+export * from "./rag.js";
+export { normalizeSearchText, searchTerms } from "./search-terms.js";
 export * from "./chunking.js";
 export { articleDocumentUpdate, prepareDocument } from "./prepare.js";
 export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleListItem } from "./article/client.js";

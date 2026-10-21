@@ -3,7 +3,7 @@ import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
   closeDatabase, createArticleClient, embedChunks, embeddingInput, getProcessingInput, getSource, getSourceSyncState, getTask, listArticleVersions, listDocumentChunks,
-  listModelProviders, lockDocument, markSourceSynced, migrate, prepareDocument, replaceDocumentChunks, saveDocumentEmbeddings, saveSourceSyncState,
+  listModelProviders, lockDocument, markSourceSynced, migrate, prepareDocument, reindexChunkSearchTerms, replaceDocumentChunks, saveDocumentEmbeddings, saveSourceSyncState,
   selectEmbeddingProvider, setEmbeddingState, setProcessingState, syncArticles, updateTask, upsertDocument, withTransaction, type Executor,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
@@ -187,8 +187,20 @@ async function syncSource(sourceId: string, taskId: string) {
   }
 }
 
+/** 升级前已切片的数据没有关键词检索词项，启动时在后台补齐；也可手动运行 pnpm db:reindex-search。 */
+async function backfillSearchTerms() {
+  let cursor = "";
+  let batches = 0;
+  for (let last = await reindexChunkSearchTerms(cursor, 500, { onlyMissing: true }); last; last = await reindexChunkSearchTerms(cursor, 500, { onlyMissing: true })) {
+    cursor = last;
+    batches += 1;
+  }
+  if (batches) console.info(`Backfilled keyword search terms (${batches} batches)`);
+}
+
 const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
 await migrate();
+void backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error")));
 const worker = new Worker(queueName, async (job) => {
   if (job.name === "embed-document") {
     await embedDocument(job.data.documentId);

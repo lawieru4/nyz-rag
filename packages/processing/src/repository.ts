@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { ArticleDetail } from "./article/parse.js";
+import { embeddingInput } from "./chunking.js";
+import type { ChunkHit } from "./rag.js";
+import { searchTerms, termCounts } from "./search-terms.js";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
+  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, withTransaction, type Executor } from "./db.js";
-import { chatMessages, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, messageSources, modelProviders } from "./schema.js";
+import { chatMessages, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, messageChunks, messageSources, modelProviders } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -16,6 +19,10 @@ const paging = (page: number, pageSize: number) => ({ limit: pageSize, offset: (
 const contains = (haystack: SQL, needle: string) => sql`strpos(lower(${haystack}), ${needle}) > 0`;
 // 单表查询中 drizzle 渲染列名不带表名，相关子查询引用外层列时必须显式限定，否则会解析成子查询内的同名列。
 const outer = (table: string, column: string) => sql.raw(`"${table}"."${column}"`);
+// 逐个绑定参数的 text[]（drizzle 会把模板中的数组展开成参数列表）。
+const textArray = (values: string[]) => sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
+// 检索词项直接作为 tsvector 词位写入，不经过数据库分词器。
+const searchVector = (text: string) => sql`array_to_tsvector(${textArray(searchTerms(text))})`;
 
 // ---- 数据源与采集任务 ----
 
@@ -228,8 +235,24 @@ export async function replaceDocumentChunks(tx: Executor, documentId: string, up
   if (!chunks.length) return;
   await tx.insert(documentChunks).values(chunks.map((chunk) => ({
     id: chunk.id, documentId, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate,
-    context: chunk.context ?? "", sectionPath: chunk.sectionPath ?? [], contentType: chunk.contentType ?? "text",
+    context: chunk.context ?? "", sectionPath: chunk.sectionPath ?? [], contentType: chunk.contentType ?? "text", searchVector: searchVector(embeddingInput(chunk)),
   })));
+}
+
+/**
+ * 按当前规则重新生成一批切片的检索词项（不影响向量），返回最后处理的切片 ID；没有更多切片时返回 null。
+ * onlyMissing 只处理词项为空的切片（升级前已切片的数据）。
+ */
+export async function reindexChunkSearchTerms(afterId: string, batchSize: number, options: { onlyMissing?: boolean } = {}, db: Executor = getDb()): Promise<string | null> {
+  const rows = await db.select({ id: documentChunks.id, content: documentChunks.content, context: documentChunks.context })
+    .from(documentChunks).where(and(sql`${documentChunks.id} > ${afterId}`, options.onlyMissing ? sql`${documentChunks.searchVector} = ''::tsvector` : undefined))
+    .orderBy(asc(documentChunks.id)).limit(batchSize);
+  for (const row of rows) {
+    await db.update(documentChunks).set({ searchVector: searchVector(embeddingInput({ ...row, index: 0, tokenEstimate: 0 })) })
+      // 切片 ID 在重新切片后会复用，只在内容未变时写入，避免与并发的重新处理互相覆盖。
+      .where(and(eq(documentChunks.id, row.id), eq(documentChunks.content, row.content), eq(documentChunks.context, row.context)));
+  }
+  return rows.at(-1)?.id ?? null;
 }
 
 export async function setProcessingState(id: string, status: DocumentProcessingStatus, error: string | null = null, db: Executor = getDb()): Promise<void> {
@@ -274,17 +297,70 @@ export async function deleteDocument(id: string, db: Executor = getDb()): Promis
   return (await db.delete(documents).where(eq(documents.id, id)).returning({ id: documents.id })).length > 0;
 }
 
-/** 关键词匹配：每个命中的词计 1 分，按得分排序。返回正文开头用于摘要。 */
-export async function searchDocuments(terms: string[], options: { readyOnly: boolean; limit?: number }, db: Executor = getDb()) {
+// ---- 检索 ----
+
+const chunkHitColumns = {
+  chunkId: documentChunks.id, documentId: documentChunks.documentId, title: documents.title, url: documents.url,
+  repostSource: sql<string | null>`${documents.metadata}->'sourceMeta'->>'repostSource'`,
+  content: documentChunks.content, context: documentChunks.context, sectionPath: documentChunks.sectionPath, contentType: documentChunks.contentType,
+};
+
+const toChunkHit = ({ repostSource, score, ...row }: Omit<ChunkHit, "repostSource" | "score"> & { repostSource: string | null; score: number | string }): ChunkHit =>
+  ({ ...row, score: Number(score), ...(repostSource ? { repostSource } : {}) });
+
+// 候选只由最少见的若干词项筛选（出现在超过 10% 切片中的词项只参与打分），
+// 避免「如何」「电池」等常见二元组使候选覆盖大部分切片。
+const COMMON_TERM_RATIO = 0.1;
+const MAX_FILTER_TERMS = 8;
+// SQL 按命中词项的 IDF 之和预选候选，再在应用层按 BM25（词频 + 切片长度归一化）重排。
+const KEYWORD_CANDIDATES = 200;
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+// 词项只含中文、小写字母、数字和小数点，可直接作为带引号的 tsquery 词位。
+const tsqueryOf = (terms: string[]) => terms.map((term) => `'${term}'`).join(" | ");
+
+/** 关键词召回：候选为包含任一较少见词项的切片，按 BM25 打分。只检索 ready 文档。 */
+export async function keywordSearchChunks(terms: string[], limit: number, db: Executor = getDb()): Promise<ChunkHit[]> {
   if (!terms.length) return [];
-  const haystack = sql`${documents.title} || ' ' || ${documents.content}`;
-  const score = sql<number>`(${sql.join(terms.map((term) => sql`(${contains(haystack, term)})::int`), sql` + `)})`;
-  const query = db.select({ documentId: documents.id, title: documents.title, url: documents.url, head: sql<string>`left(${documents.content}, 200)`, score })
-    .from(documents)
-    .where(and(options.readyOnly ? eq(documents.status, "ready") : undefined, sql`${score} > 0`))
-    .orderBy(desc(score), desc(documents.updatedAt))
-    .$dynamic();
-  return options.limit ? query.limit(options.limit) : query;
+  const [{ total }] = await db.select({ total: count() }).from(documentChunks);
+  if (!total) return [];
+  const { rows } = await db.execute<{ term: string; df: number }>(sql`SELECT term, (SELECT count(*)::int FROM ${documentChunks} WHERE ${documentChunks.searchVector} @@ quote_literal(term)::tsquery) AS df FROM unnest(${textArray(terms)}) AS term`);
+  const weighted = rows.filter((row) => row.df > 0).map((row) => ({ term: row.term, df: row.df, idf: Math.log(1 + (total - row.df + 0.5) / (row.df + 0.5)) }))
+    .sort((a, b) => a.df - b.df);
+  if (!weighted.length) return [];
+  const rare = weighted.filter((row) => row.df <= Math.max(total * COMMON_TERM_RATIO, 50));
+  const filterTerms = (rare.length ? rare : weighted).slice(0, rare.length ? MAX_FILTER_TERMS : 3).map((row) => row.term);
+  const weights = sql.join(weighted.map((row) => sql.raw(row.idf.toFixed(6))), sql`, `);
+  const prescore = sql<number>`(SELECT coalesce(sum(q.weight), 0) FROM unnest(${textArray(weighted.map((row) => row.term))}, ARRAY[${weights}]::float8[]) AS q(term, weight) WHERE ${documentChunks.searchVector} @@ quote_literal(q.term)::tsquery)`;
+  const candidates = (await db.select({ ...chunkHitColumns, score: prescore }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
+    .where(and(eq(documents.status, "ready"), sql`${documentChunks.searchVector} @@ ${tsqueryOf(filterTerms)}::tsquery`))
+    .orderBy(desc(prescore), asc(documentChunks.documentId), asc(documentChunks.chunkIndex)).limit(KEYWORD_CANDIDATES)).map(toChunkHit);
+  if (!candidates.length) return [];
+
+  const counted = candidates.map((hit) => {
+    const counts = termCounts(embeddingInput({ ...hit, id: hit.chunkId, index: 0, tokenEstimate: 0 }));
+    let length = 0;
+    for (const value of counts.values()) length += value;
+    return { hit, counts, length };
+  });
+  const averageLength = counted.reduce((sum, item) => sum + item.length, 0) / counted.length || 1;
+  return counted.map(({ hit, counts, length }) => {
+    let score = 0;
+    for (const { term, idf } of weighted) {
+      const frequency = counts.get(term) ?? 0;
+      if (frequency) score += idf * frequency * (BM25_K1 + 1) / (frequency + BM25_K1 * (1 - BM25_B + BM25_B * length / averageLength));
+    }
+    return { ...hit, score };
+  }).sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+/** 向量召回：只比较同一 Embedding 模型与维度的切片，得分为余弦相似度。只检索 ready 文档。 */
+export async function vectorSearchChunks(vector: number[], model: string, limit: number, db: Executor = getDb()): Promise<ChunkHit[]> {
+  const distance = sql`${documentChunks.embedding} <=> ${`[${vector.join(",")}]`}::vector`;
+  const hits = await db.select({ ...chunkHitColumns, score: sql<number>`1 - (${distance})` }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
+    .where(and(eq(documents.status, "ready"), eq(documentChunks.model, model), eq(documentChunks.dimensions, vector.length), isNotNull(documentChunks.embedding)))
+    .orderBy(distance).limit(limit);
+  return hits.map(toChunkHit);
 }
 
 // ---- 知识库 ----
@@ -293,6 +369,11 @@ const toKnowledgeBase = (row: typeof knowledgeBases.$inferSelect): KnowledgeBase
 
 export async function listKnowledgeBases(db: Executor = getDb()): Promise<KnowledgeBaseRecord[]> {
   return (await db.select().from(knowledgeBases).orderBy(desc(knowledgeBases.createdAt))).map(toKnowledgeBase);
+}
+
+export async function getKnowledgeBase(id: string, db: Executor = getDb()): Promise<KnowledgeBaseRecord | null> {
+  const [row] = await db.select().from(knowledgeBases).where(eq(knowledgeBases.id, id));
+  return row ? toKnowledgeBase(row) : null;
 }
 
 // 只取可保存的字段，忽略请求体中的 id、时间戳等多余字段。
@@ -322,7 +403,7 @@ export async function listModelProviders(db: Executor = getDb()): Promise<ModelP
 
 const modelProviderValues = (input: SaveModelProviderRequest) => ({
   name: input.name, provider: input.provider, baseUrl: input.baseUrl, chatModel: input.chatModel, embeddingModel: input.embeddingModel,
-  rerankModel: input.rerankModel, credentialEnv: input.credentialEnv, enabled: input.enabled, isDefault: input.isDefault,
+  rerankModel: input.rerankModel, temperature: input.temperature, maxTokens: input.maxTokens, credentialEnv: input.credentialEnv, enabled: input.enabled, isDefault: input.isDefault,
 });
 
 export async function createModelProvider(input: SaveModelProviderRequest): Promise<ModelProviderRecord> {
@@ -347,22 +428,45 @@ export async function deleteModelProvider(id: string, db: Executor = getDb()): P
 
 // ---- 问答记录 ----
 
+// json_strip_nulls 省略为空的可选字段（转载源、各路得分）。
 const messageColumns = {
   ...getTableColumns(chatMessages),
   sources: sql<ChatLogRecord["sources"]>`COALESCE((
-    SELECT json_agg(json_build_object('documentId', ${messageSources.documentId}, 'title', ${messageSources.title}, 'url', ${messageSources.url}) ORDER BY ${messageSources.position})
+    SELECT json_agg(json_strip_nulls(json_build_object('documentId', ${messageSources.documentId}, 'title', ${messageSources.title}, 'url', ${messageSources.url},
+      'repostSource', ${messageSources.repostSource})) ORDER BY ${messageSources.position})
     FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")}), '[]')`,
+  chunks: sql<ChatLogRecord["chunks"]>`COALESCE((
+    SELECT json_agg(json_strip_nulls(json_build_object('chunkId', ${messageChunks.chunkId}, 'documentId', ${messageChunks.documentId}, 'citation', ${messageChunks.citation},
+      'title', ${messageChunks.title}, 'sectionPath', ${messageChunks.sectionPath}, 'excerpt', ${messageChunks.excerpt}, 'score', ${messageChunks.score},
+      'vectorScore', ${messageChunks.vectorScore}, 'keywordScore', ${messageChunks.keywordScore}, 'rerankScore', ${messageChunks.rerankScore})) ORDER BY ${messageChunks.position})
+    FROM ${messageChunks} WHERE ${messageChunks.messageId} = ${outer("chat_messages", "id")}), '[]')`,
 };
 
-const toChatLog = (row: typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"] }): ChatLogRecord => ({ ...row, createdAt: iso(row.createdAt)! });
+type ChatLogRow = typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"]; chunks: ChatLogRecord["chunks"] };
+const toChatLog = ({ rating, ...row }: ChatLogRow): ChatLogRecord => ({ ...compact<Omit<ChatLogRecord, "rating">>({ ...row, createdAt: iso(row.createdAt)! }), rating });
 
-type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating"> & { createdAt?: string; rating?: ChatFeedbackRating | null };
+type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating" | "answerMode" | "chunks"> & {
+  answerMode?: ChatLogRecord["answerMode"]; chunks?: ChatRetrievedChunk[]; createdAt?: string; rating?: ChatFeedbackRating | null;
+};
 
 export async function createChatMessage(log: NewChatMessage, db?: Executor): Promise<void> {
   const insert = async (tx: Executor) => {
-    await tx.insert(chatMessages).values({ id: log.id, question: log.question, answer: log.answer, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined });
-    if (!log.sources.length) return;
-    await tx.insert(messageSources).values(log.sources.map((source, position) => ({ messageId: log.id, position, documentId: source.documentId, title: source.title, url: source.url })));
+    await tx.insert(chatMessages).values({
+      id: log.id, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
+      retrievalMs: log.retrievalMs ?? null, firstTokenMs: log.firstTokenMs ?? null, totalMs: log.totalMs ?? null, promptTokens: log.promptTokens ?? null,
+      completionTokens: log.completionTokens ?? null, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined,
+    });
+    if (log.sources.length) {
+      await tx.insert(messageSources).values(log.sources.map((source, position) => ({
+        messageId: log.id, position, documentId: source.documentId, title: source.title, url: source.url, repostSource: source.repostSource ?? null,
+      })));
+    }
+    if (log.chunks?.length) {
+      await tx.insert(messageChunks).values(log.chunks.map((chunk, position) => ({
+        messageId: log.id, position, chunkId: chunk.chunkId, documentId: chunk.documentId, citation: chunk.citation, title: chunk.title, sectionPath: chunk.sectionPath,
+        excerpt: chunk.excerpt, score: chunk.score, vectorScore: chunk.vectorScore ?? null, keywordScore: chunk.keywordScore ?? null, rerankScore: chunk.rerankScore ?? null,
+      })));
+    }
   };
   if (db) await insert(db);
   else await withTransaction(insert);

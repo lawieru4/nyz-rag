@@ -63,13 +63,13 @@ pnpm dev
 - API 健康检查：http://localhost:3001/health
 - API 问答入口：`POST http://localhost:3001/api/chat`，JSON body 为 `{ "question": "..." }`
 
-当前问答接口使用关键词召回与文章片段拼接。网页采集、nyzdata 文章 API 增量同步、结构化切片和 Embedding/pgvector 写入已接通；混合检索、Rerank 和真实模型问答尚待开发，模块进度见 [模块清单](docs/module-status.md)。
+网页采集、nyzdata 文章 API 增量同步、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通；会话与流式输出尚待开发，模块进度见 [模块清单](docs/module-status.md)。
 
-API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。
+API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。问答使用同一默认供应商的 Chat 模型（温度与最大 Token 在模型配置中设置），未配置或调用失败时直接摘录原文片段；填写 Rerank 模型并在知识库中开启重排序后，召回结果会先经过重排序。检索参数（召回数量、相似度阈值、最大上下文、回答提示词）取最近创建的知识库，请求也可通过 `knowledgeBaseId` 指定。
 
 接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 写在 `.env` 的 `NYZ_ARTICLE_TOKEN`，只有 Worker 读取。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200）。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
 
-元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。从旧版 JSON 快照升级时执行一次 `pnpm db:import-snapshot [快照绝对路径]`（默认读取 `NYZ_STORE_PATH` 或 `.nyz-data/knowledge.json`），会同时迁移旧 `document_vectors` 表中的向量；可重复执行，已存在的记录会跳过。确认无误后可由管理员删除 `document_vectors` 表。
+元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。关键词检索的词项随切片生成；从旧版本升级时，Worker 启动会自动为已有切片补齐，修改词项规则后运行 `pnpm db:reindex-search` 全量重建。从旧版 JSON 快照升级时执行一次 `pnpm db:import-snapshot [快照绝对路径]`（默认读取 `NYZ_STORE_PATH` 或 `.nyz-data/knowledge.json`），会同时迁移旧 `document_vectors` 表中的向量；可重复执行，已存在的记录会跳过。确认无误后可由管理员删除 `document_vectors` 表。
 
 ### 共享 Docker 服务（默认）
 
@@ -108,4 +108,4 @@ REDIS_URL=redis://localhost:56380
 - `apps/api`：Fastify HTTP API
 - `apps/worker`：BullMQ 文档处理队列消费者
 - `packages/types`：前后端共享接口类型
-- `packages/processing`：API/Worker 共用的数据库访问（Drizzle）、文章接口与解析、结构化切片和 Embedding
+- `packages/processing`：API/Worker 共用的数据库访问（Drizzle）、文章接口与解析、结构化切片、模型接口（Embedding/Chat/Rerank）和混合检索

@@ -3,17 +3,20 @@ import Fastify from "fastify";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  closeDatabase, createChatMessage, createKnowledgeBase, createModelProvider, createSource, createTask, deleteDocument, deleteModelProvider, getDocument,
-  getDocumentSummary, getSource, getStats, listChatMessages, listDocuments, listKnowledgeBases, listModelProviders, listSources, listTasks, migrate,
-  rateChatMessage, searchDocuments, selectEmbeddingProvider, setEmbeddingState, setProcessingState, updateKnowledgeBase, updateModelProvider, updateSourceStatus,
+  buildAnswerContext, buildChatMessages, closeDatabase, createChatMessage, createChatModel, createEmbeddingModel, createKnowledgeBase, createModelProvider, createRerankModel,
+  createSource, createTask, DEFAULT_RETRIEVAL_SETTINGS, deleteDocument, deleteModelProvider, extractiveAnswer, getDocument, getDocumentSummary, getKnowledgeBase, getSource,
+  getStats, hasProviderCredential, keywordSearchChunks, listChatMessages, listDocuments, listKnowledgeBases, listModelProviders, listSources, listTasks, migrate,
+  rateChatMessage, retrievedChunkRecords, retrieve, searchTerms, selectDefaultProvider, selectEmbeddingProvider, setEmbeddingState, setProcessingState, updateKnowledgeBase,
+  updateModelProvider, updateSourceStatus, vectorSearchChunks,
 } from "@nyz-rag/processing";
-import type { ApiHealth, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, DocumentSummary, KnowledgeOverview, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
+import type { ApiHealth, ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, DocumentSummary, KnowledgeOverview, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.API_PORT ?? 3000);
 const queueConnection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
 const documentQueue = new Queue(process.env.DOCUMENT_QUEUE_NAME ?? "document-processing", { connection: queueConnection });
-const queryTerms = (value: string) => value.toLowerCase().match(/[a-z0-9]+|[\u4e00-\u9fff]{2}/gi) ?? [];
+const MAX_QUESTION_LENGTH = 2000;
+const elapsed = (start: number) => Math.round(performance.now() - start);
 const pageParams = (page: string, pageSize: string) => ({ page: Math.max(1, Number.parseInt(page, 10) || 1), pageSize: Math.min(100, Math.max(1, Number.parseInt(pageSize, 10) || 20)) });
 const documentJobOptions = (documentId: string) => ({ jobId: `document-${documentId}`, removeOnComplete: true, removeOnFail: true });
 
@@ -32,6 +35,12 @@ function modelProviderError(input: SaveModelProviderRequest | undefined) {
   if (!input?.name?.trim() || !input.provider?.trim() || !input.chatModel?.trim() || !input.credentialEnv?.trim() || !/^[A-Z][A-Z0-9_]*$/.test(input.credentialEnv)) {
     return "name, provider, chatModel and a valid credential environment variable are required";
   }
+  if (input.temperature !== undefined && (typeof input.temperature !== "number" || !Number.isFinite(input.temperature) || input.temperature < 0 || input.temperature > 2)) {
+    return "temperature must be between 0 and 2";
+  }
+  if (input.maxTokens !== undefined && (!Number.isInteger(input.maxTokens) || input.maxTokens < 1 || input.maxTokens > 32768)) {
+    return "maxTokens must be an integer between 1 and 32768";
+  }
   if (input.baseUrl) {
     try { if (!["http:", "https:"].includes(new URL(input.baseUrl).protocol)) throw new Error(); }
     catch { return "baseUrl must be a valid http(s) URL"; }
@@ -47,18 +56,68 @@ app.get<{ Reply: ApiHealth }>("/health", async () => ({
   timestamp: new Date().toISOString(),
 }));
 
+// 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用默认供应商的 Chat 模型回答；
+// 未配置 Chat 模型、密钥缺失或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
 app.post<{ Body: ChatRequest; Reply: ChatResponse }>("/api/chat", async (request, reply) => {
   const question = request.body?.question?.trim();
   if (!question) {
     return reply.code(400).send({ error: "question is required" });
   }
+  if (question.length > MAX_QUESTION_LENGTH) return reply.code(400).send({ error: `question must be at most ${MAX_QUESTION_LENGTH} characters` });
 
-  const matches = await searchDocuments(queryTerms(question), { readyOnly: true, limit: 3 });
-  const answer = matches.length ? `根据知识库中的《${matches[0].title}》，${matches[0].head.slice(0, 180)}${matches[0].head.length > 180 ? "……" : ""}` : "知识库中暂未找到与问题直接匹配的文章，请尝试更具体的关键词。";
-  const sources = matches.map(({ documentId, title, url }) => ({ documentId, title, url }));
+  const started = performance.now();
+  const knowledgeBaseId = request.body.knowledgeBaseId;
+  const knowledgeBase = knowledgeBaseId ? await getKnowledgeBase(knowledgeBaseId) : (await listKnowledgeBases())[0] ?? null;
+  if (knowledgeBaseId && !knowledgeBase) return reply.code(404).send({ error: "knowledge base not found" });
+  const settings = knowledgeBase ?? DEFAULT_RETRIEVAL_SETTINGS;
+  const defaultProvider = selectDefaultProvider(await listModelProviders());
+  const provider = defaultProvider && hasProviderCredential(defaultProvider) ? defaultProvider : null;
+  const embedding = provider?.embeddingModel.trim() ? createEmbeddingModel(provider) : null;
+  const reranker = provider?.rerankModel.trim() ? createRerankModel(provider) : null;
+
+  const { chunks, warnings } = await retrieve(question, settings, {
+    keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit),
+    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedding.embedQuery(text), embedding.model, limit) : undefined,
+    rerank: reranker ? (query, documents, topN) => reranker.rerank(query, documents, topN) : undefined,
+  });
+  for (const warning of warnings) request.log.warn(warning);
+  const retrievalMs = elapsed(started);
+  const context = buildAnswerContext(chunks, settings.maxContextLength);
+
+  let answer = extractiveAnswer(context);
+  let answerMode: ChatAnswerMode = "extractive";
+  const usage: { model?: string; firstTokenMs?: number; promptTokens?: number; completionTokens?: number } = {};
+  if (context.chunks.length && provider?.chatModel.trim()) {
+    const chat = createChatModel(provider);
+    try {
+      let text = "";
+      for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context))) {
+        if (chunk.type === "token") {
+          usage.firstTokenMs ??= elapsed(started);
+          text += chunk.text;
+        } else {
+          usage.promptTokens = chunk.promptTokens;
+          usage.completionTokens = chunk.completionTokens;
+        }
+      }
+      if (text.trim()) {
+        answer = text.trim();
+        answerMode = "generated";
+        usage.model = chat.model;
+      } else {
+        request.log.warn("Chat model returned an empty answer; using extractive answer");
+      }
+    } catch (error) {
+      request.log.warn(`Chat model failed; using extractive answer: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
+
   const messageId = crypto.randomUUID();
-  await createChatMessage({ id: messageId, question, answer, sources });
-  return { messageId, answer, sources };
+  await createChatMessage({
+    id: messageId, question, answer, answerMode, knowledgeBaseId: knowledgeBase?.id, ...usage, retrievalMs, totalMs: elapsed(started),
+    sources: context.sources, chunks: retrievedChunkRecords(context),
+  });
+  return { messageId, answer, answerMode, sources: context.sources };
 });
 
 app.get<{ Querystring: { query?: string; rating?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", async (request): Promise<ChatLogListResponse> => {
@@ -202,10 +261,15 @@ app.patch<{ Params: { id: string }; Body: UpdateSourceStatusRequest }>("/api/adm
   return updated;
 });
 
+// 只做关键词检索，不调用模型；每篇文章取得分最高的切片作为摘录。
 app.post<{ Body: { query?: string } }>("/api/search", async (request) => {
-  const query = request.body?.query?.trim() ?? "";
-  const results: SearchResult[] = (await searchDocuments(queryTerms(query), { readyOnly: false }))
-    .map(({ head, ...result }) => ({ ...result, excerpt: head.slice(0, 160) }));
+  const query = request.body?.query?.trim().slice(0, MAX_QUESTION_LENGTH) ?? "";
+  const results: SearchResult[] = [];
+  for (const hit of await keywordSearchChunks(searchTerms(query).slice(0, 64), 100)) {
+    if (results.length >= 20) break;
+    if (results.some((result) => result.documentId === hit.documentId)) continue;
+    results.push({ documentId: hit.documentId, title: hit.title, url: hit.url, excerpt: hit.content.slice(0, 160), score: hit.score });
+  }
   return { query, results, total: results.length };
 });
 

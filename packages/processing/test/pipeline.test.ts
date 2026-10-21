@@ -22,12 +22,13 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
 
   let mode: "ok" | "failure" | "slow" = "ok";
   let requested = 0;
+  const chatPrompts: string[] = [];
   // 模拟 nyzdata 文章接口：两篇文章，第二篇的标题与 updateTime 可在测试中修改。
   const articleToken = "integration-article-token";
   const article = (key: string, title: string, updateTime: number) => ({
     _key: key, title, updateTime, createTime: 1, summary: "摘要", tagName: "科研", tagArray: [{ name: "钠电" }], creator: { nickName: "作者" },
     content: JSON.stringify({ type: "doc", content: [
-      { type: "blockquote", content: [{ type: "paragraph", content: [{ type: "text", text: "作者：qwen3.6-plus" }, { type: "hardBreak" }, { type: "text", text: "关键词：[[钠离子电池]]" }] }] },
+      { type: "blockquote", content: [{ type: "paragraph", content: [{ type: "text", text: "作者：qwen3.6-plus" }, { type: "hardBreak" }, { type: "text", text: "转载源：测试公众号" }, { type: "hardBreak" }, { type: "text", text: "关键词：[[钠离子电池]]" }] }] },
       { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "【结论】" }] },
       { type: "paragraph", content: [{ type: "text", text: `${title}的正文结论。` }] },
       { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "延伸思考" }] },
@@ -50,10 +51,21 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       }
       return;
     }
-    if (request.url !== "/v1/embeddings") { response.writeHead(404).end(); return; }
+    if (request.url !== "/v1/embeddings" && request.url !== "/v1/chat/completions") { response.writeHead(404).end(); return; }
     assert.equal(request.headers.authorization, "Bearer integration-test-key");
     let body = "";
     for await (const chunk of request) body += chunk;
+    if (request.url === "/v1/chat/completions") {
+      // 模拟流式 Chat：回答引用参考资料中的第一篇文章。
+      const { messages, stream } = JSON.parse(body) as { messages: Array<{ role: string; content: string }>; stream: boolean };
+      assert.equal(stream, true);
+      chatPrompts.push(messages[1].content);
+      const title = messages[1].content.match(/《(.+?)》/)?.[1] ?? "";
+      response.setHeader("content-type", "text/event-stream");
+      for (const text of ["根据", `《${title}》[1]。`]) response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+      response.end(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`);
+      return;
+    }
     const { input } = JSON.parse(body) as { input: string[] };
     requested += 1;
     if (mode === "failure") { response.writeHead(503).end("do-not-leak-provider-body"); return; }
@@ -114,9 +126,12 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       return id;
     });
     await createModelProvider({ name: "Local test", provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, embeddingModel: "test-embedding", chatModel: "test-chat", rerankModel: "", credentialEnv: "TEST_EMBEDDING_KEY", enabled: true, isDefault: true });
+    // 模拟升级前已切片的数据：Worker 启动时应补齐关键词检索词项。
+    await getPool().query("UPDATE document_chunks SET search_vector = ''::tsvector WHERE document_id = $1", [documentId]);
     start("apps/api/src/index.ts");
     start("apps/worker/src/index.ts");
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
+    await until(async () => (await getPool().query("SELECT 1 FROM document_chunks WHERE document_id = $1 AND search_vector <> ''::tsvector", [documentId])).rowCount === 2);
 
     assert.equal((await post("embed")).status, 202);
     await waitEmbedding("ready");
@@ -149,12 +164,22 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(rows.length, 1, "reprocessing removes obsolete chunk vectors");
 
     const chat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "vector test" }) })).json();
-    assert.match(chat.answer, /Vector test/);
+    assert.equal(chat.answerMode, "generated", output);
+    assert.equal(chat.answer, "根据《Vector test》[1]。");
     assert.equal(chat.sources[0].documentId, documentId);
+    assert.match(chatPrompts[0], /\[1\] 《Vector test》\nFirst chunk\. Second chunk\.\n\n问题：vector test$/);
+    const search = await (await fetch(`${apiBase}/api/search`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ query: "Second chunk" }) })).json();
+    assert.equal(search.results[0].documentId, documentId);
     assert.equal((await fetch(`${apiBase}/api/messages/${chat.messageId}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating: "positive" }) })).status, 204);
     const logs = await (await fetch(`${apiBase}/api/admin/chat-logs?rating=rated&query=vector`)).json();
     assert.equal(logs.total, 1);
     assert.deepEqual(logs.logs[0].sources, chat.sources);
+    assert.equal(logs.logs[0].model, "test-chat");
+    assert.equal(logs.logs[0].promptTokens, 20);
+    assert.equal(typeof logs.logs[0].retrievalMs, "number");
+    assert.equal(logs.logs[0].chunks.length, 1);
+    assert.equal(logs.logs[0].chunks[0].vectorScore, 1, "the query vector matches the stored chunk vector");
+    assert.ok(logs.logs[0].chunks[0].keywordScore > 0);
     const overview = await (await fetch(`${apiBase}/api/knowledge`)).json();
     assert.equal(overview.sources[0].documentCount, 1);
     assert.equal(overview.stats.documents, 1);
@@ -190,6 +215,9 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(detail.externalId, "a1");
     assert.deepEqual(detail.tags, ["钠电"]);
     assert.equal(detail.chunks[0].sectionPath[0], "【结论】");
+
+    const articleChat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ question: "文章一的正文结论" }) })).json();
+    assert.deepEqual(articleChat.sources.find((source: { title: string }) => source.title === "文章一"), { documentId: synced[0].id, title: "文章一", url: detail.url, repostSource: "测试公众号" });
 
     articles.set("a2", article("a2", "文章二（更新）", 200));
     articleRequests.length = 0;
