@@ -6,7 +6,6 @@ export interface ApiHealth {
 
 export interface ChatRequest {
   question: string;
-  conversationId?: string;
   /** 使用的知识库配置；省略时使用最近创建的知识库，没有知识库时使用默认参数。 */
   knowledgeBaseId?: string;
 }
@@ -35,6 +34,60 @@ export interface ChatErrorResponse {
 }
 
 export type ChatResponse = ChatSuccessResponse | ChatErrorResponse;
+
+export interface ChatSessionRecord {
+  id: string;
+  /** 默认取第一个问题的前 40 字。 */
+  title: string;
+  /** 会话固定使用的知识库；省略时每次使用最近创建的知识库。 */
+  knowledgeBaseId?: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateChatSessionRequest {
+  title?: string;
+  knowledgeBaseId?: string;
+}
+
+export interface ChatSessionListResponse {
+  sessions: ChatSessionRecord[];
+  total: number;
+}
+
+/** 会话中的一轮问答（用户端视图，不含召回片段与耗时）。 */
+export interface ChatSessionMessage {
+  id: string;
+  question: string;
+  answer: string;
+  answerMode: ChatAnswerMode;
+  sources: ChatSource[];
+  rating: ChatFeedbackRating | null;
+  createdAt: string;
+}
+
+export interface ChatSessionMessagesResponse {
+  session: ChatSessionRecord;
+  messages: ChatSessionMessage[];
+}
+
+/** 流式问答请求：提出新问题，或重新生成会话中最后一轮回答（regenerate 为该轮的 messageId）。 */
+export interface ChatStreamRequest {
+  question?: string;
+  regenerate?: string;
+}
+
+/**
+ * SSE 事件：检索完成后先发送全部 source（citation 即回答中的编号），模型生成时逐段发送 token，
+ * 最后发送 done；done.answer 为最终回答，模型中途失败降级为原文摘录时与已发送的 token 不同，以 done 为准。
+ * 保存前出错时发送 error，不再发送 done。
+ */
+export type ChatStreamEvent =
+  | { event: "source"; data: ChatSource & { citation: number } }
+  | { event: "token"; data: { content: string } }
+  | { event: "done"; data: ChatSessionMessage }
+  | { event: "error"; data: { error: string } };
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
 export type EmbeddingStatus = "pending" | "queued" | "processing" | "ready" | "failed";
@@ -247,6 +300,9 @@ export interface ChatRetrievedChunk {
 
 export interface ChatLogRecord {
   id: string;
+  sessionId?: string;
+  /** 被“重新生成”替换的时间；替换后不再出现在会话中，但保留在问答记录里。 */
+  supersededAt?: string;
   question: string;
   answer: string;
   answerMode: ChatAnswerMode;

@@ -5,12 +5,13 @@ import { embeddingInput } from "./chunking.js";
 import type { ChunkHit } from "./rag.js";
 import { searchTerms, termCounts } from "./search-terms.js";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
+  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
+  ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, withTransaction, type Executor } from "./db.js";
-import { chatMessages, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, messageChunks, messageSources, modelProviders } from "./schema.js";
+import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, messageChunks, messageSources, modelProviders } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -426,15 +427,58 @@ export async function deleteModelProvider(id: string, db: Executor = getDb()): P
   return (await db.delete(modelProviders).where(eq(modelProviders.id, id)).returning({ id: modelProviders.id })).length > 0;
 }
 
+// ---- 问答会话 ----
+
+const SESSION_TITLE_LENGTH = 40;
+const sessionTitle = (question: string) => {
+  const text = question.replace(/\s+/g, " ").trim();
+  return text.length > SESSION_TITLE_LENGTH ? `${text.slice(0, SESSION_TITLE_LENGTH)}…` : text;
+};
+
+const sessionColumns = {
+  ...getTableColumns(chatSessions),
+  messageCount: sql<number>`(SELECT count(*)::int FROM ${chatMessages} WHERE ${chatMessages.sessionId} = ${outer("chat_sessions", "id")} AND ${chatMessages.supersededAt} IS NULL)`,
+};
+
+const toChatSession = (row: typeof chatSessions.$inferSelect & { messageCount: number }): ChatSessionRecord => compact<ChatSessionRecord>({
+  ...row, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!,
+});
+
+export async function createChatSession(input: { title?: string; knowledgeBaseId?: string }, db: Executor = getDb()): Promise<ChatSessionRecord> {
+  const id = randomUUID();
+  await db.insert(chatSessions).values({ id, title: sessionTitle(input.title ?? ""), knowledgeBaseId: input.knowledgeBaseId ?? null });
+  return (await getChatSession(id, db))!;
+}
+
+export async function getChatSession(id: string, db: Executor = getDb()): Promise<ChatSessionRecord | null> {
+  const [row] = await db.select(sessionColumns).from(chatSessions).where(eq(chatSessions.id, id));
+  return row ? toChatSession(row) : null;
+}
+
+export async function listChatSessions(filter: { page: number; pageSize: number }, db: Executor = getDb()): Promise<ChatSessionListResponse> {
+  const { limit, offset } = paging(filter.page, filter.pageSize);
+  const [rows, [{ total }]] = await Promise.all([
+    db.select(sessionColumns).from(chatSessions).orderBy(desc(chatSessions.updatedAt), asc(chatSessions.id)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(chatSessions),
+  ]);
+  return { sessions: rows.map(toChatSession), total };
+}
+
+export async function deleteChatSession(id: string, db: Executor = getDb()): Promise<boolean> {
+  return (await db.delete(chatSessions).where(eq(chatSessions.id, id)).returning({ id: chatSessions.id })).length > 0;
+}
+
 // ---- 问答记录 ----
 
 // json_strip_nulls 省略为空的可选字段（转载源、各路得分）。
-const messageColumns = {
-  ...getTableColumns(chatMessages),
-  sources: sql<ChatLogRecord["sources"]>`COALESCE((
+const messageSourcesColumn = sql<ChatLogRecord["sources"]>`COALESCE((
     SELECT json_agg(json_strip_nulls(json_build_object('documentId', ${messageSources.documentId}, 'title', ${messageSources.title}, 'url', ${messageSources.url},
       'repostSource', ${messageSources.repostSource})) ORDER BY ${messageSources.position})
-    FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")}), '[]')`,
+    FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")}), '[]')`;
+
+const messageColumns = {
+  ...getTableColumns(chatMessages),
+  sources: messageSourcesColumn,
   chunks: sql<ChatLogRecord["chunks"]>`COALESCE((
     SELECT json_agg(json_strip_nulls(json_build_object('chunkId', ${messageChunks.chunkId}, 'documentId', ${messageChunks.documentId}, 'citation', ${messageChunks.citation},
       'title', ${messageChunks.title}, 'sectionPath', ${messageChunks.sectionPath}, 'excerpt', ${messageChunks.excerpt}, 'score', ${messageChunks.score},
@@ -443,16 +487,36 @@ const messageColumns = {
 };
 
 type ChatLogRow = typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"]; chunks: ChatLogRecord["chunks"] };
-const toChatLog = ({ rating, ...row }: ChatLogRow): ChatLogRecord => ({ ...compact<Omit<ChatLogRecord, "rating">>({ ...row, createdAt: iso(row.createdAt)! }), rating });
+const toChatLog = ({ rating, ...row }: ChatLogRow): ChatLogRecord => ({
+  ...compact<Omit<ChatLogRecord, "rating">>({ ...row, supersededAt: iso(row.supersededAt), createdAt: iso(row.createdAt)! }), rating,
+});
 
-type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating" | "answerMode" | "chunks"> & {
+type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating" | "answerMode" | "chunks" | "supersededAt"> & {
   answerMode?: ChatLogRecord["answerMode"]; chunks?: ChatRetrievedChunk[]; createdAt?: string; rating?: ChatFeedbackRating | null;
+  /** 重新生成时被替换的消息；必须是同一会话中仍有效的消息。 */
+  supersedes?: string;
 };
 
+export class ChatConflictError extends Error {}
+
+/** 保存一轮问答；属于会话时同时更新会话时间（标题为空时取问题），重新生成时标记被替换的消息。 */
 export async function createChatMessage(log: NewChatMessage, db?: Executor): Promise<void> {
   const insert = async (tx: Executor) => {
+    if (log.supersedes) {
+      if (!log.sessionId) throw new ChatConflictError("Only session messages can be regenerated.");
+      const replaced = await tx.update(chatMessages).set({ supersededAt: sql`now()` })
+        .where(and(eq(chatMessages.id, log.supersedes), eq(chatMessages.sessionId, log.sessionId), isNull(chatMessages.supersededAt)))
+        .returning({ id: chatMessages.id });
+      if (!replaced.length) throw new ChatConflictError("The message has already been regenerated or removed.");
+    }
+    if (log.sessionId) {
+      const updated = await tx.update(chatSessions)
+        .set({ updatedAt: sql`now()`, title: sql`CASE WHEN ${chatSessions.title} = '' THEN ${sessionTitle(log.question)} ELSE ${chatSessions.title} END` })
+        .where(eq(chatSessions.id, log.sessionId)).returning({ id: chatSessions.id });
+      if (!updated.length) throw new ChatConflictError("The chat session has been deleted.");
+    }
     await tx.insert(chatMessages).values({
-      id: log.id, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
+      id: log.id, sessionId: log.sessionId ?? null, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
       retrievalMs: log.retrievalMs ?? null, firstTokenMs: log.firstTokenMs ?? null, totalMs: log.totalMs ?? null, promptTokens: log.promptTokens ?? null,
       completionTokens: log.completionTokens ?? null, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined,
     });
@@ -487,6 +551,15 @@ export async function listChatMessages(filter: { query?: string; rating?: string
     db.select({ total: count() }).from(chatMessages).where(where),
   ]);
   return { logs: rows.map(toChatLog), total };
+}
+
+/** 会话中仍有效的问答，按时间正序。 */
+export async function listSessionMessages(sessionId: string, db: Executor = getDb()): Promise<ChatSessionMessage[]> {
+  const rows = await db.select({
+    id: chatMessages.id, question: chatMessages.question, answer: chatMessages.answer, answerMode: chatMessages.answerMode, rating: chatMessages.rating,
+    createdAt: chatMessages.createdAt, sources: messageSourcesColumn,
+  }).from(chatMessages).where(and(eq(chatMessages.sessionId, sessionId), isNull(chatMessages.supersededAt))).orderBy(asc(chatMessages.createdAt), asc(chatMessages.id));
+  return rows.map((row) => ({ ...row, createdAt: iso(row.createdAt)! }));
 }
 
 export async function rateChatMessage(id: string, rating: ChatFeedbackRating, db: Executor = getDb()): Promise<boolean> {

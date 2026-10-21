@@ -23,6 +23,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   let mode: "ok" | "failure" | "slow" = "ok";
   let requested = 0;
   const chatPrompts: string[] = [];
+  const chatRequests: Array<Array<{ role: string; content: string }>> = [];
+  let chatAborted = false;
   // 模拟 nyzdata 文章接口：两篇文章，第二篇的标题与 updateTime 可在测试中修改。
   const articleToken = "integration-article-token";
   const article = (key: string, title: string, updateTime: number) => ({
@@ -59,9 +61,17 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       // 模拟流式 Chat：回答引用参考资料中的第一篇文章。
       const { messages, stream } = JSON.parse(body) as { messages: Array<{ role: string; content: string }>; stream: boolean };
       assert.equal(stream, true);
-      chatPrompts.push(messages[1].content);
-      const title = messages[1].content.match(/《(.+?)》/)?.[1] ?? "";
+      chatRequests.push(messages);
+      chatPrompts.push(messages.at(-1)!.content);
+      const title = messages.at(-1)!.content.match(/《(.+?)》/)?.[1] ?? "";
       response.setHeader("content-type", "text/event-stream");
+      if (messages.at(-1)!.content.endsWith("问题：slow question")) {
+        // 输出第一段后挂起，等待 API 在客户端断开时中止请求。
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "部分" } }] })}\n\n`);
+        await once(response, "close");
+        chatAborted = true;
+        return;
+      }
       for (const text of ["根据", `《${title}》[1]。`]) response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
       response.end(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 20, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`);
       return;
@@ -180,6 +190,51 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(logs.logs[0].chunks.length, 1);
     assert.equal(logs.logs[0].chunks[0].vectorScore, 1, "the query vector matches the stored chunk vector");
     assert.ok(logs.logs[0].chunks[0].keywordScore > 0);
+
+    // 会话与 SSE 流式问答：source → token → done；追问带上历史；重新生成只能针对最后一轮，被替换的回答保留在问答记录中。
+    async function stream(sessionId: string, body: object) {
+      const response = await fetch(`${apiBase}/api/chat/sessions/${sessionId}/stream`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") ?? "", /^text\/event-stream/);
+      return (await response.text()).split("\n\n").filter((block) => block.startsWith("event: ")).map((block) => {
+        const [event, data] = block.split("\n");
+        return { event: event.slice("event: ".length), data: JSON.parse(data.slice("data: ".length)) };
+      });
+    }
+    const created = await fetch(`${apiBase}/api/chat/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(created.status, 201);
+    const session = await created.json();
+    const first = await stream(session.id, { question: "vector test" });
+    assert.deepEqual(first.map((item) => item.event), ["source", "token", "token", "done"]);
+    assert.deepEqual(first[0].data, { ...chat.sources[0], citation: 1 });
+    assert.equal(first[1].data.content, "根据");
+    assert.equal(first[3].data.answer, "根据《Vector test》[1]。");
+    const second = await stream(session.id, { question: "它的第二段呢？" });
+    assert.equal(second.at(-1)!.event, "done");
+    assert.deepEqual(chatRequests.at(-1)!.slice(1, 3), [{ role: "user", content: "vector test" }, { role: "assistant", content: "根据《Vector test》。" }]);
+    const regenerated = await stream(session.id, { regenerate: second.at(-1)!.data.id });
+    assert.equal(regenerated.at(-1)!.data.question, "它的第二段呢？");
+    assert.equal(chatRequests.at(-1)!.length, 4, "regeneration excludes the replaced turn from the history");
+    const regenerateFirst = await fetch(`${apiBase}/api/chat/sessions/${session.id}/stream`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ regenerate: first[3].data.id }) });
+    assert.equal(regenerateFirst.status, 409);
+    const sessionMessages = await (await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).json();
+    assert.deepEqual(sessionMessages.messages.map((message: { id: string }) => message.id), [first[3].data.id, regenerated.at(-1)!.data.id]);
+    assert.equal(sessionMessages.session.title, "vector test");
+    const sessions = await (await fetch(`${apiBase}/api/chat/sessions`)).json();
+    assert.deepEqual([sessions.total, sessions.sessions[0].messageCount], [1, 2]);
+    const followUpLogs = await (await fetch(`${apiBase}/api/admin/chat-logs?query=${encodeURIComponent("第二段")}`)).json();
+    assert.deepEqual(followUpLogs.logs.map((log: { sessionId: string; supersededAt?: string }) => [log.sessionId, Boolean(log.supersededAt)]), [[session.id, false], [session.id, true]]);
+    const slow = new AbortController();
+    const slowResponse = await fetch(`${apiBase}/api/chat/sessions/${session.id}/stream`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "slow question" }), signal: slow.signal });
+    const reader = slowResponse.body!.getReader();
+    let received = "";
+    while (!received.includes("event: token")) received += new TextDecoder().decode((await reader.read()).value);
+    slow.abort();
+    await until(async () => chatAborted);
+    await delay(200);
+    assert.equal((await (await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).json()).messages.length, 2, "an aborted answer is not saved");
+    assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}`, { method: "DELETE" })).status, 204);
+    assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).status, 404);
     const overview = await (await fetch(`${apiBase}/api/knowledge`)).json();
     assert.equal(overview.sources[0].documentCount, 1);
     assert.equal(overview.stats.documents, 1);

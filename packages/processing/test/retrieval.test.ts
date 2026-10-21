@@ -87,6 +87,16 @@ test("answer context groups citations by article and respects the length limit",
   assert.match(system.content, /\[1\]/);
   assert.match(user.content, /^参考资料：\n\n\[1\] 《文章一》 章节：结论\n甲+/);
   assert.match(user.content, /问题：如何提升寿命？$/);
+  assert.doesNotMatch(system.content, /之前的对话/);
+
+  const history = Array.from({ length: 4 }, (_, index) => ({ question: `问题${index}`, answer: `回答${index}[1][2]${index === 3 ? "长".repeat(600) : ""}` }));
+  const withHistory = buildChatMessages("", "它的寿命呢？", context, history);
+  assert.deepEqual(withHistory.map((message) => message.role), ["system", "user", "assistant", "user", "assistant", "user", "assistant", "user"], "only the last three turns are kept");
+  assert.equal(withHistory[1].content, "问题1");
+  assert.equal(withHistory[2].content, "回答1", "old citation numbers are removed");
+  assert.equal(withHistory[6].content.length, 502, "long answers are truncated");
+  assert.match(withHistory[0].content, /之前的对话/);
+  assert.match(withHistory[7].content, /^参考资料：[\s\S]*问题：它的寿命呢？$/);
   assert.match(extractiveAnswer(context), /\[1\] 《文章一》：甲+/);
   assert.equal(extractiveAnswer({ chunks: [], sources: [] }), NO_MATCH_ANSWER);
   assert.deepEqual(retrievedChunkRecords(context)[0], { chunkId: "a", documentId: "doc-1", citation: 1, title: "文章一", sectionPath: ["结论"], excerpt: "甲".repeat(40), score: 0 });

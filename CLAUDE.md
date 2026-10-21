@@ -25,7 +25,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing> dev|build|typeche
 
 ## 架构
 
-- `apps/api`：Fastify，几乎所有路由都在 `src/index.ts`。`/api/chat` 在请求内完成检索与生成：`retrieve`（关键词 + 向量，RRF 合并，知识库开启时 Rerank）→ `buildAnswerContext` → 流式调用默认供应商的 Chat 模型；未配置 Chat 模型、密钥缺失或调用失败时返回原文摘录（`answerMode: "extractive"`），向量检索/Rerank 失败只降级并记日志。检索参数取 `knowledgeBaseId` 指定或最近创建的知识库。用户端接口 `/api/chat`、`/api/search`、`/api/messages/:id/feedback`；管理端接口在 `/api/admin/*`（sources、documents、knowledge-bases、model-providers、chat-logs），无认证。API 只负责改元数据和入队，不做采集/切片/向量化。
+- `apps/api`：Fastify，问答相关路由在 `src/chat.ts`（插件），其余路由在 `src/index.ts`，共用的分页与长度常量在 `src/common.ts`。问答在请求内完成检索与生成（`answerQuestion`）：`retrieve`（关键词 + 向量，RRF 合并，知识库开启时 Rerank）→ `buildAnswerContext` → 流式调用默认供应商的 Chat 模型；未配置 Chat 模型、密钥缺失或调用失败时返回原文摘录（`answerMode: "extractive"`），向量检索/Rerank 失败只降级并记日志。检索参数取 `knowledgeBaseId` 指定或最近创建的知识库。用户端接口：单次问答 `/api/chat`；会话 `/api/chat/sessions`（列表/创建）、`/api/chat/sessions/:id/messages`、`DELETE /api/chat/sessions/:id`；流式问答 `POST /api/chat/sessions/:id/stream`（SSE，事件 `source`/`token`/`done`/`error`，`done` 的回答为准；`{ regenerate: messageId }` 只能重新生成最后一轮，被替换的消息标记 `superseded_at`，仍保留在问答记录中；客户端断开时中止模型调用且不保存）；以及 `/api/search`、`/api/messages/:id/feedback`。管理端接口在 `/api/admin/*`（sources、documents、knowledge-bases、model-providers、chat-logs），无认证。API 只负责改元数据和入队，不做采集/切片/向量化。
 - `apps/worker`：BullMQ 消费者（`src/index.ts`，concurrency 1），处理三种 job：
   - `sync-source`：按来源类型分两条路径，入库后都在同一事务内由 `processDocument` 切片，再自动向量化。
     - `网页站点`：robots.txt 检查、同源同路径链接，页数/间隔/超时由 `CRAWL_*` 环境变量控制，正文提取保留换行。
@@ -49,7 +49,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing> dev|build|typeche
   - `embedding.ts`：OpenAI 兼容 `/embeddings`，32 条一批。`selectEmbeddingProvider` 选唯一“启用 + 默认 + 有 embeddingModel”的 provider（数据库唯一索引保证最多一个默认）；provider 记录只保存密钥的**环境变量名**，运行时从 `process.env` 读取，密钥值不入库。
 - `packages/types`：前后端共享的接口类型（`DocumentSummary` 为列表项、`DocumentRecord` 为含正文和切片的详情、`KnowledgeOverview` 等），以 `@nyz-rag/types` 引用。新增/修改接口时先改这里。
 - `apps/web`、`apps/admin`：Vue 3 + Vite，各自基本是单个 `src/App.vue`。通过 `VITE_API_URL` 访问 API；Docker 构建中 `VITE_API_URL` 为空，由 Nginx 将同源 `/api/` 代理到 api:3000。
-- 问答为单次请求返回完整回答，尚无会话与 SSE 流式接口；问答记录的召回片段与得分存于 `message_chunks`。部分状态值是中文字面量（如任务状态 `等待中`/`运行中`/`已完成`/`失败`、来源类型 `网页站点`），修改时保持一致。
+- 会话（`chat_sessions`）尚无用户归属，对所有访问者可见。追问时最近 3 轮问答作为历史送入模型（去掉旧引用编号），检索只用当前问题（未做问题改写）。问答记录的召回片段与得分存于 `message_chunks`。部分状态值是中文字面量（如任务状态 `等待中`/`运行中`/`已完成`/`失败`、来源类型 `网页站点`），修改时保持一致。
 
 ## 环境与基础设施
 

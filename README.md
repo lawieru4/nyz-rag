@@ -61,9 +61,9 @@ pnpm dev
 - 客户端：http://localhost:5175
 - 管理后台：http://localhost:5176（另行运行 `pnpm --filter @nyz-rag/admin dev`）
 - API 健康检查：http://localhost:3001/health
-- API 问答入口：`POST http://localhost:3001/api/chat`，JSON body 为 `{ "question": "..." }`
+- API 问答入口：单次问答 `POST http://localhost:3001/api/chat`，JSON body 为 `{ "question": "..." }`；会话问答先 `POST /api/chat/sessions` 创建会话，再 `POST /api/chat/sessions/:id/stream` 以 SSE 流式返回（body 为 `{ "question": "..." }` 或 `{ "regenerate": "<messageId>" }`）
 
-网页采集、nyzdata 文章 API 增量同步、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通；会话与流式输出尚待开发，模块进度见 [模块清单](docs/module-status.md)。
+网页采集、nyzdata 文章 API 增量同步、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通，用户端支持多轮会话、流式输出、停止生成、重新生成与复制回答；模块进度见 [模块清单](docs/module-status.md)。
 
 API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。问答使用同一默认供应商的 Chat 模型（温度与最大 Token 在模型配置中设置），未配置或调用失败时直接摘录原文片段；填写 Rerank 模型并在知识库中开启重排序后，召回结果会先经过重排序。检索参数（召回数量、相似度阈值、最大上下文、回答提示词）取最近创建的知识库，请求也可通过 `knowledgeBaseId` 指定。
 

@@ -128,13 +128,38 @@ export function buildAnswerContext(chunks: RetrievedChunk[], maxContextLength: n
 }
 
 /** 系统提示词 = 知识库回答提示词 + 引用规则；用户消息 = 按文章编号分组的参考资料 + 问题。 */
-export function buildChatMessages(prompt: string, question: string, context: AnswerContext): ChatMessage[] {
+/** 会话中此前的问答轮次，用于理解追问。 */
+export interface ChatTurn {
+  question: string;
+  answer: string;
+}
+
+// 送入模型的历史轮数与每轮回答的字数上限。
+export const HISTORY_TURNS = 3;
+const HISTORY_ANSWER_CHARS = 500;
+
+/**
+ * 历史回答中的引用编号对应当时的参考资料，与本轮编号无关，因此去掉，并截断过长回答。
+ * 历史只作为对话上下文，本轮的参考资料仍只附在最后一个问题上。
+ */
+function historyMessages(history: ChatTurn[]): ChatMessage[] {
+  return history.slice(-HISTORY_TURNS).flatMap((turn) => {
+    const answer = turn.answer.replace(/\[\d+\]/g, "").trim();
+    return [
+      { role: "user" as const, content: turn.question },
+      { role: "assistant" as const, content: answer.length > HISTORY_ANSWER_CHARS ? `${answer.slice(0, HISTORY_ANSWER_CHARS)}……` : answer },
+    ];
+  });
+}
+
+export function buildChatMessages(prompt: string, question: string, context: AnswerContext, history: ChatTurn[] = []): ChatMessage[] {
   const system = [
     prompt.trim() || DEFAULT_ANSWER_PROMPT,
     "回答要求：",
     "- 只依据「参考资料」回答，不要编造资料中没有的事实、数据或结论；资料不足以回答时明确说明。",
     "- 引用资料时在相应句末用方括号标注文章编号，例如 [1] 或 [1][2]。",
     "- 使用简体中文，条理清晰，保留化学式、数值与单位的原始写法。",
+    ...(history.length ? ["- 之前的对话只用于理解当前问题的指代，事实依据仍以本轮「参考资料」为准。"] : []),
   ].join("\n");
   const references = [...context.chunks].sort((a, b) => a.citation - b.citation).map((chunk) => {
     const header = `[${chunk.citation}] 《${chunk.title}》${chunk.sectionPath.length ? ` 章节：${chunk.sectionPath.join(" > ")}` : ""}`;
@@ -142,6 +167,7 @@ export function buildChatMessages(prompt: string, question: string, context: Ans
   });
   return [
     { role: "system", content: system },
+    ...historyMessages(history),
     { role: "user", content: `参考资料：\n\n${references.join("\n\n")}\n\n问题：${question}` },
   ];
 }

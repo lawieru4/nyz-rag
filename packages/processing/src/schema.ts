@@ -156,8 +156,21 @@ export const modelProviders = pgTable("model_providers", {
   check("model_providers_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
 ]);
 
+export const chatSessions = pgTable("chat_sessions", {
+  id: text().primaryKey(),
+  title: text().notNull().default(""),
+  // 知识库可能被删除，不设外键；删除后回退到最近创建的知识库。
+  knowledgeBaseId: text(),
+  createdAt: timestamptz().notNull().defaultNow(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+}, (table) => [index("chat_sessions_updated_at_idx").on(table.updatedAt.desc())]);
+
 export const chatMessages = pgTable("chat_messages", {
   id: text().primaryKey(),
+  // 早期单次问答没有会话。
+  sessionId: text().references(() => chatSessions.id, { onDelete: "cascade" }),
+  // 被重新生成替换的回答不再出现在会话中。
+  supersededAt: timestamptz(),
   question: text().notNull(),
   answer: text().notNull(),
   answerMode: text().$type<ChatAnswerMode>().notNull().default("extractive"),
@@ -173,6 +186,7 @@ export const chatMessages = pgTable("chat_messages", {
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   index("chat_messages_created_at_idx").on(table.createdAt.desc()),
+  index("chat_messages_session_id_idx").on(table.sessionId, table.createdAt),
   check("chat_messages_rating_check", sql`${table.rating} IN ('positive', 'negative')`),
   check("chat_messages_answer_mode_check", sql`${table.answerMode} IN ('generated', 'extractive')`),
 ]);

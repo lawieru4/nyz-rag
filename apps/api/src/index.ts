@@ -3,21 +3,21 @@ import Fastify from "fastify";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  buildAnswerContext, buildChatMessages, closeDatabase, createChatMessage, createChatModel, createEmbeddingModel, createKnowledgeBase, createModelProvider, createRerankModel,
-  createSource, createTask, DEFAULT_RETRIEVAL_SETTINGS, deleteDocument, deleteModelProvider, extractiveAnswer, getDocument, getDocumentSummary, getKnowledgeBase, getSource,
-  getStats, hasProviderCredential, keywordSearchChunks, listChatMessages, listDocuments, listKnowledgeBases, listModelProviders, listSources, listTasks, migrate,
-  rateChatMessage, retrievedChunkRecords, retrieve, searchTerms, selectDefaultProvider, selectEmbeddingProvider, setEmbeddingState, setProcessingState, updateKnowledgeBase,
-  updateModelProvider, updateSourceStatus, vectorSearchChunks,
+  closeDatabase, createKnowledgeBase, createModelProvider, createSource, createTask, deleteDocument, deleteModelProvider, getDocument, getDocumentSummary, getSource,
+  getStats, keywordSearchChunks, listChatMessages, listDocuments, listKnowledgeBases, listModelProviders, listSources, listTasks, migrate, searchTerms,
+  selectEmbeddingProvider, setEmbeddingState, setProcessingState, updateKnowledgeBase, updateModelProvider, updateSourceStatus,
 } from "@nyz-rag/processing";
-import type { ApiHealth, ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, DocumentSummary, KnowledgeOverview, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
+import type {
+  ApiHealth, ChatLogListResponse, CreateSourceRequest, DocumentListResponse, DocumentSummary, KnowledgeOverview, SearchResult, SaveKnowledgeBaseRequest,
+  SaveModelProviderRequest, UpdateSourceStatusRequest,
+} from "@nyz-rag/types";
+import { chatRoutes } from "./chat.js";
+import { MAX_QUESTION_LENGTH, pageParams } from "./common.js";
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.API_PORT ?? 3000);
 const queueConnection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
 const documentQueue = new Queue(process.env.DOCUMENT_QUEUE_NAME ?? "document-processing", { connection: queueConnection });
-const MAX_QUESTION_LENGTH = 2000;
-const elapsed = (start: number) => Math.round(performance.now() - start);
-const pageParams = (page: string, pageSize: string) => ({ page: Math.max(1, Number.parseInt(page, 10) || 1), pageSize: Math.min(100, Math.max(1, Number.parseInt(pageSize, 10) || 20)) });
 const documentJobOptions = (documentId: string) => ({ jobId: `document-${documentId}`, removeOnComplete: true, removeOnFail: true });
 
 async function hasDocumentJob(document: DocumentSummary) {
@@ -49,6 +49,7 @@ function modelProviderError(input: SaveModelProviderRequest | undefined) {
 }
 
 await app.register(cors, { origin: true });
+await app.register(chatRoutes);
 
 app.get<{ Reply: ApiHealth }>("/health", async () => ({
   status: "ok",
@@ -56,80 +57,9 @@ app.get<{ Reply: ApiHealth }>("/health", async () => ({
   timestamp: new Date().toISOString(),
 }));
 
-// 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用默认供应商的 Chat 模型回答；
-// 未配置 Chat 模型、密钥缺失或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
-app.post<{ Body: ChatRequest; Reply: ChatResponse }>("/api/chat", async (request, reply) => {
-  const question = request.body?.question?.trim();
-  if (!question) {
-    return reply.code(400).send({ error: "question is required" });
-  }
-  if (question.length > MAX_QUESTION_LENGTH) return reply.code(400).send({ error: `question must be at most ${MAX_QUESTION_LENGTH} characters` });
-
-  const started = performance.now();
-  const knowledgeBaseId = request.body.knowledgeBaseId;
-  const knowledgeBase = knowledgeBaseId ? await getKnowledgeBase(knowledgeBaseId) : (await listKnowledgeBases())[0] ?? null;
-  if (knowledgeBaseId && !knowledgeBase) return reply.code(404).send({ error: "knowledge base not found" });
-  const settings = knowledgeBase ?? DEFAULT_RETRIEVAL_SETTINGS;
-  const defaultProvider = selectDefaultProvider(await listModelProviders());
-  const provider = defaultProvider && hasProviderCredential(defaultProvider) ? defaultProvider : null;
-  const embedding = provider?.embeddingModel.trim() ? createEmbeddingModel(provider) : null;
-  const reranker = provider?.rerankModel.trim() ? createRerankModel(provider) : null;
-
-  const { chunks, warnings } = await retrieve(question, settings, {
-    keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit),
-    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedding.embedQuery(text), embedding.model, limit) : undefined,
-    rerank: reranker ? (query, documents, topN) => reranker.rerank(query, documents, topN) : undefined,
-  });
-  for (const warning of warnings) request.log.warn(warning);
-  const retrievalMs = elapsed(started);
-  const context = buildAnswerContext(chunks, settings.maxContextLength);
-
-  let answer = extractiveAnswer(context);
-  let answerMode: ChatAnswerMode = "extractive";
-  const usage: { model?: string; firstTokenMs?: number; promptTokens?: number; completionTokens?: number } = {};
-  if (context.chunks.length && provider?.chatModel.trim()) {
-    const chat = createChatModel(provider);
-    try {
-      let text = "";
-      for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context))) {
-        if (chunk.type === "token") {
-          usage.firstTokenMs ??= elapsed(started);
-          text += chunk.text;
-        } else {
-          usage.promptTokens = chunk.promptTokens;
-          usage.completionTokens = chunk.completionTokens;
-        }
-      }
-      if (text.trim()) {
-        answer = text.trim();
-        answerMode = "generated";
-        usage.model = chat.model;
-      } else {
-        request.log.warn("Chat model returned an empty answer; using extractive answer");
-      }
-    } catch (error) {
-      request.log.warn(`Chat model failed; using extractive answer: ${error instanceof Error ? error.message : "unknown error"}`);
-    }
-  }
-
-  const messageId = crypto.randomUUID();
-  await createChatMessage({
-    id: messageId, question, answer, answerMode, knowledgeBaseId: knowledgeBase?.id, ...usage, retrievalMs, totalMs: elapsed(started),
-    sources: context.sources, chunks: retrievedChunkRecords(context),
-  });
-  return { messageId, answer, answerMode, sources: context.sources };
-});
-
 app.get<{ Querystring: { query?: string; rating?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", async (request): Promise<ChatLogListResponse> => {
   const { query = "", rating, page = "1", pageSize = "20" } = request.query;
   return listChatMessages({ query, rating, ...pageParams(page, pageSize) });
-});
-
-app.post<{ Params: { id: string }; Body: ChatFeedbackRequest }>("/api/messages/:id/feedback", async (request, reply) => {
-  const { rating } = request.body ?? {};
-  if (rating !== "positive" && rating !== "negative") return reply.code(400).send({ error: "rating must be positive or negative" });
-  if (!await rateChatMessage(request.params.id, rating)) return reply.code(404).send({ error: "message not found" });
-  return reply.code(204).send();
 });
 
 app.get("/api/knowledge", async (): Promise<KnowledgeOverview> => {
