@@ -2,7 +2,7 @@ import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { CrawlTaskRecord, DataSourceRecord, DocumentRecord, KnowledgeSnapshot } from "@nyz-rag/types";
+import type { CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentRecord, KnowledgeSnapshot } from "@nyz-rag/types";
 
 const connection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
 const storePath = resolve(process.env.NYZ_STORE_PATH ?? "../../.nyz-data/knowledge.json");
@@ -32,7 +32,28 @@ function extractPage(html: string, url: string) {
     .map((match) => { try { return new URL(match[2], url); } catch { return null; } })
     .filter((link): link is URL => Boolean(link && link.origin === new URL(url).origin && ["http:", "https:"].includes(link.protocol)))
     .map((link) => { link.hash = ""; return link.toString(); });
-  return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links };
+  return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links, rawHtml: html };
+}
+
+function splitIntoChunks(content: string, documentId: string): DocumentChunkRecord[] {
+  const size = 800;
+  const overlap = 120;
+  const chunks: DocumentChunkRecord[] = [];
+  for (let start = 0; start < content.length; start += size - overlap) {
+    const value = content.slice(start, start + size).trim();
+    if (!value) continue;
+    chunks.push({ id: `${documentId}-${chunks.length + 1}`, index: chunks.length, content: value, tokenEstimate: Math.ceil(value.length / 2) });
+  }
+  return chunks;
+}
+
+async function processDocument(document: DocumentRecord) {
+  document.processingStatus = "cleaning";
+  delete document.processingError;
+  document.content = document.content.replace(/\s+/g, " ").trim();
+  document.processingStatus = "chunked";
+  document.chunks = splitIntoChunks(document.content, document.id);
+  document.updatedAt = new Date().toISOString();
 }
 
 async function fetchHtml(url: string, userAgent: string) {
@@ -69,8 +90,9 @@ async function crawl(source: DataSourceRecord, task: CrawlTaskRecord, snapshot: 
     if (page.title && page.content) {
       const now = new Date().toISOString();
       const existing = snapshot.documents.find((document) => document.sourceId === source.id && document.url === finalUrl);
-      const document: DocumentRecord = existing ?? { id: crypto.randomUUID(), sourceId: source.id, title: page.title, url: finalUrl, content: page.content, status: "ready", createdAt: now, updatedAt: now };
-      Object.assign(document, { title: page.title, content: page.content, status: "ready" as const, updatedAt: now });
+       const document: DocumentRecord = existing ?? { id: crypto.randomUUID(), sourceId: source.id, title: page.title, url: finalUrl, content: page.content, rawHtml: page.rawHtml, processingStatus: "pending", chunks: [], status: "ready", createdAt: now, updatedAt: now };
+       Object.assign(document, { title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" as const, processingStatus: "pending" as const, updatedAt: now });
+       await processDocument(document);
       if (!existing) snapshot.documents.unshift(document);
       processed += 1;
     }
@@ -85,6 +107,20 @@ async function crawl(source: DataSourceRecord, task: CrawlTaskRecord, snapshot: 
 
 const worker = new Worker("document-processing", async (job) => {
   const snapshot = await loadSnapshot();
+  if (job.name === "reprocess-document") {
+    const document = snapshot.documents.find((item) => item.id === job.data.documentId);
+    if (!document) throw new Error("document not found");
+    try {
+      await processDocument(document);
+      await saveSnapshot(snapshot);
+      return { status: "chunked", documentId: document.id, chunks: document.chunks?.length ?? 0 };
+    } catch (error) {
+      document.processingStatus = "failed";
+      document.processingError = error instanceof Error ? error.message.slice(0, 500) : "Document processing failed";
+      await saveSnapshot(snapshot);
+      throw error;
+    }
+  }
   const task = snapshot.tasks.find((item) => item.id === job.data.taskId);
   const source = snapshot.sources.find((item) => item.id === job.data.sourceId);
   if (!task || !source) throw new Error("source or task not found");

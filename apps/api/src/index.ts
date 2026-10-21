@@ -86,6 +86,23 @@ app.get<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, 
   return document;
 });
 
+app.post<{ Params: { id: string } }>("/api/admin/documents/:id/reprocess", async (request, reply) => {
+  const snapshot = await readStore();
+  const document = snapshot.documents.find((item) => item.id === request.params.id);
+  if (!document) return reply.code(404).send({ error: "document not found" });
+  document.processingStatus = "pending";
+  delete document.processingError;
+  await updateStore((current) => {
+    const target = current.documents.find((item) => item.id === request.params.id);
+    if (target) {
+      target.processingStatus = "pending";
+      delete target.processingError;
+    }
+  });
+  await documentQueue.add("reprocess-document", { documentId: document.id });
+  return { status: "queued", documentId: document.id };
+});
+
 app.delete<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, reply) => {
   const snapshot = await readStore();
   if (!snapshot.documents.some((item) => item.id === request.params.id)) return reply.code(404).send({ error: "document not found" });

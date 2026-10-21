@@ -20,7 +20,12 @@ async function persist(snapshot: KnowledgeSnapshot) {
 export async function readStore(): Promise<StoreSnapshot> {
   try {
     const snapshot = JSON.parse(await readFile(storePath, "utf8")) as Partial<StoreSnapshot>;
-    return { ...structuredClone(seed), ...snapshot, knowledgeBases: snapshot.knowledgeBases ?? [], chatLogs: snapshot.chatLogs ?? [], modelProviders: snapshot.modelProviders ?? [] };
+    const documents = (snapshot.documents ?? []).map((document) => ({
+      ...document,
+      processingStatus: document.processingStatus ?? (document.status === "ready" ? "chunked" : "pending"),
+      chunks: document.chunks ?? [],
+    }));
+    return { ...structuredClone(seed), ...snapshot, documents, knowledgeBases: snapshot.knowledgeBases ?? [], chatLogs: snapshot.chatLogs ?? [], modelProviders: snapshot.modelProviders ?? [] };
   } catch {
     await persist(structuredClone(seed));
     return structuredClone(seed);

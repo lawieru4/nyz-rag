@@ -29,9 +29,20 @@ export interface DocumentRecord {
   title: string;
   url: string;
   content: string;
+  rawHtml?: string;
+  processingStatus?: "pending" | "cleaning" | "chunked" | "failed";
+  processingError?: string;
+  chunks?: DocumentChunkRecord[];
   status: DocumentStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DocumentChunkRecord {
+  id: string;
+  index: number;
+  content: string;
+  tokenEstimate: number;
 }
 
 export interface DataSourceRecord {
