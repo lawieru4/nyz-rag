@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
 type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string };
 type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中"; progress: number; started: string };
+type Document = { id: string; sourceId: string; title: string; url: string; content: string; status: "pending" | "processing" | "ready" | "failed"; createdAt: string; updatedAt: string };
 
 const activeModule = ref("数据源");
 const apiBase = "http://localhost:3000";
@@ -10,8 +11,26 @@ const dialogOpen = ref(false);
 const notice = ref("");
 const sources = ref<Source[]>([]);
 const tasks = ref<Task[]>([]);
+const documents = ref<Document[]>([]);
+const documentTotal = ref(0);
+const documentQuery = ref("");
+const documentSource = ref("");
+const documentStatus = ref("");
+const documentPage = ref(1);
+const documentPageSize = 10;
+const documentsLoading = ref(false);
+const selectedDocument = ref<Document | null>(null);
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
 const form = ref({ name: "", url: "", kind: "文章 API", frequency: "每天" });
 const runningTasks = computed(() => tasks.value.filter((task) => task.status === "运行中").length);
+const documentPages = computed(() => Math.max(1, Math.ceil(documentTotal.value / documentPageSize)));
+
+const documentStatuses = {
+  pending: "待处理",
+  processing: "处理中",
+  ready: "已就绪",
+  failed: "失败",
+} as const;
 
 async function loadKnowledge() {
   const response = await fetch(`${apiBase}/api/knowledge`);
@@ -20,7 +39,55 @@ async function loadKnowledge() {
   tasks.value = data.tasks.map((task: { id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string }) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString() }));
 }
 
-loadKnowledge();
+onMounted(() => void loadKnowledge());
+
+async function loadDocuments() {
+  documentsLoading.value = true;
+  const params = new URLSearchParams({ page: String(documentPage.value), pageSize: String(documentPageSize) });
+  if (documentQuery.value.trim()) params.set("query", documentQuery.value.trim());
+  if (documentSource.value) params.set("sourceId", documentSource.value);
+  if (documentStatus.value) params.set("status", documentStatus.value);
+  try {
+    const response = await fetch(`${apiBase}/api/admin/documents?${params}`);
+    if (!response.ok) throw new Error();
+    const data = await response.json();
+    documents.value = data.documents;
+    documentTotal.value = data.total;
+  } catch {
+    notice.value = "文档列表加载失败，请检查 API 服务";
+  } finally {
+    documentsLoading.value = false;
+  }
+}
+
+function searchDocuments() {
+  documentPage.value = 1;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void loadDocuments(), 250);
+}
+
+async function openDocument(document: Document) {
+  try {
+    const response = await fetch(`${apiBase}/api/admin/documents/${document.id}`);
+    if (!response.ok) throw new Error();
+    selectedDocument.value = await response.json();
+  } catch {
+    notice.value = "文档详情加载失败";
+  }
+}
+
+async function deleteDocument(document: Document) {
+  if (!window.confirm(`确定删除《${document.title}》？此操作不可撤销。`)) return;
+  const response = await fetch(`${apiBase}/api/admin/documents/${document.id}`, { method: "DELETE" });
+  if (!response.ok) {
+    notice.value = "文档删除失败";
+    return;
+  }
+  if (documents.value.length === 1 && documentPage.value > 1) documentPage.value -= 1;
+  selectedDocument.value = null;
+  await Promise.all([loadDocuments(), loadKnowledge()]);
+  notice.value = "文档已删除";
+}
 
 async function addSource() {
   const name = form.value.name.trim();
@@ -58,7 +125,7 @@ async function startCrawl(source: Source) {
       <a class="brand" href="/"><span class="brand-mark">N</span><span>NYZ <b>KNOWLEDGE OPS</b></span></a>
       <div class="workspace-label">工作空间</div>
       <nav aria-label="管理模块">
-        <button v-for="item in [{ name: '数据源', icon: '◉' }, { name: '文档管理', icon: '▤' }, { name: '知识库', icon: '⌘' }, { name: '问答记录', icon: '☷' }, { name: '模型配置', icon: '⚙' }]" :key="item.name" :class="['nav-item', { selected: activeModule === item.name }]" @click="activeModule = item.name">
+        <button v-for="item in [{ name: '数据源', icon: '◉' }, { name: '文档管理', icon: '▤' }, { name: '知识库', icon: '⌘' }, { name: '问答记录', icon: '☷' }, { name: '模型配置', icon: '⚙' }]" :key="item.name" :class="['nav-item', { selected: activeModule === item.name }]" @click="activeModule = item.name; item.name === '文档管理' && loadDocuments()">
           <span class="nav-icon">{{ item.icon }}</span>{{ item.name }}<span v-if="item.name === '数据源'" class="nav-count">{{ sources.length }}</span>
         </button>
       </nav>
@@ -68,6 +135,20 @@ async function startCrawl(source: Source) {
     <main class="main-area">
       <header class="topbar"><div class="crumb">管理后台 <span>/</span> {{ activeModule }}</div><div class="top-actions"><span class="environment"><i></i>开发环境</span><button class="icon-button" title="通知" aria-label="通知">♧</button><button class="help-button">帮助中心</button></div></header>
       <div class="content">
+        <template v-if="activeModule === '文档管理'">
+          <div class="page-heading"><div><p class="eyebrow">KNOWLEDGE OPERATIONS</p><h1>文档管理</h1><p class="subtitle">检索已收录内容并查看处理状态</p></div><span class="document-total">{{ documentTotal }} 篇文档</span></div>
+          <div v-if="notice" class="notice" role="status"><span>{{ notice }}</span><button aria-label="关闭提示" @click="notice = ''">×</button></div>
+          <section class="section-block document-section">
+            <div class="document-filters"><label class="search-field"><span aria-hidden="true">⌕</span><input v-model="documentQuery" placeholder="搜索标题、网址或正文" @input="searchDocuments" /></label><select v-model="documentSource" aria-label="筛选数据源" @change="documentPage = 1; loadDocuments()"><option value="">全部数据源</option><option v-for="source in sources" :key="source.id" :value="source.id">{{ source.name }}</option></select><select v-model="documentStatus" aria-label="筛选文档状态" @change="documentPage = 1; loadDocuments()"><option value="">全部状态</option><option v-for="(label, status) in documentStatuses" :key="status" :value="status">{{ label }}</option></select></div>
+            <div class="table-wrap document-table-wrap"><table><thead><tr><th>文档</th><th>数据源</th><th>状态</th><th>最后更新</th><th></th></tr></thead><tbody>
+              <tr v-for="document in documents" :key="document.id"><td><button class="document-title" @click="openDocument(document)"><b>{{ document.title }}</b><small>{{ document.url }}</small></button></td><td>{{ sources.find((source) => source.id === document.sourceId)?.name ?? '未知数据源' }}</td><td><span :class="['status-pill', document.status === 'ready' ? 'on' : 'off']"><i></i>{{ documentStatuses[document.status] }}</span></td><td>{{ new Date(document.updatedAt).toLocaleString() }}</td><td><div class="row-actions"><button title="查看详情" aria-label="查看详情" @click="openDocument(document)">↗</button><button title="删除文档" aria-label="删除文档" @click="deleteDocument(document)">×</button></div></td></tr>
+            </tbody></table></div>
+            <div v-if="documentsLoading" class="empty-state">正在加载文档…</div>
+            <div v-else-if="documents.length === 0" class="empty-state">{{ documentQuery || documentSource || documentStatus ? '没有符合条件的文档' : '知识库中还没有文档' }}</div>
+            <div class="pagination"><span>共 {{ documentTotal }} 篇</span><button aria-label="上一页" :disabled="documentPage <= 1 || documentsLoading" @click="documentPage -= 1; loadDocuments()">←</button><span>{{ documentPage }} / {{ documentPages }}</span><button aria-label="下一页" :disabled="documentPage >= documentPages || documentsLoading" @click="documentPage += 1; loadDocuments()">→</button></div>
+          </section>
+        </template>
+        <template v-else>
         <div class="page-heading"><div><p class="eyebrow">KNOWLEDGE OPERATIONS</p><h1>{{ activeModule }}</h1><p class="subtitle">管理内容来源与自动同步任务</p></div><button class="primary-button" @click="dialogOpen = true"><span>＋</span> 添加数据源</button></div>
 
         <div v-if="notice" class="notice" role="status"><span>{{ notice }}</span><button aria-label="关闭提示" @click="notice = ''">×</button></div>
@@ -92,9 +173,11 @@ async function startCrawl(source: Source) {
           <div class="task-list"><div v-for="task in tasks" :key="task.id" class="task-row"><span class="task-state" :class="task.status === '运行中' ? 'working' : task.status === '已完成' ? 'done' : 'waiting'">{{ task.status === '已完成' ? '✓' : task.status === '运行中' ? '↻' : '·' }}</span><div class="task-info"><b>{{ task.source }} <span>{{ task.id }}</span></b><small>{{ task.started }}</small></div><div class="progress-wrap"><div class="progress-track"><i :style="{ width: `${task.progress}%` }"></i></div><small>{{ task.status === '运行中' ? `${task.progress}%` : task.status === '已完成' ? '完成' : '排队中' }}</small></div><span class="task-result">{{ task.status === '已完成' ? '新增 0 篇' : task.status === '运行中' ? '正在解析文章' : '等待 Worker' }}</span><button class="row-more" aria-label="任务选项">···</button></div></div>
         </section>
         <footer class="disclaimer"><span>i</span>当前页面使用本地演示数据，后台 API 与数据库接入将在对应模块实现。</footer>
+        </template>
       </div>
     </main>
 
     <div v-if="dialogOpen" class="modal-backdrop" @click.self="dialogOpen = false"><section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><header><div><p class="eyebrow">NEW CONNECTION</p><h2 id="dialog-title">添加数据源</h2></div><button class="close-button" aria-label="关闭" @click="dialogOpen = false">×</button></header><form @submit.prevent="addSource"><label>数据源名称<input v-model="form.name" autofocus placeholder="例如：产品帮助中心" required /></label><label>来源地址<input v-model="form.url" type="url" placeholder="https://example.com" required /></label><div class="form-grid"><label>来源类型<select v-model="form.kind"><option>文章 API</option><option>网页站点</option></select></label><label>同步频率<select v-model="form.frequency"><option>每小时</option><option>每 6 小时</option><option>每天</option><option>手动</option></select></label></div><div class="dialog-note">新增来源默认暂停，确认授权和抓取规则后再启动。</div><footer><button type="button" class="secondary-button" @click="dialogOpen = false">取消</button><button type="submit" class="primary-button">添加来源</button></footer></form></section></div>
+    <div v-if="selectedDocument" class="modal-backdrop" @click.self="selectedDocument = null"><section class="dialog document-dialog" role="dialog" aria-modal="true" aria-labelledby="document-title"><header><div><p class="eyebrow">DOCUMENT DETAIL</p><h2 id="document-title">{{ selectedDocument.title }}</h2></div><button class="close-button" aria-label="关闭" @click="selectedDocument = null">×</button></header><div class="document-detail-meta"><span>{{ sources.find((source) => source.id === selectedDocument?.sourceId)?.name ?? '未知数据源' }}</span><span>{{ documentStatuses[selectedDocument.status] }}</span><a :href="selectedDocument.url" target="_blank" rel="noreferrer">打开原文 ↗</a></div><p class="document-content">{{ selectedDocument.content || '暂无正文内容' }}</p><footer><button class="secondary-button" @click="selectedDocument = null">关闭</button><button class="danger-button" @click="deleteDocument(selectedDocument)">删除文档</button></footer></section></div>
   </div>
 </template>

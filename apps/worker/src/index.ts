@@ -35,6 +35,9 @@ const worker = new Worker(
       processingTasks: snapshot.tasks.filter((item) => item.status === "等待中" || item.status === "运行中").length,
       lastUpdated: now,
     };
+    for (const item of snapshot.sources) {
+      item.documentCount = snapshot.documents.filter((entry) => entry.sourceId === item.id && entry.status === "ready").length;
+    }
     await mkdir(dirname(storePath), { recursive: true });
     await writeFile(storePath, JSON.stringify(snapshot, null, 2));
     return { status: "ready", documentId: document.id };

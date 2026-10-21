@@ -82,3 +82,8 @@ export interface SearchResult {
   excerpt: string;
   score: number;
 }
+
+export interface DocumentListResponse {
+  documents: DocumentRecord[];
+  total: number;
+}

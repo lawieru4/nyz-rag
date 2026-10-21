@@ -2,7 +2,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
-import type { ApiHealth, ChatRequest, ChatResponse, CreateSourceRequest, SearchResult } from "@nyz-rag/types";
+import type { ApiHealth, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, SearchResult } from "@nyz-rag/types";
 import { readStore, updateStore } from "./store.js";
 
 const app = Fastify({ logger: true });
@@ -37,6 +37,39 @@ app.post<{ Body: ChatRequest; Reply: ChatResponse }>("/api/chat", async (request
 });
 
 app.get("/api/knowledge", async () => readStore());
+
+app.get<{ Querystring: { query?: string; sourceId?: string; status?: string; page?: string; pageSize?: string } }>("/api/admin/documents", async (request): Promise<DocumentListResponse> => {
+  const { query = "", sourceId, status, page = "1", pageSize = "20" } = request.query;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const currentPage = Math.max(1, Number.parseInt(page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(pageSize, 10) || 20));
+  const filtered = (await readStore()).documents.filter((document) => {
+    if (sourceId && document.sourceId !== sourceId) return false;
+    if (status && document.status !== status) return false;
+    return !normalizedQuery || `${document.title} ${document.url} ${document.content}`.toLocaleLowerCase().includes(normalizedQuery);
+  }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+  return { documents: filtered.slice((currentPage - 1) * limit, currentPage * limit), total: filtered.length };
+});
+
+app.get<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, reply) => {
+  const document = (await readStore()).documents.find((item) => item.id === request.params.id);
+  if (!document) return reply.code(404).send({ error: "document not found" });
+  return document;
+});
+
+app.delete<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, reply) => {
+  const snapshot = await readStore();
+  if (!snapshot.documents.some((item) => item.id === request.params.id)) return reply.code(404).send({ error: "document not found" });
+
+  await updateStore((current) => {
+    current.documents = current.documents.filter((item) => item.id !== request.params.id);
+    for (const source of current.sources) {
+      source.documentCount = current.documents.filter((item) => item.sourceId === source.id && item.status === "ready").length;
+    }
+  });
+  return reply.code(204).send();
+});
 
 app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", async (request, reply) => {
   const { name, url, kind, frequency } = request.body ?? {};
