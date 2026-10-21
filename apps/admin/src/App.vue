@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 
 type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string };
-type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中"; progress: number; started: string };
+type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number; started: string; error?: string };
 type Document = { id: string; sourceId: string; title: string; url: string; content: string; status: "pending" | "processing" | "ready" | "failed"; createdAt: string; updatedAt: string };
 type KnowledgeBase = { id: string; name: string; description: string; topK: number; similarityThreshold: number; rerankEnabled: boolean; maxContextLength: number; prompt: string; model: string; createdAt: string; updatedAt: string };
 type ChatLog = { id: string; question: string; answer: string; sources: Array<{ documentId: string; title: string; url: string }>; rating: "positive" | "negative" | null; createdAt: string };
@@ -55,7 +55,7 @@ async function loadKnowledge() {
   const response = await fetch(`${apiBase}/api/knowledge`);
   const data = await response.json();
   sources.value = data.sources.map((source: { id: string; name: string; url: string; kind: string; frequency: string; status: Source["status"]; documentCount: number; updatedAt: string | null }) => ({ ...source, pages: source.documentCount, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
-  tasks.value = data.tasks.map((task: { id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string }) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString() }));
+  tasks.value = data.tasks.map((task: { id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string; error?: string }) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString(), error: task.error }));
 }
 
 async function loadKnowledgeBases() {
@@ -218,8 +218,16 @@ async function addSource() {
   notice.value = "数据源已添加，当前保存在本地演示状态";
 }
 
-function toggleSource(source: Source) {
-  source.status = source.status === "运行中" ? "已暂停" : "运行中";
+async function toggleSource(source: Source) {
+  const status = source.status === "运行中" ? "已暂停" : "运行中";
+  try {
+    const response = await fetch(`${apiBase}/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }) });
+    if (!response.ok) throw new Error();
+    source.status = status;
+    notice.value = status === "运行中" ? "数据源已启用" : "数据源已暂停";
+  } catch {
+    notice.value = "数据源状态更新失败，请检查 API 服务";
+  }
 }
 
 async function startCrawl(source: Source) {
@@ -303,9 +311,9 @@ async function startCrawl(source: Source) {
 
         <section class="section-block task-section">
           <div class="section-heading"><div><h2>抓取任务</h2><p>查看近期同步状态与处理进度</p></div><button class="text-button" @click="activeModule = '抓取任务'">任务记录 <span>↗</span></button></div>
-          <div class="task-list"><div v-for="task in tasks" :key="task.id" class="task-row"><span class="task-state" :class="task.status === '运行中' ? 'working' : task.status === '已完成' ? 'done' : 'waiting'">{{ task.status === '已完成' ? '✓' : task.status === '运行中' ? '↻' : '·' }}</span><div class="task-info"><b>{{ task.source }} <span>{{ task.id }}</span></b><small>{{ task.started }}</small></div><div class="progress-wrap"><div class="progress-track"><i :style="{ width: `${task.progress}%` }"></i></div><small>{{ task.status === '运行中' ? `${task.progress}%` : task.status === '已完成' ? '完成' : '排队中' }}</small></div><span class="task-result">{{ task.status === '已完成' ? '新增 0 篇' : task.status === '运行中' ? '正在解析文章' : '等待 Worker' }}</span><button class="row-more" aria-label="任务选项">···</button></div></div>
+           <div class="task-list"><div v-for="task in tasks" :key="task.id" class="task-row"><span class="task-state" :class="task.status === '运行中' ? 'working' : task.status === '已完成' ? 'done' : task.status === '失败' ? 'failed' : 'waiting'">{{ task.status === '已完成' ? '✓' : task.status === '运行中' ? '↻' : task.status === '失败' ? '!' : '·' }}</span><div class="task-info"><b>{{ task.source }} <span>{{ task.id }}</span></b><small>{{ task.error || task.started }}</small></div><div class="progress-wrap"><div class="progress-track"><i :style="{ width: `${task.progress}%` }"></i></div><small>{{ task.status === '运行中' ? `${task.progress}%` : task.status === '已完成' ? '完成' : task.status === '失败' ? '失败' : '排队中' }}</small></div><span class="task-result">{{ task.status === '已完成' ? '采集完成' : task.status === '运行中' ? '正在采集页面' : task.status === '失败' ? '采集失败' : '等待 Worker' }}</span><button class="row-more" aria-label="任务选项">···</button></div></div>
         </section>
-        <footer class="disclaimer"><span>i</span>当前页面使用本地演示数据，后台 API 与数据库接入将在对应模块实现。</footer>
+         <footer class="disclaimer"><span>i</span>网页站点按 robots.txt 与请求间隔限制采集；文章 API 专用来源需完成认证配置后使用。</footer>
         </template>
       </div>
     </main>

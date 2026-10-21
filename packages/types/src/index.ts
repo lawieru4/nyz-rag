@@ -76,6 +76,10 @@ export interface CreateSourceRequest {
   frequency: string;
 }
 
+export interface UpdateSourceStatusRequest {
+  status: DataSourceRecord["status"];
+}
+
 export interface SearchResult {
   documentId: string;
   title: string;

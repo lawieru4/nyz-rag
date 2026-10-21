@@ -2,7 +2,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
-import type { ApiHealth, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest } from "@nyz-rag/types";
+import type { ApiHealth, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, CreateSourceRequest, DocumentListResponse, SearchResult, SaveKnowledgeBaseRequest, SaveModelProviderRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
 import { readStore, updateStore } from "./store.js";
 
 const app = Fastify({ logger: true });
@@ -192,10 +192,23 @@ app.post<{ Params: { id: string } }>("/api/admin/sources/:id/sync", async (reque
   const snapshot = await readStore();
   const source = snapshot.sources.find((item) => item.id === request.params.id);
   if (!source) return reply.code(404).send({ error: "source not found" });
+  if (source.status !== "运行中") return reply.code(409).send({ error: "source is paused" });
   const task = { id: `CR-${Date.now().toString().slice(-8)}`, sourceId: source.id, sourceName: source.name, status: "等待中" as const, progress: 0, createdAt: new Date().toISOString() };
   await updateStore((current) => current.tasks.unshift(task));
   await documentQueue.add("sync-source", { sourceId: source.id, taskId: task.id });
   return task;
+});
+
+app.patch<{ Params: { id: string }; Body: UpdateSourceStatusRequest }>("/api/admin/sources/:id", async (request, reply) => {
+  const { status } = request.body ?? {};
+  if (status !== "运行中" && status !== "已暂停") return reply.code(400).send({ error: "status must be 运行中 or 已暂停" });
+  let updated;
+  await updateStore((snapshot) => {
+    const source = snapshot.sources.find((item) => item.id === request.params.id);
+    if (source) updated = Object.assign(source, { status });
+  });
+  if (!updated) return reply.code(404).send({ error: "source not found" });
+  return updated;
 });
 
 app.post<{ Body: { query?: string } }>("/api/search", async (request) => {
