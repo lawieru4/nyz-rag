@@ -5,10 +5,7 @@ x-backend: &backend
   environment:
     NODE_ENV: production
     API_PORT: 3000
-    NYZ_STORE_PATH: /data/knowledge.json
     DOCUMENT_QUEUE_NAME: ${DOCUMENT_QUEUE_NAME:-nyz-rag-document-processing}
-  volumes:
-    - ./.nyz-data:/data
   extra_hosts:
     - "host.docker.internal:host-gateway"
   init: true

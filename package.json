@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "pnpm --filter @nyz-rag/processing build && pnpm --parallel --filter @nyz-rag/api --filter @nyz-rag/web --filter @nyz-rag/worker dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm --filter @nyz-rag/processing build && pnpm -r typecheck"
+    "typecheck": "pnpm --filter @nyz-rag/processing build && pnpm -r typecheck",
+    "db:migrate": "pnpm --filter @nyz-rag/processing db:migrate",
+    "db:import-snapshot": "pnpm --filter @nyz-rag/processing db:import-snapshot",
+    "db:generate": "pnpm --filter @nyz-rag/processing db:generate"
   }
 }

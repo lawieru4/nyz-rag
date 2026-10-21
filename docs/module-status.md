@@ -55,11 +55,13 @@
 - 本轮完成：文档删除、重新切片清理旧向量；API/Worker 共用带锁、原子写入的 JSON 存储，避免模型调用期间覆盖其他操作。元数据仍为 JSON 存储，尚未整体迁移 PostgreSQL。
 - 验证：本地模拟 Embedding 接口配合真实 Redis/PostgreSQL，通过成功写入、响应乱序、失败重试、重复任务、并发写入保留、重新切片及删除清理链路；尚未使用外部供应商密钥验证。
 - 下一步：混合检索、Rerank 和真实 RAG；当前用户端仍使用关键词检索与片段拼接，尚未消费向量。
+- 本轮完成（架构调整第一阶段）：元数据从 JSON 快照迁移到 PostgreSQL。使用 Drizzle ORM 定义表结构（`packages/processing/src/schema.ts`），drizzle-kit 生成迁移（启动时自动执行，`pnpm db:migrate` 手动执行），按实体的 repository；向量改存 `document_chunks.embedding`，切片与向量随文档级联删除；问答记录、文档列表改为数据库分页筛选；`/api/knowledge` 只返回来源、任务与统计。旧数据通过 `pnpm db:import-snapshot` 导入。移除 `proper-lockfile` 与 `.nyz-data` 挂载。
+- 验证：`pnpm typecheck`、`pnpm build` 通过；集成测试改用临时 schema，覆盖向量写入、失败保留旧向量、重复任务 409、模型调用期间重新切片的回写拒绝、重新切片、问答与反馈、删除级联；导入脚本用构造的旧快照验证过字段映射与重复执行。
 
 ## 向量化运行配置
 
-- 在根目录 `.env` 设置 `DATABASE_URL`、`REDIS_URL` 和模型密钥，API/Worker 的 dev/start 命令会加载该文件。两端的 `NYZ_STORE_PATH` 必须一致，默认均指向仓库 `.nyz-data/knowledge.json`。
+- 在根目录 `.env` 设置 `DATABASE_URL`、`REDIS_URL` 和模型密钥，API/Worker 的 dev/start 命令会加载该文件。
 - 在模型配置中填写 OpenAI 兼容基础 URL（例如 `https://api.openai.com/v1`，系统追加 `/embeddings`）、Embedding 模型名与密钥环境变量名称，启用并设为默认。只有明确标识为 OpenAI 的供应商可省略 URL。
-- 首次向量存储操作会创建 `vector` 扩展和 `document_vectors` 表，数据库用户需具备对应权限。当前支持多种维度，尚未建立向量检索索引。
+- `vector` 扩展需管理员预先创建；表结构由迁移创建。向量列不限维度，尚未建立向量检索索引。
 - 根目录 `pnpm dev` 和 `pnpm typecheck` 会先构建共享处理包；单独启动 API 或 Worker 前，先执行 `pnpm --filter @nyz-rag/processing build`。
-- 验证命令：`pnpm --filter @nyz-rag/processing test`；本地基础设施启动后运行 `NYZ_INTEGRATION_TEST=1 pnpm --filter @nyz-rag/processing test`。集成测试使用临时 JSON、本地模拟模型接口及隔离的 Redis 队列，测试向量会在结束时清理。
+- 验证命令：`pnpm --filter @nyz-rag/processing test`；本地基础设施启动后运行 `NYZ_INTEGRATION_TEST=1 pnpm --filter @nyz-rag/processing test`。集成测试使用临时 PostgreSQL schema、本地模拟模型接口及隔离的 Redis 队列，结束时删除该 schema。

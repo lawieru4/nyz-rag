@@ -24,9 +24,9 @@ Docker Desktop 将显示独立的 `nyz-rag` 分组，包含 `api`、`worker`、`
 - 应用镜像统一使用仓库根 `Dockerfile` 构建；修改代码后重新运行上述构建启动命令。
 - `.env` 只注入后端运行时，不进入镜像。后端启动器将连接串中的 `localhost` / `127.0.0.1` / `::1` 转为 `host.docker.internal`，通过宿主机端口连接已有服务；非本机地址保持不变。
 - 前端使用 Nginx 提供构建产物并将 `/api/` 代理到 API，浏览器不依赖容器 DNS，也不需要在镜像中配置宿主机 API 地址。Docker 构建固定使用同源 API，不使用本机的 `VITE_API_URL`。
-- API 和 Worker 将仓库的 `.nyz-data` 目录共同挂载到 `/data`，元数据重建容器后仍保留。容器路径固定为 `/data/knowledge.json`；若本机使用自定义 `NYZ_STORE_PATH`，须先调整挂载目录以使用同一份数据。不要同时启动本机 Worker 和容器 Worker 操作不同的数据文件。
+- 元数据与向量都存于 `DATABASE_URL` 指向的 PostgreSQL，容器不挂载数据目录；API 和 Worker 启动时自动执行数据库迁移。不要同时启动本机 Worker 和容器 Worker 消费同一队列。
 - 仅将端口暴露到 `127.0.0.1`。当前管理 API 没有认证，不应直接开放到公网。
-- `docker compose down` 移除本项目应用容器，不会停止外部共享数据库或删除 `.nyz-data`。
+- `docker compose down` 移除本项目应用容器，不会停止外部共享数据库。
 - API 健康检查仅代表 HTTP 可用，Worker 为长驻队列进程；完整依赖状态仍需通过实际文档任务验证。
 
 #### 常用管理命令
@@ -65,7 +65,9 @@ pnpm dev
 
 当前问答接口使用关键词召回与文章片段拼接。网页采集、清洗切片和 Embedding/pgvector 写入已接通；混合检索、Rerank 和真实模型问答尚待开发，模块进度见 [模块清单](docs/module-status.md)。
 
-API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。元数据仍存于 `.nyz-data/knowledge.json`，向量单独存入 PostgreSQL。
+API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。
+
+元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。从旧版 JSON 快照升级时执行一次 `pnpm db:import-snapshot [快照绝对路径]`（默认读取 `NYZ_STORE_PATH` 或 `.nyz-data/knowledge.json`），会同时迁移旧 `document_vectors` 表中的向量；可重复执行，已存在的记录会跳过。确认无误后可由管理员删除 `document_vectors` 表。
 
 ### 共享 Docker 服务（默认）
 
@@ -82,7 +84,7 @@ CREATE ROLE nyzrag LOGIN PASSWORD 'replace-with-a-local-password'
 CREATE DATABASE nyzrag OWNER nyzrag;
 ```
 
-再连接 `nyzrag` 数据库，以管理员身份执行 `CREATE EXTENSION IF NOT EXISTS vector;`。应用账号无需超级用户权限，首次使用时会自行创建 `document_vectors` 表。将实际连接串填入根 `.env` 的 `DATABASE_URL`；密码中的特殊字符需要 URL 编码。
+再连接 `nyzrag` 数据库，以管理员身份执行 `CREATE EXTENSION IF NOT EXISTS vector;`。应用账号无需超级用户权限，启动时会通过迁移自行建表。将实际连接串填入根 `.env` 的 `DATABASE_URL`；密码中的特殊字符需要 URL 编码。
 
 ### 独立 Docker 服务（可选）
 

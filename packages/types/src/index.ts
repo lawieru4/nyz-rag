@@ -34,20 +34,26 @@ export interface DocumentEmbeddingRecord {
   error?: string;
 }
 
-export interface DocumentRecord {
+export type DocumentProcessingStatus = "pending" | "cleaning" | "chunked" | "failed";
+
+export interface DocumentSummary {
   id: string;
   sourceId: string;
   title: string;
   url: string;
-  content: string;
-  rawHtml?: string;
-  processingStatus?: "pending" | "cleaning" | "chunked" | "failed";
-  processingError?: string;
-  chunks?: DocumentChunkRecord[];
-  embedding?: DocumentEmbeddingRecord;
   status: DocumentStatus;
+  processingStatus: DocumentProcessingStatus;
+  processingError?: string;
+  embedding: DocumentEmbeddingRecord;
+  chunkCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DocumentRecord extends DocumentSummary {
+  content: string;
+  rawHtml?: string;
+  chunks: DocumentChunkRecord[];
 }
 
 export interface DocumentChunkRecord {
@@ -85,9 +91,8 @@ export interface KnowledgeStats {
   lastUpdated: string | null;
 }
 
-export interface KnowledgeSnapshot {
+export interface KnowledgeOverview {
   sources: DataSourceRecord[];
-  documents: DocumentRecord[];
   tasks: CrawlTaskRecord[];
   stats: KnowledgeStats;
 }
@@ -112,7 +117,7 @@ export interface SearchResult {
 }
 
 export interface DocumentListResponse {
-  documents: DocumentRecord[];
+  documents: DocumentSummary[];
   total: number;
 }
 
@@ -168,9 +173,3 @@ export interface ModelProviderRecord {
 }
 
 export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt">;
-
-export interface KnowledgeStoreSnapshot extends KnowledgeSnapshot {
-  knowledgeBases: KnowledgeBaseRecord[];
-  chatLogs: ChatLogRecord[];
-  modelProviders: ModelProviderRecord[];
-}

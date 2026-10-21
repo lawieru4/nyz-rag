@@ -1,21 +1,25 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import pg from "pg";
-import { readSnapshot, updateSnapshot } from "../src/snapshot.js";
+import { closeDatabase, getPool, migrate, withTransaction } from "../src/db.js";
+import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, upsertDocument } from "../src/repository.js";
 
 test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "nyz-vector-"));
-  const previousPath = process.env.NYZ_STORE_PATH;
-  process.env.NYZ_STORE_PATH = join(directory, "knowledge.json");
-  const documentId = crypto.randomUUID();
-  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL ?? "postgresql://nyzrag:nyzrag@localhost:5432/nyzrag" });
+  // 每次运行使用独立 schema（search_path 指向它，pgvector 类型仍从 public 解析），结束后整体删除。
+  const baseUrl = process.env.DATABASE_URL ?? "postgresql://nyzrag:nyzrag@localhost:5432/nyzrag";
+  const schema = `nyz_test_${randomBytes(6).toString("hex")}`;
+  const admin = new pg.Pool({ connectionString: baseUrl });
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  const testUrl = new URL(baseUrl);
+  testUrl.searchParams.set("options", `-c search_path=${schema},public`);
+  const previousUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = testUrl.toString();
+
   let mode: "ok" | "failure" | "slow" = "ok";
   let requested = 0;
   const server = createServer(async (request, response) => {
@@ -44,7 +48,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   const start = (entry: string) => {
     const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), entry], {
       cwd: new URL("../../../", import.meta.url),
-      env: { ...process.env, API_PORT: String(apiPort), DATABASE_URL: pool.options.connectionString, TEST_EMBEDDING_KEY: "integration-test-key", DOCUMENT_QUEUE_NAME: `test-${documentId}` },
+      env: { ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), TEST_EMBEDDING_KEY: "integration-test-key", DOCUMENT_QUEUE_NAME: `test-${schema}` },
       stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout?.on("data", (chunk) => { output += chunk; });
@@ -59,64 +63,85 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     }
     assert.fail(`Timed out: ${output}`);
   }
+  let documentId = "";
+  const embedding = async () => (await getDocumentSummary(documentId))?.embedding;
   async function waitEmbedding(status: string) {
-    await until(async () => (await readSnapshot()).documents[0]?.embedding?.status === status);
+    await until(async () => (await embedding())?.status === status);
     // Status is persisted just before BullMQ removes the completed/failed job.
     await delay(100);
   }
+  const embeddedChunks = async () => (await getPool().query("SELECT chunk_index, embedding::text, dimensions FROM document_chunks WHERE document_id = $1 AND embedding IS NOT NULL ORDER BY chunk_index", [documentId])).rows;
   const post = (path: string) => fetch(`${apiBase}/api/admin/documents/${documentId}/${path}`, { method: "POST" });
   try {
-    const now = new Date().toISOString();
-    await updateSnapshot((snapshot) => {
-      snapshot.documents.push({ id: documentId, sourceId: "test", title: "Vector test", url: "https://example.test", content: "First chunk. Second chunk.", status: "ready", processingStatus: "chunked", chunks: [{ id: `${documentId}-1`, index: 0, content: "First chunk.", tokenEstimate: 5 }, { id: `${documentId}-2`, index: 1, content: "Second chunk.", tokenEstimate: 5 }], createdAt: now, updatedAt: now });
-      snapshot.modelProviders.push({ id: "test-provider", name: "Local test", provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, embeddingModel: "test-embedding", chatModel: "test-chat", rerankModel: "", credentialEnv: "TEST_EMBEDDING_KEY", enabled: true, isDefault: true, createdAt: now, updatedAt: now });
+    await migrate();
+    const source = await createSource({ name: "Test source", url: "https://example.test", kind: "网页站点", frequency: "" });
+    documentId = await withTransaction(async (client) => {
+      const id = await upsertDocument(client, { sourceId: source.id, url: "https://example.test/a", title: "Vector test", content: "First chunk. Second chunk.", status: "ready" });
+      await replaceDocumentChunks(client, id, "First chunk. Second chunk.", [
+        { id: `${id}-1`, index: 0, content: "First chunk.", tokenEstimate: 5 },
+        { id: `${id}-2`, index: 1, content: "Second chunk.", tokenEstimate: 5 },
+      ]);
+      return id;
     });
+    await createModelProvider({ name: "Local test", provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, embeddingModel: "test-embedding", chatModel: "test-chat", rerankModel: "", credentialEnv: "TEST_EMBEDDING_KEY", enabled: true, isDefault: true });
     start("apps/api/src/index.ts");
     start("apps/worker/src/index.ts");
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
+
     assert.equal((await post("embed")).status, 202);
     await waitEmbedding("ready");
-    let rows = await pool.query("SELECT chunk_index, embedding::text, dimensions FROM document_vectors WHERE document_id = $1 ORDER BY chunk_index", [documentId]);
-    assert.equal(rows.rowCount, 2);
-    assert.equal(rows.rows[0].embedding, "[1,0.5,0.25]");
-    assert.equal(rows.rows[0].dimensions, 3);
-    assert.equal((await readSnapshot()).documents[0].embedding?.chunkCount, 2);
+    let rows = await embeddedChunks();
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].embedding, "[1,0.5,0.25]");
+    assert.equal(rows[0].dimensions, 3);
+    assert.equal((await embedding())?.chunkCount, 2);
 
     mode = "failure";
     assert.equal((await post("embed")).status, 202);
     await waitEmbedding("failed");
-    assert.doesNotMatch((await readSnapshot()).documents[0].embedding?.error ?? "", /do-not-leak-provider-body|integration-test-key/);
-    rows = await pool.query("SELECT * FROM document_vectors WHERE document_id = $1", [documentId]);
-    assert.equal(rows.rowCount, 2, "failed replacement preserves previous transaction");
+    assert.doesNotMatch((await embedding())?.error ?? "", /do-not-leak-provider-body|integration-test-key/);
+    assert.equal((await embeddedChunks()).length, 2, "failed embedding preserves previous vectors");
 
     mode = "slow";
     assert.equal((await post("embed")).status, 202);
-    await until(async () => (await readSnapshot()).documents[0].embedding?.status === "processing");
+    await until(async () => (await embedding())?.status === "processing");
     assert.equal((await post("embed")).status, 409);
     assert.equal((await fetch(`${apiBase}/api/admin/documents/${documentId}`, { method: "DELETE" })).status, 409);
-    await updateSnapshot((snapshot) => { snapshot.chatLogs.push({ id: "concurrent-log", question: "Keep me", answer: "Concurrent write", sources: [], rating: null, createdAt: now }); });
-    await waitEmbedding("ready");
-    assert.equal((await readSnapshot()).chatLogs.length, 1, "worker must preserve API writes made during model request");
+    // 模拟模型调用期间文档被重新切片：回写必须被拒绝。
+    await getPool().query("UPDATE documents SET processing_version = processing_version + 1 WHERE id = $1", [documentId]);
+    await waitEmbedding("failed");
+    assert.match((await embedding())?.error ?? "", /changed during embedding/);
 
     mode = "ok";
     assert.equal((await post("reprocess")).status, 202);
     await waitEmbedding("ready");
-    rows = await pool.query("SELECT * FROM document_vectors WHERE document_id = $1", [documentId]);
-    assert.equal(rows.rowCount, 1, "reprocessing removes obsolete chunk vectors");
+    rows = await embeddedChunks();
+    assert.equal(rows.length, 1, "reprocessing removes obsolete chunk vectors");
+
+    const chat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "vector test" }) })).json();
+    assert.match(chat.answer, /Vector test/);
+    assert.equal(chat.sources[0].documentId, documentId);
+    assert.equal((await fetch(`${apiBase}/api/messages/${chat.messageId}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating: "positive" }) })).status, 204);
+    const logs = await (await fetch(`${apiBase}/api/admin/chat-logs?rating=rated&query=vector`)).json();
+    assert.equal(logs.total, 1);
+    assert.deepEqual(logs.logs[0].sources, chat.sources);
+    const overview = await (await fetch(`${apiBase}/api/knowledge`)).json();
+    assert.equal(overview.sources[0].documentCount, 1);
+    assert.equal(overview.stats.documents, 1);
+
     assert.equal((await fetch(`${apiBase}/api/admin/documents/${documentId}`, { method: "DELETE" })).status, 204);
-    rows = await pool.query("SELECT * FROM document_vectors WHERE document_id = $1", [documentId]);
-    assert.equal(rows.rowCount, 0);
+    assert.equal((await getPool().query("SELECT 1 FROM document_chunks WHERE document_id = $1", [documentId])).rowCount, 0);
     assert.ok(requested >= 4);
   } finally {
     for (const child of children) {
       if (child.exitCode === null) { child.kill("SIGTERM"); await once(child, "exit"); }
     }
-    await pool.query("DELETE FROM document_vectors WHERE document_id = $1", [documentId]).catch(() => {});
-    await pool.end();
+    await closeDatabase();
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`).catch(() => {});
+    await admin.end();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (previousPath === undefined) delete process.env.NYZ_STORE_PATH;
-    else process.env.NYZ_STORE_PATH = previousPath;
-    await rm(directory, { recursive: true, force: true });
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
   }
 });

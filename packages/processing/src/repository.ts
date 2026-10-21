@@ -1,0 +1,327 @@
+import { randomUUID } from "node:crypto";
+import { and, asc, count, desc, eq, getTableColumns, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import type {
+  ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
+  DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
+  KnowledgeStats, ModelProviderRecord, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
+} from "@nyz-rag/types";
+import { getDb, withTransaction, type Executor } from "./db.js";
+import { chatMessages, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, messageSources, modelProviders } from "./schema.js";
+
+const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
+// 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
+const compact = <T extends object>(value: { [K in keyof T]: T[K] | null }): T => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined)) as T;
+const paging = (page: number, pageSize: number) => ({ limit: pageSize, offset: (page - 1) * pageSize });
+const contains = (haystack: SQL, needle: string) => sql`strpos(lower(${haystack}), ${needle}) > 0`;
+// 单表查询中 drizzle 渲染列名不带表名，相关子查询引用外层列时必须显式限定，否则会解析成子查询内的同名列。
+const outer = (table: string, column: string) => sql.raw(`"${table}"."${column}"`);
+
+// ---- 数据源与采集任务 ----
+
+const sourceColumns = {
+  ...getTableColumns(dataSources),
+  documentCount: sql<number>`(SELECT count(*)::int FROM ${documents} WHERE ${documents.sourceId} = ${outer("data_sources", "id")} AND ${documents.status} = 'ready')`,
+};
+
+type SourceRow = typeof dataSources.$inferSelect & { documentCount: number };
+const toSource = (row: SourceRow): DataSourceRecord => ({
+  id: row.id, name: row.name, url: row.url, kind: row.kind, frequency: row.frequency, status: row.status,
+  documentCount: row.documentCount, updatedAt: iso(row.syncedAt) ?? null,
+});
+
+export async function listSources(db: Executor = getDb()): Promise<DataSourceRecord[]> {
+  return (await db.select(sourceColumns).from(dataSources).orderBy(desc(dataSources.createdAt))).map(toSource);
+}
+
+export async function getSource(id: string, db: Executor = getDb()): Promise<DataSourceRecord | null> {
+  const [row] = await db.select(sourceColumns).from(dataSources).where(eq(dataSources.id, id));
+  return row ? toSource(row) : null;
+}
+
+export async function createSource(input: CreateSourceRequest, db: Executor = getDb()): Promise<DataSourceRecord> {
+  const id = randomUUID();
+  await db.insert(dataSources).values({ id, name: input.name, url: input.url, kind: input.kind, frequency: input.frequency ?? "", status: "已暂停" });
+  return (await getSource(id, db))!;
+}
+
+export async function updateSourceStatus(id: string, status: DataSourceRecord["status"], db: Executor = getDb()): Promise<DataSourceRecord | null> {
+  const updated = await db.update(dataSources).set({ status }).where(eq(dataSources.id, id)).returning({ id: dataSources.id });
+  return updated.length ? getSource(id, db) : null;
+}
+
+export async function markSourceSynced(id: string, db: Executor = getDb()): Promise<void> {
+  await db.update(dataSources).set({ syncedAt: sql`now()` }).where(eq(dataSources.id, id));
+}
+
+const toTask = (row: typeof crawlTasks.$inferSelect): CrawlTaskRecord => compact<CrawlTaskRecord>({
+  id: row.id, sourceId: row.sourceId, sourceName: row.sourceName, status: row.status, progress: row.progress, createdAt: iso(row.createdAt)!, error: row.error,
+});
+
+export async function listTasks(limit = 100, db: Executor = getDb()): Promise<CrawlTaskRecord[]> {
+  return (await db.select().from(crawlTasks).orderBy(desc(crawlTasks.createdAt)).limit(limit)).map(toTask);
+}
+
+export async function getTask(id: string, db: Executor = getDb()): Promise<CrawlTaskRecord | null> {
+  const [row] = await db.select().from(crawlTasks).where(eq(crawlTasks.id, id));
+  return row ? toTask(row) : null;
+}
+
+export async function createTask(source: DataSourceRecord, db: Executor = getDb()): Promise<CrawlTaskRecord> {
+  const [row] = await db.insert(crawlTasks)
+    .values({ id: `CR-${Date.now().toString().slice(-8)}`, sourceId: source.id, sourceName: source.name, status: "等待中" })
+    .returning();
+  return toTask(row);
+}
+
+/** 未传入的字段保持不变；`error: null` 清除错误。 */
+export async function updateTask(id: string, patch: { status?: CrawlTaskRecord["status"]; progress?: number; error?: string | null }, db: Executor = getDb()): Promise<void> {
+  await db.update(crawlTasks).set(patch).where(eq(crawlTasks.id, id));
+}
+
+export async function getStats(db: Executor = getDb()): Promise<KnowledgeStats> {
+  const [[documentStats], [sourceStats], [taskStats]] = await Promise.all([
+    db.select({ ready: count(sql`CASE WHEN ${documents.status} = 'ready' THEN 1 END`), lastUpdated: sql<string | null>`max(${documents.updatedAt})` }).from(documents),
+    db.select({ total: count() }).from(dataSources),
+    db.select({ active: count() }).from(crawlTasks).where(or(eq(crawlTasks.status, "等待中"), eq(crawlTasks.status, "运行中"))),
+  ]);
+  // 原始 SQL 聚合不经过列映射，max() 返回数据库时间字符串。
+  const lastUpdated = documentStats.lastUpdated ? new Date(documentStats.lastUpdated).toISOString() : null;
+  return { documents: documentStats.ready, sources: sourceStats.total, processingTasks: taskStats.active, lastUpdated };
+}
+
+// ---- 文档与切片 ----
+
+const { content: _content, rawHtml: _rawHtml, ...documentColumns } = getTableColumns(documents);
+const summaryColumns = {
+  ...documentColumns,
+  chunkCount: sql<number>`(SELECT count(*)::int FROM ${documentChunks} WHERE ${documentChunks.documentId} = ${outer("documents", "id")})`,
+};
+
+type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawHtml"> & { chunkCount: number };
+const toSummary = (row: SummaryRow): DocumentSummary => compact<DocumentSummary>({
+  id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, status: row.status,
+  processingStatus: row.processingStatus, processingError: row.processingError,
+  embedding: compact<DocumentEmbeddingRecord>({
+    status: row.embeddingStatus, providerId: row.embeddingProviderId ?? undefined, model: row.embeddingModel ?? undefined, dimensions: row.embeddingDimensions ?? undefined,
+    chunkCount: row.embeddingChunkCount, updatedAt: iso(row.embeddingUpdatedAt), error: row.embeddingError ?? undefined,
+  }),
+  chunkCount: row.chunkCount, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!,
+});
+
+export async function listDocuments(filter: { query?: string; sourceId?: string; status?: string; page: number; pageSize: number }, db: Executor = getDb()): Promise<DocumentListResponse> {
+  const query = filter.query?.trim().toLocaleLowerCase();
+  const where = and(
+    filter.sourceId ? eq(documents.sourceId, filter.sourceId) : undefined,
+    filter.status ? eq(documents.status, filter.status as DocumentStatus) : undefined,
+    query ? contains(sql`${documents.title} || ' ' || ${documents.url} || ' ' || ${documents.content}`, query) : undefined,
+  );
+  const { limit, offset } = paging(filter.page, filter.pageSize);
+  const [rows, [{ total }]] = await Promise.all([
+    db.select(summaryColumns).from(documents).where(where).orderBy(desc(documents.updatedAt), asc(documents.id)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(documents).where(where),
+  ]);
+  return { documents: rows.map(toSummary), total };
+}
+
+export async function listDocumentChunks(documentId: string, db: Executor = getDb()): Promise<DocumentChunkRecord[]> {
+  const rows = await db.select({ id: documentChunks.id, index: documentChunks.chunkIndex, content: documentChunks.content, tokenEstimate: documentChunks.tokenEstimate })
+    .from(documentChunks).where(eq(documentChunks.documentId, documentId)).orderBy(asc(documentChunks.chunkIndex));
+  return rows;
+}
+
+export async function getDocumentSummary(id: string, db: Executor = getDb()): Promise<DocumentSummary | null> {
+  const [row] = await db.select(summaryColumns).from(documents).where(eq(documents.id, id));
+  return row ? toSummary(row) : null;
+}
+
+export async function getDocument(id: string, db: Executor = getDb()): Promise<DocumentRecord | null> {
+  const [row] = await db.select({ ...summaryColumns, content: documents.content, rawHtml: documents.rawHtml }).from(documents).where(eq(documents.id, id));
+  if (!row) return null;
+  return compact<DocumentRecord>({ ...toSummary(row), content: row.content, rawHtml: row.rawHtml ?? undefined, chunks: await listDocumentChunks(id, db) });
+}
+
+/** 在事务内锁定文档行，用于切片和向量化回写前的一致性校验。 */
+export async function lockDocument(tx: Executor, id: string) {
+  const [row] = await tx.select({ id: documents.id, content: documents.content, processingStatus: documents.processingStatus, processingVersion: documents.processingVersion })
+    .from(documents).where(eq(documents.id, id)).for("update");
+  return row ?? null;
+}
+
+export async function upsertDocument(tx: Executor, input: { sourceId: string; url: string; title: string; content: string; rawHtml?: string; status: DocumentStatus }): Promise<string> {
+  const values = { title: input.title, content: input.content, rawHtml: input.rawHtml ?? null, status: input.status };
+  const [row] = await tx.insert(documents)
+    .values({ id: randomUUID(), sourceId: input.sourceId, url: input.url, ...values })
+    .onConflictDoUpdate({ target: [documents.sourceId, documents.url], set: { ...values, updatedAt: sql`now()` } })
+    .returning({ id: documents.id });
+  return row.id;
+}
+
+const resetEmbedding = { embeddingProviderId: null, embeddingModel: null, embeddingDimensions: null, embeddingChunkCount: 0 };
+
+/** 替换正文与全部切片；旧切片的向量随之删除，向量状态重置为待向量化。 */
+export async function replaceDocumentChunks(tx: Executor, documentId: string, content: string, chunks: DocumentChunkRecord[]): Promise<void> {
+  await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
+  await tx.update(documents).set({
+    content, processingStatus: "chunked", processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
+    embeddingStatus: "pending", ...resetEmbedding, embeddingError: null, embeddingUpdatedAt: null, updatedAt: sql`now()`,
+  }).where(eq(documents.id, documentId));
+  if (!chunks.length) return;
+  await tx.insert(documentChunks).values(chunks.map((chunk) => ({ id: chunk.id, documentId, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate })));
+}
+
+export async function setProcessingState(id: string, status: DocumentProcessingStatus, error: string | null = null, db: Executor = getDb()): Promise<void> {
+  await db.update(documents).set({ processingStatus: status, processingError: error }).where(eq(documents.id, id));
+}
+
+/** 设置排队/处理中/失败状态；与原快照一致，非 ready 状态不保留模型信息。 */
+export async function setEmbeddingState(id: string, status: Exclude<DocumentEmbeddingRecord["status"], "ready">, error: string | null = null, db: Executor = getDb()): Promise<void> {
+  await db.update(documents).set({ embeddingStatus: status, embeddingError: error, ...resetEmbedding, embeddingUpdatedAt: sql`now()` }).where(eq(documents.id, id));
+}
+
+function validateVectors(chunks: DocumentChunkRecord[], vectors: number[][], provider: ModelProviderRecord): void {
+  if (chunks.length !== vectors.length) throw new Error("The number of chunks and vectors must match.");
+  if (!provider.id.trim() || !provider.embeddingModel.trim()) throw new Error("Vector provider ID and embedding model are required.");
+  for (const vector of vectors) {
+    if (!Array.isArray(vector) || vector.length === 0 || !vector.every((value) => Number.isFinite(value))) throw new Error("Vectors must contain finite numeric values.");
+    if (!vector.some((value) => value !== 0)) throw new Error("Vectors must not be zero vectors.");
+    if (vector.length !== vectors[0].length) throw new Error("All vectors for one document must have the same dimensions.");
+  }
+}
+
+/** 在调用方事务内写入整篇文档的向量，并把文档向量状态置为 ready。 */
+export async function saveDocumentEmbeddings(tx: Executor, documentId: string, chunks: DocumentChunkRecord[], vectors: number[][], provider: ModelProviderRecord): Promise<void> {
+  validateVectors(chunks, vectors, provider);
+  if (!chunks.length) throw new Error("Document must have chunks before embedding");
+  const model = provider.embeddingModel.trim();
+  const dimensions = vectors[0].length;
+  for (const [index, chunk] of chunks.entries()) {
+    const updated = await tx.update(documentChunks)
+      .set({ embedding: vectors[index], providerId: provider.id, model, dimensions, embeddedAt: sql`now()` })
+      .where(and(eq(documentChunks.documentId, documentId), eq(documentChunks.id, chunk.id)))
+      .returning({ id: documentChunks.id });
+    if (!updated.length) throw new Error("Document chunks changed during embedding");
+  }
+  await tx.update(documents).set({
+    embeddingStatus: "ready", embeddingProviderId: provider.id, embeddingModel: model, embeddingDimensions: dimensions,
+    embeddingChunkCount: chunks.length, embeddingError: null, embeddingUpdatedAt: sql`now()`,
+  }).where(eq(documents.id, documentId));
+}
+
+export async function deleteDocument(id: string, db: Executor = getDb()): Promise<boolean> {
+  return (await db.delete(documents).where(eq(documents.id, id)).returning({ id: documents.id })).length > 0;
+}
+
+/** 关键词匹配：每个命中的词计 1 分，按得分排序。返回正文开头用于摘要。 */
+export async function searchDocuments(terms: string[], options: { readyOnly: boolean; limit?: number }, db: Executor = getDb()) {
+  if (!terms.length) return [];
+  const haystack = sql`${documents.title} || ' ' || ${documents.content}`;
+  const score = sql<number>`(${sql.join(terms.map((term) => sql`(${contains(haystack, term)})::int`), sql` + `)})`;
+  const query = db.select({ documentId: documents.id, title: documents.title, url: documents.url, head: sql<string>`left(${documents.content}, 200)`, score })
+    .from(documents)
+    .where(and(options.readyOnly ? eq(documents.status, "ready") : undefined, sql`${score} > 0`))
+    .orderBy(desc(score), desc(documents.updatedAt))
+    .$dynamic();
+  return options.limit ? query.limit(options.limit) : query;
+}
+
+// ---- 知识库 ----
+
+const toKnowledgeBase = (row: typeof knowledgeBases.$inferSelect): KnowledgeBaseRecord => ({ ...row, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
+
+export async function listKnowledgeBases(db: Executor = getDb()): Promise<KnowledgeBaseRecord[]> {
+  return (await db.select().from(knowledgeBases).orderBy(desc(knowledgeBases.createdAt))).map(toKnowledgeBase);
+}
+
+// 只取可保存的字段，忽略请求体中的 id、时间戳等多余字段。
+const knowledgeBaseValues = (input: SaveKnowledgeBaseRequest) => ({
+  name: input.name, description: input.description, topK: input.topK, similarityThreshold: input.similarityThreshold,
+  rerankEnabled: input.rerankEnabled, maxContextLength: input.maxContextLength, prompt: input.prompt, model: input.model,
+});
+
+export async function createKnowledgeBase(input: SaveKnowledgeBaseRequest, db: Executor = getDb()): Promise<KnowledgeBaseRecord> {
+  const [row] = await db.insert(knowledgeBases).values({ id: randomUUID(), ...knowledgeBaseValues(input) }).returning();
+  return toKnowledgeBase(row);
+}
+
+/** 未传入的可选字段保持不变（drizzle 会忽略 undefined）。 */
+export async function updateKnowledgeBase(id: string, input: SaveKnowledgeBaseRequest, db: Executor = getDb()): Promise<KnowledgeBaseRecord | null> {
+  const [row] = await db.update(knowledgeBases).set({ ...knowledgeBaseValues(input), updatedAt: sql`now()` }).where(eq(knowledgeBases.id, id)).returning();
+  return row ? toKnowledgeBase(row) : null;
+}
+
+// ---- 模型供应商 ----
+
+const toModelProvider = (row: typeof modelProviders.$inferSelect): ModelProviderRecord => ({ ...row, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
+
+export async function listModelProviders(db: Executor = getDb()): Promise<ModelProviderRecord[]> {
+  return (await db.select().from(modelProviders).orderBy(desc(modelProviders.createdAt))).map(toModelProvider);
+}
+
+const modelProviderValues = (input: SaveModelProviderRequest) => ({
+  name: input.name, provider: input.provider, baseUrl: input.baseUrl, chatModel: input.chatModel, embeddingModel: input.embeddingModel,
+  rerankModel: input.rerankModel, credentialEnv: input.credentialEnv, enabled: input.enabled, isDefault: input.isDefault,
+});
+
+export async function createModelProvider(input: SaveModelProviderRequest): Promise<ModelProviderRecord> {
+  return withTransaction(async (tx) => {
+    if (input.isDefault) await tx.update(modelProviders).set({ isDefault: false }).where(eq(modelProviders.isDefault, true));
+    const [row] = await tx.insert(modelProviders).values({ id: randomUUID(), ...modelProviderValues(input) }).returning();
+    return toModelProvider(row);
+  });
+}
+
+export async function updateModelProvider(id: string, input: SaveModelProviderRequest): Promise<ModelProviderRecord | null> {
+  return withTransaction(async (tx) => {
+    if (input.isDefault) await tx.update(modelProviders).set({ isDefault: false }).where(and(eq(modelProviders.isDefault, true), ne(modelProviders.id, id)));
+    const [row] = await tx.update(modelProviders).set({ ...modelProviderValues(input), updatedAt: sql`now()` }).where(eq(modelProviders.id, id)).returning();
+    return row ? toModelProvider(row) : null;
+  });
+}
+
+export async function deleteModelProvider(id: string, db: Executor = getDb()): Promise<boolean> {
+  return (await db.delete(modelProviders).where(eq(modelProviders.id, id)).returning({ id: modelProviders.id })).length > 0;
+}
+
+// ---- 问答记录 ----
+
+const messageColumns = {
+  ...getTableColumns(chatMessages),
+  sources: sql<ChatLogRecord["sources"]>`COALESCE((
+    SELECT json_agg(json_build_object('documentId', ${messageSources.documentId}, 'title', ${messageSources.title}, 'url', ${messageSources.url}) ORDER BY ${messageSources.position})
+    FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")}), '[]')`,
+};
+
+const toChatLog = (row: typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"] }): ChatLogRecord => ({ ...row, createdAt: iso(row.createdAt)! });
+
+type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating"> & { createdAt?: string; rating?: ChatFeedbackRating | null };
+
+export async function createChatMessage(log: NewChatMessage, db?: Executor): Promise<void> {
+  const insert = async (tx: Executor) => {
+    await tx.insert(chatMessages).values({ id: log.id, question: log.question, answer: log.answer, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined });
+    if (!log.sources.length) return;
+    await tx.insert(messageSources).values(log.sources.map((source, position) => ({ messageId: log.id, position, documentId: source.documentId, title: source.title, url: source.url })));
+  };
+  if (db) await insert(db);
+  else await withTransaction(insert);
+}
+
+export async function listChatMessages(filter: { query?: string; rating?: string; page: number; pageSize: number }, db: Executor = getDb()): Promise<ChatLogListResponse> {
+  const query = filter.query?.trim().toLocaleLowerCase();
+  const where = and(
+    query ? or(
+      contains(sql`${chatMessages.question} || ' ' || ${chatMessages.answer}`, query),
+      sql`EXISTS (SELECT 1 FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")} AND ${contains(sql`${messageSources.title}`, query)})`,
+    ) : undefined,
+    filter.rating === "rated" ? isNotNull(chatMessages.rating) : filter.rating === "unrated" ? isNull(chatMessages.rating) : undefined,
+  );
+  const { limit, offset } = paging(filter.page, filter.pageSize);
+  const [rows, [{ total }]] = await Promise.all([
+    db.select(messageColumns).from(chatMessages).where(where).orderBy(desc(chatMessages.createdAt), asc(chatMessages.id)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(chatMessages).where(where),
+  ]);
+  return { logs: rows.map(toChatLog), total };
+}
+
+export async function rateChatMessage(id: string, rating: ChatFeedbackRating, db: Executor = getDb()): Promise<boolean> {
+  return (await db.update(chatMessages).set({ rating }).where(eq(chatMessages.id, id)).returning({ id: chatMessages.id })).length > 0;
+}
