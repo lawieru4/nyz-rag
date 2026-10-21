@@ -1,0 +1,12 @@
+.git
+.kilo
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.env
+.env.*
+**/.env
+**/.env.*
+.nyz-data
+coverage
+**/*.log
