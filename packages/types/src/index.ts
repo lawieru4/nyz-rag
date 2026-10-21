@@ -10,6 +10,7 @@ export interface ChatRequest {
 }
 
 export interface ChatSuccessResponse {
+  messageId: string;
   answer: string;
   sources: Array<{ documentId: string; title: string; url: string }>;
 }
@@ -103,3 +104,40 @@ export interface KnowledgeBaseRecord {
 }
 
 export type SaveKnowledgeBaseRequest = Omit<KnowledgeBaseRecord, "id" | "createdAt" | "updatedAt">;
+
+export type ChatFeedbackRating = "positive" | "negative";
+
+export interface ChatLogRecord {
+  id: string;
+  question: string;
+  answer: string;
+  sources: ChatSuccessResponse["sources"];
+  rating: ChatFeedbackRating | null;
+  createdAt: string;
+}
+
+export interface ChatLogListResponse {
+  logs: ChatLogRecord[];
+  total: number;
+}
+
+export interface ChatFeedbackRequest {
+  rating: ChatFeedbackRating;
+}
+
+export interface ModelProviderRecord {
+  id: string;
+  name: string;
+  provider: string;
+  baseUrl: string;
+  chatModel: string;
+  embeddingModel: string;
+  rerankModel: string;
+  credentialEnv: string;
+  enabled: boolean;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt">;

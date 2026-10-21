@@ -9,6 +9,9 @@ const sourcesCount = ref(0);
 const documentsCount = ref(0);
 const lastUpdated = ref<string | null>(null);
 const sources = ref<Array<{ documentId: string; title: string; url: string }>>([]);
+const messageId = ref("");
+const feedback = ref<"positive" | "negative" | null>(null);
+const feedbackBusy = ref(false);
 
 onMounted(async () => {
   const response = await fetch(`${apiBase}/api/knowledge`);
@@ -24,6 +27,7 @@ async function ask() {
   if (!value || busy.value) return;
   busy.value = true;
   answer.value = "";
+  feedback.value = null;
   try {
     const response = await fetch(`${apiBase}/api/chat`, {
       method: "POST",
@@ -34,10 +38,29 @@ async function ask() {
     if (!response.ok) throw new Error(data.error ?? "请求失败");
     answer.value = data.answer;
     sources.value = data.sources;
+    messageId.value = data.messageId;
   } catch (error) {
     answer.value = error instanceof Error ? error.message : "无法连接 API 服务";
   } finally {
     busy.value = false;
+  }
+}
+
+async function sendFeedback(rating: "positive" | "negative") {
+  if (!messageId.value || feedbackBusy.value || feedback.value) return;
+  feedbackBusy.value = true;
+  try {
+    const response = await fetch(`${apiBase}/api/messages/${messageId.value}/feedback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ rating }),
+    });
+    if (!response.ok) throw new Error();
+    feedback.value = rating;
+  } catch {
+    answer.value = `${answer.value}\n\n评价提交失败，请稍后重试。`;
+  } finally {
+    feedbackBusy.value = false;
   }
 }
 </script>
@@ -75,7 +98,8 @@ async function ask() {
         <section v-if="answer" class="answer" aria-live="polite">
           <div class="answer-heading"><span class="answer-icon">✳</span><div><strong>回答</strong><small>基于知识库检索</small></div></div>
           <p>{{ answer }}</p>
-           <div class="sources"><span>引用来源</span><a v-for="source in sources" :key="source.documentId" :href="source.url" target="_blank" rel="noreferrer">{{ source.title }} ↗</a><span v-if="!sources.length" class="empty-source">暂无匹配文章</span></div>
+            <div class="sources"><span>引用来源</span><a v-for="source in sources" :key="source.documentId" :href="source.url" target="_blank" rel="noreferrer">{{ source.title }} ↗</a><span v-if="!sources.length" class="empty-source">暂无匹配文章</span></div>
+            <div class="answer-feedback"><span>{{ feedback ? '感谢反馈' : '这个回答有帮助吗？' }}</span><button :disabled="feedbackBusy || !!feedback" :class="{ chosen: feedback === 'positive' }" aria-label="回答有帮助" title="有帮助" @click="sendFeedback('positive')">👍</button><button :disabled="feedbackBusy || !!feedback" :class="{ chosen: feedback === 'negative' }" aria-label="回答需要改进" title="需要改进" @click="sendFeedback('negative')">👎</button></div>
         </section>
 
         <div v-else class="suggestions">
