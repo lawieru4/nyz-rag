@@ -1,3 +1,25 @@
+export { closeDatabase, getDb, getPool, migrate, withTransaction, type Database, type Executor, type Transaction } from "./db.js";
 export { embedChunks, selectEmbeddingProvider } from "./embedding.js";
-export { closeVectorStore, deleteDocumentVectors, replaceDocumentVectors } from "./vector.js";
-export { readSnapshot, updateSnapshot } from "./snapshot.js";
+export { hasProviderCredential } from "./provider.js";
+export * from "./models.js";
+export * from "./rag.js";
+export { parseRetrievalFilters } from "./retrieval-filters.js";
+export { normalizeSearchText, searchTerms } from "./search-terms.js";
+export * from "./chunking.js";
+export { articleDocumentUpdate, prepareDocument } from "./prepare.js";
+export { canonicalUrlFromHtml, contentFingerprint, DEDUP_MIN_LENGTH, isDedupCandidate, normalizeUrl } from "./dedup.js";
+export { processDocument, type ProcessDocumentResult } from "./process.js";
+export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleListItem } from "./article/client.js";
+export { parseArticle, PARSER_VERSION, type ArticleBlock, type ArticleDetail, type ParsedArticle } from "./article/parse.js";
+export { syncArticles, type ArticleSyncOptions, type ArticleSyncResult } from "./article/sync.js";
+export * from "./repository.js";
+export * as schema from "./schema.js";
+export {
+  AdmissionError,
+  createRedisAdmissionLimiter,
+  type AdmissionLease,
+  type AdmissionLimiter,
+  type AdmissionLimiterConfig,
+  type AdmissionRule,
+} from "./admission.js";
+export { closeModelAdmissionLimiter, modelAdmissionConfig, modelBucketKey } from "./model-admission.js";

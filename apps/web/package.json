@@ -9,6 +9,6 @@
     "typecheck": "vue-tsc -b --pretty false",
     "preview": "vite preview --host 0.0.0.0"
   },
-  "dependencies": { "@nyz-rag/types": "workspace:*", "@vitejs/plugin-vue": "^6.0.1", "vue": "^3.5.22" },
+  "dependencies": { "@nyz-rag/api-client": "workspace:*", "@nyz-rag/types": "workspace:*", "@vitejs/plugin-vue": "^6.0.1", "vue": "^3.5.22" },
   "devDependencies": { "typescript": "~5.9.3", "vite": "^7.1.10", "vue-tsc": "^3.1.1" }
 }

@@ -1,0 +1,9 @@
+ALTER TABLE "documents" ADD COLUMN "summary_embedding" vector;--> statement-breakpoint
+ALTER TABLE "message_chunks" ADD COLUMN "summary_score" double precision;--> statement-breakpoint
+CREATE INDEX "documents_summary_embedding_384_hnsw_idx" ON "documents" USING hnsw (("summary_embedding"::vector(384)) vector_cosine_ops) WHERE "documents"."embedding_dimensions" = 384;--> statement-breakpoint
+CREATE INDEX "documents_summary_embedding_512_hnsw_idx" ON "documents" USING hnsw (("summary_embedding"::vector(512)) vector_cosine_ops) WHERE "documents"."embedding_dimensions" = 512;--> statement-breakpoint
+CREATE INDEX "documents_summary_embedding_768_hnsw_idx" ON "documents" USING hnsw (("summary_embedding"::vector(768)) vector_cosine_ops) WHERE "documents"."embedding_dimensions" = 768;--> statement-breakpoint
+CREATE INDEX "documents_summary_embedding_1024_hnsw_idx" ON "documents" USING hnsw (("summary_embedding"::vector(1024)) vector_cosine_ops) WHERE "documents"."embedding_dimensions" = 1024;--> statement-breakpoint
+CREATE INDEX "documents_summary_embedding_1536_hnsw_idx" ON "documents" USING hnsw (("summary_embedding"::vector(1536)) vector_cosine_ops) WHERE "documents"."embedding_dimensions" = 1536;--> statement-breakpoint
+CREATE INDEX "documents_summary_embedding_2000_hnsw_idx" ON "documents" USING hnsw (("summary_embedding"::vector(2000)) vector_cosine_ops) WHERE "documents"."embedding_dimensions" = 2000;--> statement-breakpoint
+ALTER TABLE "documents" ADD CONSTRAINT "documents_summary_embedding_check" CHECK ("documents"."summary_embedding" IS NULL OR vector_dims("documents"."summary_embedding") = "documents"."embedding_dimensions");

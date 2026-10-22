@@ -13,17 +13,23 @@
     "build": "tsc -p tsconfig.json",
     "prepare": "pnpm build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "db:migrate": "tsx --env-file-if-exists=../../.env src/cli/migrate.ts",
+    "db:import-snapshot": "tsx --env-file-if-exists=../../.env src/cli/import-snapshot.ts",
+    "db:reindex-search": "tsx --env-file-if-exists=../../.env src/cli/reindex-search.ts",
+    "evaluate:retrieval": "tsx --env-file-if-exists=../../.env src/cli/evaluate-retrieval.ts",
+    "db:generate": "drizzle-kit generate && node scripts/unqualify-migrations.mjs"
   },
   "dependencies": {
     "@nyz-rag/types": "workspace:*",
-    "pg": "^8.16.3",
-    "proper-lockfile": "^4.1.2"
+    "drizzle-orm": "^0.45.4",
+    "ioredis": "^5.8.1",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",
     "@types/pg": "^8.15.5",
-    "@types/proper-lockfile": "^4.1.4",
+    "drizzle-kit": "^0.31.11",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }

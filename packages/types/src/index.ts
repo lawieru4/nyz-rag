@@ -1,3 +1,71 @@
+export interface AdminLoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface AdminSession {
+  username: string;
+  expiresAt: string;
+}
+
+/** 用户端账号（邮箱注册）。未登录访客由浏览器 Cookie 识别，没有账号记录。 */
+export interface UserAccount {
+  id: string;
+  email: string;
+  createdAt: string;
+}
+
+/** 当前浏览器的身份：已登录时为账号，否则为匿名访客（user 为 null）。 */
+export interface UserSessionResponse {
+  user: UserAccount | null;
+}
+
+/** 发送注册或重置密码的邮件验证码。 */
+export interface EmailCodeRequest {
+  email: string;
+}
+
+export interface RegisterRequest {
+  email: string;
+  code: string;
+  password: string;
+}
+
+export interface UserLoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface ResetPasswordRequest {
+  email: string;
+  code: string;
+  password: string;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  password: string;
+}
+
+export interface AdminUserRecord {
+  id: string;
+  email: string;
+  disabled: boolean;
+  sessionCount: number;
+  messageCount: number;
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface AdminUserListResponse {
+  users: AdminUserRecord[];
+  total: number;
+}
+
+export interface UpdateUserRequest {
+  disabled: boolean;
+}
+
 export interface ApiHealth {
   status: "ok";
   service: "nyz-rag-api";
@@ -6,13 +74,28 @@ export interface ApiHealth {
 
 export interface ChatRequest {
   question: string;
-  conversationId?: string;
+  filters?: RetrievalFilters;
+  /** 使用的知识库配置；省略时使用最近创建的知识库，没有知识库时使用默认参数。 */
+  knowledgeBaseId?: string;
 }
+
+/** 回答引用的文章，顺序即回答中的引用编号 [1]、[2]…… */
+export interface ChatSource {
+  documentId: string;
+  title: string;
+  url: string;
+  /** 文章的原始转载源。 */
+  repostSource?: string;
+}
+
+/** generated：由 Chat 模型生成；extractive：未配置或调用失败时直接摘录原文片段。 */
+export type ChatAnswerMode = "generated" | "extractive";
 
 export interface ChatSuccessResponse {
   messageId: string;
   answer: string;
-  sources: Array<{ documentId: string; title: string; url: string }>;
+  answerMode: ChatAnswerMode;
+  sources: ChatSource[];
 }
 
 export interface ChatErrorResponse {
@@ -20,6 +103,76 @@ export interface ChatErrorResponse {
 }
 
 export type ChatResponse = ChatSuccessResponse | ChatErrorResponse;
+
+export interface ChatSessionRecord {
+  id: string;
+  /** 默认取第一个问题的前 40 字。 */
+  title: string;
+  /** 会话固定使用的知识库；省略时每次使用最近创建的知识库。 */
+  knowledgeBaseId?: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateChatSessionRequest {
+  title?: string;
+  knowledgeBaseId?: string;
+}
+
+export interface ChatSessionListResponse {
+  sessions: ChatSessionRecord[];
+  total: number;
+}
+
+/** 会话中的一轮问答（用户端视图，不含召回片段与耗时）。 */
+export interface ChatSessionMessage {
+  id: string;
+  question: string;
+  answer: string;
+  answerMode: ChatAnswerMode;
+  sources: ChatSource[];
+  rating: ChatFeedbackRating | null;
+  createdAt: string;
+}
+
+export interface ChatSessionMessagesResponse {
+  session: ChatSessionRecord;
+  messages: ChatSessionMessage[];
+}
+
+/** 流式问答请求：提出新问题，或重新生成会话中最后一轮回答（regenerate 为该轮的 messageId）。 */
+export interface ChatStreamRequest {
+  question?: string;
+  regenerate?: string;
+  filters?: RetrievalFilters;
+}
+
+/** Exact OR within each list, AND across fields. Dates are inclusive UTC calendar days. */
+export interface RetrievalFilters {
+  publishedFrom?: string;
+  publishedTo?: string;
+  categories?: string[];
+  tags?: string[];
+  scenarios?: string[];
+  sourceId?: string;
+}
+
+export interface SearchRequest {
+  query: string;
+  filters?: RetrievalFilters;
+}
+
+/**
+ * SSE 事件：检索完成后先发送全部 source（citation 即回答中的编号），模型生成时逐段发送 token，
+ * 最后发送 done；done.answer 为最终回答，模型中途失败降级为原文摘录时与已发送的 token 不同，以 done 为准。
+ * 保存前出错时发送 error，不再发送 done。
+ */
+export type ChatStreamEvent =
+  | { event: "source"; data: ChatSource & { citation: number } }
+  | { event: "token"; data: { content: string } }
+  | { event: "done"; data: ChatSessionMessage }
+  | { event: "error"; data: { error: string } };
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
 export type EmbeddingStatus = "pending" | "queued" | "processing" | "ready" | "failed";
@@ -34,20 +187,72 @@ export interface DocumentEmbeddingRecord {
   error?: string;
 }
 
-export interface DocumentRecord {
+/** duplicate：正文与已有文档相同，保留记录但不切片、不向量化，见 DocumentSummary.duplicateOf。 */
+export type DocumentProcessingStatus = "pending" | "cleaning" | "chunked" | "duplicate" | "failed";
+
+export interface DocumentSummary {
   id: string;
   sourceId: string;
   title: string;
   url: string;
-  content: string;
-  rawHtml?: string;
-  processingStatus?: "pending" | "cleaning" | "chunked" | "failed";
-  processingError?: string;
-  chunks?: DocumentChunkRecord[];
-  embedding?: DocumentEmbeddingRecord;
+  /** 规范地址（网页声明的 canonical 或规范化后的抓取地址），同一来源内唯一。 */
+  canonicalUrl: string;
+  /** 来源系统中的标识，例如 nyzdata 的 articleKey；网页文档没有。 */
+  externalId?: string;
+  author?: string;
+  category?: string;
+  tags: string[];
+  publishedAt?: string;
+  parserVersion?: number;
   status: DocumentStatus;
+  processingStatus: DocumentProcessingStatus;
+  processingError?: string;
+  /** 正文相同的主文档 ID；重复文档不参与检索。主文档被删除后为空，需重新处理。 */
+  duplicateOf?: string;
+  embedding: DocumentEmbeddingRecord;
+  chunkCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 重复关系中另一篇文档的简要信息。 */
+export interface DocumentReference {
+  id: string;
+  sourceId: string;
+  title: string;
+  url: string;
+}
+
+export interface DocumentRecord extends DocumentSummary {
+  /** 参与检索的正文；文章来源不含文首元信息、相关阅读、本文链接与延伸思考。 */
+  content: string;
+  /** 文章来源的完整 Markdown（含全部章节）。 */
+  markdown?: string;
+  rawHtml?: string;
+  metadata?: ArticleMetadata;
+  chunks: DocumentChunkRecord[];
+  /** 重复文档所指向的主文档。 */
+  primary?: DocumentReference;
+  /** 以本文档为主文档的重复文档（同内容的其他来源或地址）。 */
+  duplicates?: DocumentReference[];
+}
+
+/** Public article view: no raw input, internal processing errors or model configuration. */
+export interface DocumentDetail {
+  id: string;
+  title: string;
+  url: string;
+  content: string;
+  markdown?: string;
+  author?: string;
+  category?: string;
+  tags: string[];
+  publishedAt?: string;
+  updatedAt: string;
+  summary?: string;
+  repostSource?: string;
+  keywords: string[];
+  scenarios: string[];
 }
 
 export interface DocumentChunkRecord {
@@ -55,6 +260,82 @@ export interface DocumentChunkRecord {
   index: number;
   content: string;
   tokenEstimate: number;
+  /** 向量化时拼接在正文前的上下文（文章标题、章节、关键词）。 */
+  context?: string;
+  sectionPath?: string[];
+  contentType?: "text" | "table";
+}
+
+/** 文首元信息块：生成者、原始转载源、关键词与场景（[[双链]]）。 */
+export interface ArticleSourceMeta {
+  generator: string | null;
+  repostSource: string | null;
+  keywords: string[];
+  scenarios: string[];
+}
+
+/** 项目导读文首字段，保留原始中英文名称，不推断机构或负责人。 */
+export interface ArticleProjectMeta {
+  name: string;
+  principal: string | null;
+  institution: string | null;
+  keywords: string[];
+}
+
+/** 学术快讯标题（「机构 + 作者 + 期刊：正文标题」）中识别出的期刊与机构；未识别出期刊的标题为 null。 */
+export interface ArticleTitleMeta {
+  /** 期刊全称（按期刊词典规范化）。 */
+  journal: string;
+  journalAbbreviation: string | null;
+  /** 保留标题中的写法，按出现顺序去重；仅期刊的标题为空数组。 */
+  institutions: string[];
+}
+
+export interface ArticleImage {
+  index: number;
+  src: string;
+  alt: string | null;
+  title: string | null;
+  caption: string | null;
+  sectionPath: string[];
+  nodeIndex: number;
+}
+
+export interface ArticleMedia {
+  index: number;
+  url: string;
+  fileType: string | null;
+  title: string | null;
+  sectionPath: string[];
+  nodeIndex: number;
+}
+
+export interface ArticleAttachment {
+  originalName: string | null;
+  storageKey: string | null;
+  canDownload: boolean;
+}
+
+/** 文章解析出的结构化信息，不参与切片。 */
+export interface ArticleMetadata {
+  summary: string | null;
+  cover: string | null;
+  doi: string | null;
+  sourceMeta: ArticleSourceMeta | null;
+  /** 旧版本解析结果可能尚未包含此字段。 */
+  projectMeta?: ArticleProjectMeta | null;
+  /** 旧版本解析结果可能尚未包含此字段。 */
+  titleMeta?: ArticleTitleMeta | null;
+  relatedArticleKeys: string[];
+  /** 「延伸思考」中的编辑提问，可用作推荐追问。 */
+  followUpQuestions: string[];
+  attachments: ArticleAttachment[];
+  images: ArticleImage[];
+  media: ArticleMedia[];
+  isVIP: boolean;
+  original: boolean;
+  unknownNodeTypes: string[];
+  demotedHeadings: number;
 }
 
 export interface DataSourceRecord {
@@ -78,6 +359,15 @@ export interface CrawlTaskRecord {
   error?: string;
 }
 
+/** 文章 API 数据源的同步进度，保存在数据源上。 */
+export interface ArticleSourceSyncState {
+  /** 首次全量回填尚未完成时，下次从该页继续。 */
+  backfillPage?: number;
+  backfillDone?: boolean;
+  /** 上次同步失败、下次优先重试的文章。 */
+  retryKeys?: string[];
+}
+
 export interface KnowledgeStats {
   documents: number;
   sources: number;
@@ -85,9 +375,9 @@ export interface KnowledgeStats {
   lastUpdated: string | null;
 }
 
-export interface KnowledgeSnapshot {
+/** Administrative overview returned only by /api/admin/knowledge. */
+export interface KnowledgeOverview {
   sources: DataSourceRecord[];
-  documents: DocumentRecord[];
   tasks: CrawlTaskRecord[];
   stats: KnowledgeStats;
 }
@@ -112,7 +402,7 @@ export interface SearchResult {
 }
 
 export interface DocumentListResponse {
-  documents: DocumentRecord[];
+  documents: DocumentSummary[];
   total: number;
 }
 
@@ -134,11 +424,47 @@ export type SaveKnowledgeBaseRequest = Omit<KnowledgeBaseRecord, "id" | "created
 
 export type ChatFeedbackRating = "positive" | "negative";
 
+/** 送入模型的召回片段及各路得分。 */
+export interface ChatRetrievedChunk {
+  chunkId: string;
+  documentId: string;
+  /** 对应回答中的引用编号。 */
+  citation: number;
+  title: string;
+  sectionPath: string[];
+  excerpt: string;
+  /** 合并（RRF）得分。 */
+  score: number;
+  vectorScore?: number;
+  keywordScore?: number;
+  /** 摘要召回：所属文章摘要与问题的余弦相似度。 */
+  summaryScore?: number;
+  rerankScore?: number;
+}
+
+/** 问答归属：注册用户、匿名访客，或用户体系上线前没有归属的历史记录。 */
+export type ChatOwnerType = "user" | "visitor" | "none";
+
 export interface ChatLogRecord {
   id: string;
+  sessionId?: string;
+  ownerType: ChatOwnerType;
+  /** ownerType 为 user 时的账号邮箱。 */
+  userEmail?: string;
+  /** 被“重新生成”替换的时间；替换后不再出现在会话中，但保留在问答记录里。 */
+  supersededAt?: string;
   question: string;
   answer: string;
-  sources: ChatSuccessResponse["sources"];
+  answerMode: ChatAnswerMode;
+  knowledgeBaseId?: string;
+  model?: string;
+  retrievalMs?: number;
+  firstTokenMs?: number;
+  totalMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  sources: ChatSource[];
+  chunks: ChatRetrievedChunk[];
   rating: ChatFeedbackRating | null;
   createdAt: string;
 }
@@ -160,6 +486,9 @@ export interface ModelProviderRecord {
   chatModel: string;
   embeddingModel: string;
   rerankModel: string;
+  /** Chat 模型的采样温度（0～2）与单次回答最大 Token 数。 */
+  temperature: number;
+  maxTokens: number;
   credentialEnv: string;
   enabled: boolean;
   isDefault: boolean;
@@ -167,10 +496,6 @@ export interface ModelProviderRecord {
   updatedAt: string;
 }
 
-export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt">;
-
-export interface KnowledgeStoreSnapshot extends KnowledgeSnapshot {
-  knowledgeBases: KnowledgeBaseRecord[];
-  chatLogs: ChatLogRecord[];
-  modelProviders: ModelProviderRecord[];
-}
+/** temperature 与 maxTokens 省略时新建使用默认值（0.3 / 1024），更新保持不变。 */
+export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt" | "temperature" | "maxTokens">
+  & Partial<Pick<ModelProviderRecord, "temperature" | "maxTokens">>;

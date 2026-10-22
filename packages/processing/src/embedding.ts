@@ -1,8 +1,9 @@
 import type { ModelProviderRecord } from "@nyz-rag/types";
+import { acquireModelLease, type AdmissionLimiter } from "./model-admission.js";
+import { providerCredential, providerUrl } from "./provider.js";
 
 const BATCH_SIZE = 32;
 const REQUEST_TIMEOUT_MS = 30_000;
-const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 
 export function selectEmbeddingProvider(providers: ModelProviderRecord[]): ModelProviderRecord {
   const candidates = providers.filter((provider) =>
@@ -17,30 +18,6 @@ export function selectEmbeddingProvider(providers: ModelProviderRecord[]): Model
   }
 
   return candidates[0];
-}
-
-function isKnownOpenAI(provider: ModelProviderRecord): boolean {
-  return [provider.name, provider.provider].some((value) => value.trim().toLowerCase() === "openai");
-}
-
-function getEmbeddingUrl(provider: ModelProviderRecord): string {
-  const configuredBaseUrl = provider.baseUrl.trim();
-  const baseUrl = configuredBaseUrl || (isKnownOpenAI(provider) ? OPENAI_API_BASE_URL : "");
-  if (!baseUrl) {
-    throw new Error("An embedding API base URL is required for this provider.");
-  }
-
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    throw new Error("The embedding API base URL is invalid.");
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("The embedding API base URL must use HTTP or HTTPS.");
-  }
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}/embeddings`;
-  return url.toString();
 }
 
 function readEmbeddingResponse(payload: unknown, expectedCount: number): number[][] {
@@ -78,12 +55,13 @@ function readEmbeddingResponse(payload: unknown, expectedCount: number): number[
   return vectors as number[][];
 }
 
-export async function embedChunks(provider: ModelProviderRecord, inputs: string[]): Promise<number[][]> {
-  const credentialName = provider.credentialEnv.trim();
-  const apiKey = credentialName ? process.env[credentialName]?.trim() : undefined;
-  if (!apiKey) {
-    throw new Error("The configured embedding API credential is missing.");
-  }
+/**
+ * Embed an array of text inputs using the given provider.
+ * Each batch of up to BATCH_SIZE texts counts as one request against the admission limiter.
+ * @param limiter  Optional injected limiter; uses the shared lazy limiter if omitted.
+ */
+export async function embedChunks(provider: ModelProviderRecord, inputs: string[], limiter?: AdmissionLimiter): Promise<number[][]> {
+  const apiKey = providerCredential(provider, "embedding");
 
   const model = provider.embeddingModel.trim();
   if (!model) {
@@ -93,45 +71,53 @@ export async function embedChunks(provider: ModelProviderRecord, inputs: string[
     throw new Error("Embedding inputs must be strings.");
   }
 
-  const url = getEmbeddingUrl(provider);
+  const url = providerUrl(provider, "embeddings", "embedding");
   const vectors: number[][] = [];
   let dimensions: number | undefined;
 
   for (let offset = 0; offset < inputs.length; offset += BATCH_SIZE) {
     const batch = inputs.slice(offset, offset + BATCH_SIZE);
+
+    // Each batch is one HTTP request; acquire admission before sending.
+    const lease = await acquireModelLease(provider.id, "embedding", model, limiter);
     let response: Response;
     try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ model, input: batch }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch {
-      throw new Error("The embedding request failed or timed out.");
-    }
-
-    if (!response.ok) {
-      throw new Error(`The embedding request failed with HTTP ${response.status}.`);
-    }
-
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new Error("The embedding provider returned an invalid response.");
-    }
-
-    const batchVectors = readEmbeddingResponse(payload, batch.length);
-    for (const vector of batchVectors) {
-      if (dimensions !== undefined && vector.length !== dimensions) {
-        throw new Error("The embedding provider returned inconsistent vector dimensions.");
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ model, input: batch }),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch {
+        throw new Error("The embedding request failed or timed out.");
       }
-      dimensions = vector.length;
-      vectors.push(vector);
+
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`The embedding request failed with HTTP ${response.status}.`);
+      }
+
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new Error("The embedding provider returned an invalid response.");
+      }
+
+      const batchVectors = readEmbeddingResponse(payload, batch.length);
+      for (const vector of batchVectors) {
+        if (dimensions !== undefined && vector.length !== dimensions) {
+          throw new Error("The embedding provider returned inconsistent vector dimensions.");
+        }
+        dimensions = vector.length;
+        vectors.push(vector);
+      }
+    } finally {
+      await lease.release();
     }
   }
 

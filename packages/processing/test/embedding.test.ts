@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
 import { embedChunks, selectEmbeddingProvider } from "../src/embedding.js";
+import { noopLimiter } from "./admission-helpers.js";
 
 function provider(overrides: Partial<ModelProviderRecord> = {}): ModelProviderRecord {
   return {
@@ -53,7 +54,7 @@ test("batches requests and restores vectors by response index", async (context) 
     }), { status: 200 });
   }) as typeof fetch;
 
-  const vectors = await embedChunks(provider(), Array.from({ length: 33 }, (_, index) => `chunk-${index}`));
+  const vectors = await embedChunks(provider(), Array.from({ length: 33 }, (_, index) => `chunk-${index}`), noopLimiter());
   assert.deepEqual(batchSizes, [32, 1]);
   assert.deepEqual(requestUrls, [
     "https://embeddings.example/v1/embeddings",
@@ -80,9 +81,9 @@ test("uses the OpenAI default URL only for a recognized OpenAI provider", async 
     return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1] }] }), { status: 200 });
   }) as typeof fetch;
 
-  await embedChunks(provider({ name: "OpenAI", provider: "openai", baseUrl: "" }), ["input"]);
+  await embedChunks(provider({ name: "OpenAI", provider: "openai", baseUrl: "" }), ["input"], noopLimiter());
   assert.equal(requestUrl, "https://api.openai.com/v1/embeddings");
-  await assert.rejects(embedChunks(provider({ baseUrl: "" }), ["input"]), /base URL is required/);
+  await assert.rejects(embedChunks(provider({ baseUrl: "" }), ["input"], noopLimiter()), /base URL is required/);
 });
 
 test("rejects malformed vectors and hides provider response bodies", async (context) => {
@@ -96,7 +97,7 @@ test("rejects malformed vectors and hides provider response bodies", async (cont
   process.env.PROCESSING_TEST_API_KEY = "test-secret";
 
   globalThis.fetch = (async () => new Response("sensitive provider body test-secret", { status: 401 })) as typeof fetch;
-  await assert.rejects(embedChunks(provider(), ["input"]), (error: unknown) => {
+  await assert.rejects(embedChunks(provider(), ["input"], noopLimiter()), (error: unknown) => {
     assert(error instanceof Error);
     assert.match(error.message, /HTTP 401/);
     assert.doesNotMatch(error.message, /sensitive provider body|test-secret/);
@@ -109,5 +110,5 @@ test("rejects malformed vectors and hides provider response bodies", async (cont
       { index: 0, embedding: [3, 4] },
     ],
   }), { status: 200 })) as typeof fetch;
-  await assert.rejects(embedChunks(provider(), ["input", "input-2"]), /invalid vector indices/);
+  await assert.rejects(embedChunks(provider(), ["input", "input-2"], noopLimiter()), /invalid vector indices/);
 });
