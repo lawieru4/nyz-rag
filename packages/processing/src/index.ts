@@ -1,4 +1,4 @@
-export { closeDatabase, getDb, getPool, migrate, withTransaction, type Database, type Executor, type Transaction } from "./db.js";
+export { closeDatabase, DocumentBusyError, getDb, getPool, migrate, withDocumentWork, withTransaction, type Database, type Executor, type Transaction } from "./db.js";
 export { embedChunks, selectEmbeddingProvider } from "./embedding.js";
 export { hasProviderCredential } from "./provider.js";
 export * from "./models.js";

@@ -2,10 +2,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  backfillContentHashes, canonicalUrlFromHtml, closeDatabase, closeModelAdmissionLimiter, contentFingerprint, createArticleClient, embedChunks, embeddingInput, findDocumentByCanonicalUrl, getSource, getSourceSyncState,
+  backfillContentHashes, canonicalUrlFromHtml, closeDatabase, closeModelAdmissionLimiter, contentFingerprint, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, findDocumentByCanonicalUrl, getSource, getSourceSyncState,
   getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
   reindexChunkSearchTerms, reindexDocumentMetadataTerms, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState,
-  syncArticles, updateTask, upsertDocument, withTransaction, type ProcessDocumentResult,
+  syncArticles, updateTask, upsertDocument, withDocumentWork, withTransaction, type Database, type ProcessDocumentResult,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
 
@@ -35,10 +35,10 @@ function extractPage(html: string, url: string) {
   return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links, canonicalUrl: canonicalUrlFromHtml(html, url), rawHtml: html };
 }
 
-async function embedDocument(documentId: string) {
+async function embedDocument(documentId: string, db: Database) {
   try {
     // 模型调用放在事务外；回写时用 processing_version 确认切片没有被重新生成。
-    const { version, chunks, summary } = await withTransaction(async (tx) => {
+    const { version, chunks, summary } = await db.transaction(async (tx) => {
       const target = await lockDocument(tx, documentId);
       if (!target) throw new Error("Document no longer exists");
       const chunks = await listDocumentChunks(documentId, tx);
@@ -46,11 +46,11 @@ async function embedDocument(documentId: string) {
       await setEmbeddingState(documentId, "processing", null, tx);
       return { version: target.processingVersion, chunks, summary: await getSummaryInput(documentId, tx) };
     });
-    const provider = selectEmbeddingProvider(await listModelProviders());
+    const provider = selectEmbeddingProvider(await listModelProviders(db));
     // 文章级向量（标题 + 摘要）与切片在同一次调用中生成，保证同模型同维度。
     const vectors = await embedChunks(provider, [...chunks.map(embeddingInput), ...(summary ? [summary] : [])]);
     const summaryVector = summary ? vectors.pop()! : null;
-    await withTransaction(async (tx) => {
+    await db.transaction(async (tx) => {
       const target = await lockDocument(tx, documentId);
       if (!target || target.processingStatus !== "chunked" || target.processingVersion !== version) {
         throw new Error("Document changed during embedding; retry after processing finishes");
@@ -58,18 +58,18 @@ async function embedDocument(documentId: string) {
       await saveDocumentEmbeddings(tx, documentId, chunks, vectors, provider, summaryVector);
     });
   } catch (error) {
-    await setEmbeddingState(documentId, "failed", errorMessage(error, "Embedding failed"));
+    await setEmbeddingState(documentId, "failed", errorMessage(error, "Embedding failed"), db);
     throw error;
   }
 }
 
 /** 切片后自动向量化：本文档（重复文档除外）及接替为主文档的文档。 */
-async function autoEmbedDocuments({ embed }: ProcessDocumentResult) {
+async function autoEmbedDocuments({ embed }: ProcessDocumentResult, db: Database) {
   if (!embed.length) return;
-  const providers = await listModelProviders();
+  const providers = await listModelProviders(db);
   if (!providers.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
   // An embedding failure remains retryable without discarding successfully crawled content.
-  for (const documentId of embed) await embedDocument(documentId).catch(() => console.error(`Embedding failed for document ${documentId}`));
+  for (const documentId of embed) await embedDocument(documentId, db).catch(() => console.error(`Embedding failed for document ${documentId}`));
 }
 
 const duplicateNote = (count: number) => count ? `${count} 篇与已有文档内容相同，标记为重复，未切片和向量化` : "";
@@ -96,15 +96,21 @@ async function syncArticleSource(source: DataSourceRecord, taskId: string) {
     process: async (item) => {
       const detail = await client.detail(item._key);
       const url = normalizeUrl(client.articleUrl(detail._key))!;
-      const processed = await withTransaction(async (tx) => {
-        const id = await upsertDocument(tx, {
-          sourceId: source.id, externalId: detail._key, url, title: detail.title?.trim() || detail._key, content: "",
-          rawJson: detail, sourceUpdatedAt: detail.updateTime ? new Date(detail.updateTime) : null, status: "ready",
+      const processed = await withDocumentWork(async (db, lock) => {
+        const result = await db.transaction(async (tx) => {
+          const id = await upsertDocument(tx, {
+            sourceId: source.id, externalId: detail._key, url, title: detail.title?.trim() || detail._key, content: "",
+            rawJson: detail, sourceUpdatedAt: detail.updateTime ? new Date(detail.updateTime) : null, status: "ready",
+          });
+          await lock(id);
+          const result = await processDocument(tx, id);
+          for (const target of result.embed) await lock(target);
+          return result;
         });
-        return processDocument(tx, id);
+        await autoEmbedDocuments(result, db);
+        return result;
       });
       if (processed.duplicateOf) duplicates += 1;
-      await autoEmbedDocuments(processed);
     },
   });
   console.info(`Source ${source.id}: ${result.processed} articles synced, ${result.failures.length} failed, ${result.pages} list pages${result.limitReached ? ", limit reached" : ""}`);
@@ -122,17 +128,24 @@ async function syncArticleSource(source: DataSourceRecord, taskId: string) {
  * 跳过（返回 null）；正文不同多为站点配置错误，不信任 canonical，改用抓取地址，避免不同页面互相覆盖。
  */
 async function saveWebPage(sourceId: string, url: string, page: ReturnType<typeof extractPage>) {
-  return withTransaction(async (tx) => {
-    let canonicalUrl = page.canonicalUrl ?? url;
-    if (canonicalUrl !== url) {
-      const existing = await findDocumentByCanonicalUrl(tx, sourceId, canonicalUrl);
-      if (existing && existing.url !== url) {
-        if (existing.contentHash === contentFingerprint(page.content)) return null;
-        canonicalUrl = url;
+  return withDocumentWork(async (db, lock) => {
+    const result = await db.transaction(async (tx) => {
+      let canonicalUrl = page.canonicalUrl ?? url;
+      if (canonicalUrl !== url) {
+        const existing = await findDocumentByCanonicalUrl(tx, sourceId, canonicalUrl);
+        if (existing && existing.url !== url) {
+          if (existing.contentHash === contentFingerprint(page.content)) return null;
+          canonicalUrl = url;
+        }
       }
-    }
-    const id = await upsertDocument(tx, { sourceId, url, canonicalUrl, title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" });
-    return processDocument(tx, id);
+      const id = await upsertDocument(tx, { sourceId, url, canonicalUrl, title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" });
+      await lock(id);
+      const result = await processDocument(tx, id);
+      for (const target of result.embed) await lock(target);
+      return result;
+    });
+    if (result) await autoEmbedDocuments(result, db);
+    return result;
   });
 }
 
@@ -169,7 +182,6 @@ async function crawlSite(source: DataSourceRecord, taskId: string) {
       const result = await saveWebPage(source.id, finalUrl, page);
       if (result) {
         if (result.duplicateOf) duplicates += 1;
-        await autoEmbedDocuments(result);
         processed += 1;
       }
     }
@@ -182,14 +194,21 @@ async function crawlSite(source: DataSourceRecord, taskId: string) {
 }
 
 async function reprocessDocument(documentId: string) {
-  try {
-    const result = await withTransaction((tx) => processDocument(tx, documentId));
-    await autoEmbedDocuments(result);
-    return result;
-  } catch (error) {
-    await setProcessingState(documentId, "failed", errorMessage(error, "Document processing failed"));
-    throw error;
-  }
+  return withDocumentWork(async (db, lock) => {
+    await lock(documentId);
+    try {
+      const result = await db.transaction(async (tx) => {
+        const result = await processDocument(tx, documentId);
+        for (const target of result.embed) await lock(target);
+        return result;
+      });
+      await autoEmbedDocuments(result, db);
+      return result;
+    } catch (error) {
+      if (!(error instanceof DocumentBusyError)) await setProcessingState(documentId, "failed", errorMessage(error, "Document processing failed"), db);
+      throw error;
+    }
+  });
 }
 
 async function syncSource(sourceId: string, taskId: string) {
@@ -258,7 +277,10 @@ void backfillSearchTerms().catch((error: unknown) => console.error("Search term 
 void backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error")));
 const worker = new Worker(queueName, async (job) => {
   if (job.name === "embed-document") {
-    await embedDocument(job.data.documentId);
+    await withDocumentWork(async (db, lock) => {
+      await lock(job.data.documentId);
+      await embedDocument(job.data.documentId, db);
+    });
     return { status: "embedded", documentId: job.data.documentId };
   }
   if (job.name === "reprocess-document") {

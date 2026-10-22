@@ -11,7 +11,7 @@ import type {
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
-import { getDb, withTransaction, type Executor } from "./db.js";
+import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
 import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
@@ -190,6 +190,7 @@ export async function getDocumentDetail(id: string, db: Executor = getDb()): Pro
 
 /** 在事务内锁定文档行，用于切片和向量化回写前的一致性校验。 */
 export async function lockDocument(tx: Executor, id: string) {
+  await lockDocumentWork(tx, id);
   const [row] = await tx.select({
     id: documents.id, content: documents.content, contentHash: documents.contentHash, processingStatus: documents.processingStatus, processingVersion: documents.processingVersion,
   })
@@ -240,6 +241,8 @@ export async function upsertDocument(tx: Executor, input: UpsertDocumentInput): 
     .values({ id: randomUUID(), sourceId: input.sourceId, ...values })
     .onConflictDoUpdate({ target: input.externalId ? [documents.sourceId, documents.externalId] : [documents.sourceId, documents.canonicalUrl], set: { ...values, updatedAt: sql`now()` } })
     .returning({ id: documents.id });
+  // Roll back the upsert if an embedding owner holds the document across transactions.
+  await lockDocumentWork(tx, row.id);
   return row.id;
 }
 
@@ -313,8 +316,11 @@ export async function markDocumentDuplicate(tx: Executor, documentId: string, pr
 
 /** 以 primaryId 为主文档的重复文档（按入库先后），并锁定这些行。 */
 export async function listDuplicateDocuments(tx: Executor, primaryId: string) {
-  return tx.select({ id: documents.id, contentHash: documents.contentHash }).from(documents)
-    .where(eq(documents.duplicateOf, primaryId)).orderBy(asc(documents.createdAt), asc(documents.id)).for("update");
+  const rows = await tx.select({ id: documents.id, contentHash: documents.contentHash }).from(documents)
+    .where(eq(documents.duplicateOf, primaryId)).orderBy(asc(documents.createdAt), asc(documents.id));
+  // Try advisory locks before waiting for rows: a dependent may already be waiting for our content hash.
+  for (const row of rows) await lockDocument(tx, row.id);
+  return rows;
 }
 
 /** 改变重复文档的主文档；primaryId 为 null 时解除重复关系（状态仍为 duplicate，需重新处理）。 */

@@ -1,4 +1,6 @@
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { migrate as runMigrations } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
@@ -29,6 +31,51 @@ export function getDb(): Database {
 
 export function withTransaction<T>(run: (tx: Transaction) => Promise<T>): Promise<T> {
   return getDb().transaction(run);
+}
+
+export class DocumentBusyError extends Error {
+  constructor() { super("Document is being processed; retry later"); }
+}
+
+/** Nonblocking acquisition avoids deadlocks when deduplication touches several documents. */
+export async function lockDocumentWork(tx: Executor, id: string): Promise<void> {
+  const result = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${`nyz-rag:document:${id}`}, 0)) AS locked`);
+  if (!result.rows[0]?.locked) throw new DocumentBusyError();
+}
+
+/**
+ * Keep the document lock across short transactions and model calls, without an open transaction.
+ * All writes must use this connection: losing it also prevents a former owner from writing.
+ * Acquire session locks before committing any changes; busy attempts must be safe to retry.
+ */
+export async function withDocumentWork<T>(run: (db: Database, lock: (id: string) => Promise<void>) => Promise<T>): Promise<T> {
+  for (;;) {
+    const client = await getPool().connect();
+    const keys = new Set<string>();
+    let broken = false;
+    const onError = () => { broken = true; };
+    client.on("error", onError);
+    try {
+      const db = drizzle(client, { schema, casing: "snake_case" });
+      return await run(db, async (id) => {
+        const key = `nyz-rag:document:${id}`;
+        if (keys.has(key)) return;
+        const { rows: [row] } = await client.query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked", [key]);
+        if (!row.locked) throw new DocumentBusyError();
+        keys.add(key);
+      });
+    } catch (error) {
+      if (!(error instanceof DocumentBusyError) || broken) throw error;
+    } finally {
+      try {
+        for (const key of keys) await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [key]);
+      } catch { broken = true; }
+      client.removeListener("error", onError);
+      client.release(broken);
+    }
+    // Wait outside the pool so contenders cannot starve the lock holder of connections.
+    await delay(100 + Math.floor(Math.random() * 100));
+  }
 }
 
 const migrationsFolder = fileURLToPath(new URL("../migrations/", import.meta.url));

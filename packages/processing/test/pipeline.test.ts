@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import pg from "pg";
-import { closeDatabase, getPool, migrate, withTransaction } from "../src/db.js";
+import { closeDatabase, getPool, migrate, withDocumentWork, withTransaction } from "../src/db.js";
 import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, upsertDocument } from "../src/repository.js";
 
 test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
@@ -186,6 +186,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await getPool().query("UPDATE document_chunks SET search_vector = ''::tsvector WHERE document_id = $1", [documentId]);
     start("apps/api/src/index.ts");
     start("apps/worker/src/index.ts");
+    start("apps/worker/src/index.ts");
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
     assert.equal((await fetch(`${apiBase}/api/admin/documents`)).status, 401);
     const login = await fetch(`${apiBase}/api/admin/auth/login`, {
@@ -245,7 +246,13 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.match((await embedding())?.error ?? "", /changed during embedding/);
 
     mode = "ok";
-    assert.equal((await post("reprocess")).status, 202);
+    await withDocumentWork(async (_db, lock) => {
+      await lock(documentId);
+      const version = (await getPool().query("SELECT processing_version FROM documents WHERE id = $1", [documentId])).rows[0].processing_version;
+      assert.equal((await post("reprocess")).status, 202);
+      await delay(400);
+      assert.equal((await getPool().query("SELECT processing_version FROM documents WHERE id = $1", [documentId])).rows[0].processing_version, version, "workers cannot reprocess a document owned by another connection");
+    });
     await waitEmbedding("ready");
     rows = await embeddedChunks();
     assert.equal(rows.length, 1, "reprocessing removes obsolete chunk vectors");
@@ -429,7 +436,15 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
 
     articles.set("a2", article("a2", "文章二（更新）", 200));
     articleRequests.length = 0;
-    await syncArticles();
+    let pendingSync: Promise<void> | undefined;
+    await withDocumentWork(async (_db, lock) => {
+      await lock(synced[1].id);
+      pendingSync = syncArticles();
+      await until(async () => articleRequests.some((path) => path.endsWith("/articleDetail")));
+      await delay(250);
+      assert.equal((await getDocumentSummary(synced[1].id))!.title, "文章二", "sync cannot overwrite a document owned by another connection");
+    });
+    await pendingSync;
     synced = await articleDocuments();
     assert.equal(synced[1].title, "文章二（更新）");
     assert.deepEqual(articleRequests.filter((path) => path.endsWith("/articleDetail")).length, 1, "only the changed article is fetched again");

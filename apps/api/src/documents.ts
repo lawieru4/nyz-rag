@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import {
-  deleteDocument, getDocument, getDocumentDetail, getDocumentSummary, listDocuments, listModelProviders,
+  deleteDocument, DocumentBusyError, getDocument, getDocumentDetail, getDocumentSummary, listDocuments, listModelProviders,
   selectEmbeddingProvider, setEmbeddingState, setProcessingState,
 } from "@nyz-rag/processing";
 import type { DocumentListResponse } from "@nyz-rag/types";
@@ -66,7 +66,13 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     const document = await getDocumentSummary(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     if (await queue.hasDocumentJob(document)) return reply.code(409).send({ error: "document already has a processing job" });
-    const deleted = await deleteDocument(document.id);
+    let deleted;
+    try {
+      deleted = await deleteDocument(document.id);
+    } catch (error) {
+      if (error instanceof DocumentBusyError) return reply.code(409).send({ error: "document already has a processing job" });
+      throw error;
+    }
     if (!deleted) return reply.code(404).send({ error: "document not found" });
     // 删除的是主文档时，接替的重复文档已置为待处理，需要重新切片和向量化。
     if (deleted.promotedId) {
