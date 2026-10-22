@@ -351,6 +351,8 @@ export interface ChatRetrievedChunk {
   score: number;
   vectorScore?: number;
   keywordScore?: number;
+  /** 摘要召回：所属文章摘要与问题的余弦相似度。 */
+  summaryScore?: number;
   rerankScore?: number;
 }
 

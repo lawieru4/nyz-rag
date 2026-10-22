@@ -4,7 +4,7 @@ import {
   buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, hasProviderCredential, HISTORY_TURNS, keywordSearchChunks,
   listChatMessages, listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
-  vectorSearchChunks, type AnswerContext, type ChatTurn,
+  summarySearchChunks, vectorSearchChunks, type AnswerContext, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
   ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
@@ -57,9 +57,16 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   const embedding = provider?.embeddingModel.trim() ? createEmbeddingModel(provider) : null;
   const reranker = provider?.rerankModel.trim() ? createRerankModel(provider) : null;
 
+  // 切片与摘要两路向量召回共用同一个查询向量，只调用一次 Embedding。
+  const queryVectors = new Map<string, Promise<number[]>>();
+  const embedQuery = (text: string) => {
+    if (!queryVectors.has(text)) queryVectors.set(text, embedding!.embedQuery(text));
+    return queryVectors.get(text)!;
+  };
   const { chunks, warnings } = await retrieve(question, settings, {
     keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit, undefined, options.filters),
-    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedding.embedQuery(text), embedding.model, limit, undefined, options.filters) : undefined,
+    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedQuery(text), embedding.model, limit, undefined, options.filters) : undefined,
+    summarySearch: embedding ? async (text, limit) => summarySearchChunks(await embedQuery(text), embedding.model, limit, undefined, options.filters) : undefined,
     rerank: reranker ? (query, documents, topN) => reranker.rerank(query, documents, topN) : undefined,
   });
   for (const warning of warnings) log.warn(warning);

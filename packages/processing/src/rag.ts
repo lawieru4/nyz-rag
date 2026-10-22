@@ -1,4 +1,4 @@
-// 混合检索与回答组装：关键词召回 + 向量召回 → RRF 合并去重 → 可选 Rerank → 按上下文长度截取 → 组装带引用编号的 Prompt。
+// 混合检索与回答组装：关键词召回 + 向量召回 + 摘要召回（先召回文章、再定位切片）→ RRF 合并去重 → 可选 Rerank → 按上下文长度截取 → 组装带引用编号的 Prompt。
 // 数据访问与模型调用通过参数注入，便于单元测试；API 负责接线。
 import type { ChatRetrievedChunk, ChatSource, DocumentChunkRecord } from "@nyz-rag/types";
 import { embeddingInput } from "./chunking.js";
@@ -24,6 +24,7 @@ export interface RetrievedChunk extends Omit<ChunkHit, "score"> {
   score: number;
   vectorScore?: number;
   keywordScore?: number;
+  summaryScore?: number;
   rerankScore?: number;
 }
 
@@ -41,8 +42,9 @@ export const DEFAULT_RETRIEVAL_SETTINGS: RetrievalSettings = { topK: 5, similari
 export const DEFAULT_ANSWER_PROMPT = "你是 NYZ 文章知识库的问答助手，请依据提供的知识库内容回答问题；若资料不足，请明确说明。";
 export const NO_MATCH_ANSWER = "知识库中暂未找到与问题直接匹配的内容，请尝试更具体的关键词。";
 
-// 每路召回数、合并后进入 Rerank 的候选数，以及 RRF 常数。
+// 每路召回数（摘要召回按文章计，每篇一个切片）、合并后进入 Rerank 的候选数，以及 RRF 常数。
 export const RECALL_LIMIT = 20;
+export const SUMMARY_RECALL_LIMIT = 10;
 const CANDIDATE_LIMIT = 30;
 const RRF_K = 60;
 const MAX_QUERY_TERMS = 64;
@@ -52,6 +54,8 @@ export interface RetrievalDependencies {
   keywordSearch(terms: string[], limit: number): Promise<ChunkHit[]>;
   /** 未配置 Embedding 时省略，仅用关键词召回。 */
   vectorSearch?(question: string, limit: number): Promise<ChunkHit[]>;
+  /** 摘要召回：按文章摘要向量召回文章，每篇返回文章内最相关的一个切片，score 为摘要相似度。未配置 Embedding 时省略。 */
+  summarySearch?(question: string, limit: number): Promise<ChunkHit[]>;
   rerank?(query: string, documents: string[], topN: number): Promise<RerankResult[]>;
 }
 
@@ -66,16 +70,20 @@ const reason = (error: unknown) => error instanceof Error ? error.message : "unk
 export async function retrieve(question: string, settings: RetrievalSettings, dependencies: RetrievalDependencies): Promise<RetrievalResult> {
   const warnings: string[] = [];
   const terms = searchTerms(question).slice(0, MAX_QUERY_TERMS);
-  const [keywordHits, vectorHits] = await Promise.all([
+  const [keywordHits, vectorHits, summaryHits] = await Promise.all([
     terms.length ? dependencies.keywordSearch(terms, RECALL_LIMIT) : [],
     dependencies.vectorSearch
       ? dependencies.vectorSearch(question, RECALL_LIMIT).catch((error: unknown) => { warnings.push(`向量检索失败，仅使用关键词检索：${reason(error)}`); return []; })
       : [],
+    dependencies.summarySearch
+      ? dependencies.summarySearch(question, SUMMARY_RECALL_LIMIT).catch((error: unknown) => { warnings.push(`摘要检索失败，跳过文章级召回：${reason(error)}`); return []; })
+      : [],
   ]);
 
   // Reciprocal Rank Fusion：各路按名次计 1 / (k + 名次)，同一切片累加。
+  // 摘要召回给主题相关文章中的切片加分，也能召回正文措辞与问题差异较大、但摘要概括了主题的文章。
   const fused = new Map<string, RetrievedChunk>();
-  const fuse = (hits: ChunkHit[], key: "vectorScore" | "keywordScore") => {
+  const fuse = (hits: ChunkHit[], key: "vectorScore" | "keywordScore" | "summaryScore") => {
     for (const [rank, { score, ...hit }] of hits.entries()) {
       const entry = fused.get(hit.chunkId) ?? { ...hit, score: 0 };
       entry[key] = score;
@@ -85,6 +93,7 @@ export async function retrieve(question: string, settings: RetrievalSettings, de
   };
   fuse(vectorHits.filter((hit) => hit.score >= settings.similarityThreshold), "vectorScore");
   fuse(keywordHits, "keywordScore");
+  fuse(summaryHits.filter((hit) => hit.score >= settings.similarityThreshold), "summaryScore");
   let candidates = [...fused.values()].sort((a, b) => b.score - a.score).slice(0, CANDIDATE_LIMIT);
 
   if (settings.rerankEnabled && dependencies.rerank && candidates.length > 1) {
@@ -188,5 +197,6 @@ export const retrievedChunkRecords = (context: AnswerContext): ChatRetrievedChun
   excerpt: chunk.content.slice(0, EXCERPT_CHARS), score: chunk.score,
   ...(chunk.vectorScore !== undefined ? { vectorScore: chunk.vectorScore } : {}),
   ...(chunk.keywordScore !== undefined ? { keywordScore: chunk.keywordScore } : {}),
+  ...(chunk.summaryScore !== undefined ? { summaryScore: chunk.summaryScore } : {}),
   ...(chunk.rerankScore !== undefined ? { rerankScore: chunk.rerankScore } : {}),
 }));

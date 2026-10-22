@@ -33,6 +33,12 @@ export function estimateTokens(text: string): number {
 /** 向量化输入：上下文前缀 + 正文。 */
 export const embeddingInput = (chunk: DocumentChunkRecord) => chunk.context ? `${chunk.context}\n\n${chunk.content}` : chunk.content;
 
+/** 文章级向量化输入：标题 + 摘要；没有摘要（如网页来源）时为 null，不生成文章级向量。 */
+export function summaryEmbeddingInput(title: string, summary: string | null | undefined): string | null {
+  const text = summary?.trim();
+  return text ? `文章：${title}\n\n${text}` : null;
+}
+
 // 超长文本先按句切分，单句仍超长时按长度硬切。
 function splitLong(text: string, target: number): string[] {
   if (text.length <= target) return [text];

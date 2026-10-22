@@ -213,6 +213,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await waitEmbedding("ready");
     rows = await embeddedChunks();
     assert.equal(rows.length, 1, "reprocessing removes obsolete chunk vectors");
+    assert.equal((await getPool().query("SELECT summary_embedding FROM documents WHERE id = $1", [documentId])).rows[0].summary_embedding, null, "web pages have no summary vector");
 
     const chat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "vector test" }) })).json();
     assert.equal(chat.answerMode, "generated", output);
@@ -307,6 +308,9 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(synced[0].context, "文章：文章一\n章节：【结论】\n关键词：钠离子电池");
     assert.deepEqual(synced[0].metadata.followUpQuestions, ["如何放大？"]);
     await until(async () => (await articleDocuments()).every((row) => row.embedding_status === "ready"));
+    // 文章级向量（标题 + 摘要）排在切片之后、同一次请求生成。
+    const summaryVectors = await getPool().query("SELECT summary_embedding::text AS summary FROM documents WHERE source_id = $1 ORDER BY external_id", [articleSource.id]);
+    assert.deepEqual(summaryVectors.rows.map((row) => row.summary), ["[2,0.5,0.25]", "[2,0.5,0.25]"]);
     const detail = await (await fetch(`${apiBase}/api/admin/documents/${synced[0].id}`)).json();
     assert.equal(detail.externalId, "a1");
     assert.deepEqual(detail.tags, ["钠电"]);
@@ -343,6 +347,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
 
     const articleChat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ question: "文章一的正文结论" }) })).json();
     assert.deepEqual(articleChat.sources.find((source: { title: string }) => source.title === "文章一"), { documentId: synced[0].id, title: "文章一", url: detail.url, repostSource: "测试公众号" });
+    const articleLog = (await (await fetch(`${apiBase}/api/admin/chat-logs?query=${encodeURIComponent("文章一的正文结论")}`)).json()).logs[0];
+    assert.ok(articleLog.chunks.find((chunk: { documentId: string }) => chunk.documentId === synced[0].id)?.summaryScore > 0.9, "summary recall contributes to the fused ranking");
 
     articles.set("a2", article("a2", "文章二（更新）", 200));
     articleRequests.length = 0;

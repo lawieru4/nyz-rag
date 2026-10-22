@@ -562,6 +562,7 @@ const chatRetrievedChunkSchema = {
     score: { type: "number" },
     vectorScore: { type: "number" },
     keywordScore: { type: "number" },
+    summaryScore: { type: "number" },
     rerankScore: { type: "number" },
   },
   required: ["chunkId", "documentId", "citation", "title", "sectionPath", "excerpt", "score"],

@@ -2,9 +2,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  closeDatabase, createArticleClient, embedChunks, embeddingInput, getProcessingInput, getSource, getSourceSyncState, getTask, listArticleVersions, listDocumentChunks,
-  listModelProviders, lockDocument, markSourceSynced, migrate, prepareDocument, reindexChunkSearchTerms, reindexDocumentMetadataTerms, replaceDocumentChunks, saveDocumentEmbeddings, saveSourceSyncState,
-  selectEmbeddingProvider, setEmbeddingState, setProcessingState, syncArticles, updateTask, upsertDocument, withTransaction, type Executor,
+  closeDatabase, createArticleClient, embedChunks, embeddingInput, getProcessingInput, getSource, getSourceSyncState, getSummaryInput, getTask, listArticleVersions, listDocumentChunks,
+  listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, prepareDocument, reindexChunkSearchTerms, reindexDocumentMetadataTerms, replaceDocumentChunks,
+  saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState, syncArticles, updateTask, upsertDocument, withTransaction, type Executor,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
 
@@ -45,22 +45,24 @@ async function processDocument(tx: Executor, documentId: string) {
 async function embedDocument(documentId: string) {
   try {
     // 模型调用放在事务外；回写时用 processing_version 确认切片没有被重新生成。
-    const { version, chunks } = await withTransaction(async (tx) => {
+    const { version, chunks, summary } = await withTransaction(async (tx) => {
       const target = await lockDocument(tx, documentId);
       if (!target) throw new Error("Document no longer exists");
       const chunks = await listDocumentChunks(documentId, tx);
       if (target.processingStatus !== "chunked" || !chunks.length) throw new Error("Document must have chunks before embedding");
       await setEmbeddingState(documentId, "processing", null, tx);
-      return { version: target.processingVersion, chunks };
+      return { version: target.processingVersion, chunks, summary: await getSummaryInput(documentId, tx) };
     });
     const provider = selectEmbeddingProvider(await listModelProviders());
-    const vectors = await embedChunks(provider, chunks.map(embeddingInput));
+    // 文章级向量（标题 + 摘要）与切片在同一次调用中生成，保证同模型同维度。
+    const vectors = await embedChunks(provider, [...chunks.map(embeddingInput), ...(summary ? [summary] : [])]);
+    const summaryVector = summary ? vectors.pop()! : null;
     await withTransaction(async (tx) => {
       const target = await lockDocument(tx, documentId);
       if (!target || target.processingStatus !== "chunked" || target.processingVersion !== version) {
         throw new Error("Document changed during embedding; retry after processing finishes");
       }
-      await saveDocumentEmbeddings(tx, documentId, chunks, vectors, provider);
+      await saveDocumentEmbeddings(tx, documentId, chunks, vectors, provider, summaryVector);
     });
   } catch (error) {
     await setEmbeddingState(documentId, "failed", errorMessage(error, "Embedding failed"));
@@ -200,9 +202,31 @@ async function backfillSearchTerms() {
   }
 }
 
+/**
+ * 升级前已向量化的文章没有文章级向量，启动时在后台用默认 Embedding 供应商补齐（只处理与当前模型一致的文档，
+ * 其余文档需重新向量化）；回写时校验切片版本与模型，与并发任务冲突的文档跳过，由后续向量化任务生成。
+ */
+async function backfillSummaryEmbeddings() {
+  const providers = await listModelProviders();
+  if (!providers.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
+  const provider = selectEmbeddingProvider(providers);
+  const model = provider.embeddingModel.trim();
+  let saved = 0;
+  for (let cursor: string | null = ""; cursor !== null;) {
+    const batch = await listMissingSummaryEmbeddings(cursor, 32, model);
+    if (batch.items.length) {
+      const vectors = await embedChunks(provider, batch.items.map((item) => item.input));
+      for (const [index, item] of batch.items.entries()) if (await saveSummaryEmbedding(item.id, item.version, vectors[index], model)) saved += 1;
+    }
+    cursor = batch.cursor;
+  }
+  if (saved) console.info(`Backfilled ${saved} document summary embeddings`);
+}
+
 const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
 await migrate();
 void backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error")));
+void backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error")));
 const worker = new Worker(queueName, async (job) => {
   if (job.name === "embed-document") {
     await embedDocument(job.data.documentId);

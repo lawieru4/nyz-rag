@@ -80,6 +80,8 @@ export const documents = pgTable("documents", {
   embeddingModel: text(),
   embeddingDimensions: integer(),
   embeddingChunkCount: integer().notNull().default(0),
+  // 文章级向量（标题 + 摘要），与切片向量同一次写入，模型与维度沿用 embedding_model / embedding_dimensions；没有摘要的文档为空。
+  summaryEmbedding: vector(),
   embeddingError: text(),
   embeddingUpdatedAt: timestamptz(),
   createdAt: timestamptz().notNull().defaultNow(),
@@ -94,6 +96,10 @@ export const documents = pgTable("documents", {
   index("documents_metadata_search_vector_idx").using("gin", table.metadataSearchVector),
   index("documents_status_idx").on(table.status),
   index("documents_updated_at_idx").on(table.updatedAt.desc()),
+  ...HNSW_DIMENSIONS.map((dimensions) => index(`documents_summary_embedding_${dimensions}_hnsw_idx`)
+    .using("hnsw", sql`(${table.summaryEmbedding}::vector(${sql.raw(String(dimensions))})) vector_cosine_ops`)
+    .where(sql`${table.embeddingDimensions} = ${sql.raw(String(dimensions))}`)),
+  check("documents_summary_embedding_check", sql`${table.summaryEmbedding} IS NULL OR vector_dims(${table.summaryEmbedding}) = ${table.embeddingDimensions}`),
   check("documents_status_check", sql`${table.status} IN ('pending', 'processing', 'ready', 'failed')`),
   check("documents_processing_status_check", sql`${table.processingStatus} IN ('pending', 'cleaning', 'chunked', 'failed')`),
   check("documents_embedding_status_check", sql`${table.embeddingStatus} IN ('pending', 'queued', 'processing', 'ready', 'failed')`),
@@ -226,5 +232,6 @@ export const messageChunks = pgTable("message_chunks", {
   score: doublePrecision().notNull(),
   vectorScore: doublePrecision(),
   keywordScore: doublePrecision(),
+  summaryScore: doublePrecision(),
   rerankScore: doublePrecision(),
 }, (table) => [primaryKey({ columns: [table.messageId, table.position] })]);

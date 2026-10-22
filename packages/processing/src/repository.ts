@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { ArticleDetail } from "./article/parse.js";
-import { embeddingInput } from "./chunking.js";
+import { embeddingInput, summaryEmbeddingInput } from "./chunking.js";
 import type { ChunkHit } from "./rag.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
@@ -192,6 +192,12 @@ export async function getProcessingInput(tx: Executor, id: string) {
   return row ? { title: row.title, content: row.content, rawJson: row.rawJson as ArticleDetail | null } : null;
 }
 
+/** 文章级向量化输入（标题 + 摘要）；没有摘要的文档返回 null。 */
+export async function getSummaryInput(id: string, db: Executor = getDb()): Promise<string | null> {
+  const [row] = await db.select({ title: documents.title, summary: sql<string | null>`${documents.metadata}->>'summary'` }).from(documents).where(eq(documents.id, id));
+  return row ? summaryEmbeddingInput(row.title, row.summary) : null;
+}
+
 /** 文章 API 来源已入库的文章：articleKey → 来源 updateTime（毫秒），用于增量同步。 */
 export async function listArticleVersions(sourceId: string, db: Executor = getDb()): Promise<Map<string, number | null>> {
   const rows = await db.select({ externalId: documents.externalId, sourceUpdatedAt: documents.sourceUpdatedAt })
@@ -223,7 +229,8 @@ export async function upsertDocument(tx: Executor, input: UpsertDocumentInput): 
   return row.id;
 }
 
-const resetEmbedding = { embeddingProviderId: null, embeddingModel: null, embeddingDimensions: null, embeddingChunkCount: 0 };
+// 文章级向量的模型与维度沿用文档的向量信息，因此随之清除；切片向量自带模型与维度，向量化失败时保留。
+const resetEmbedding = { embeddingProviderId: null, embeddingModel: null, embeddingDimensions: null, embeddingChunkCount: 0, summaryEmbedding: null };
 
 /** 清洗结果：正文必填；文章来源同时更新解析出的字段。 */
 export interface DocumentContentUpdate {
@@ -291,8 +298,7 @@ export async function setEmbeddingState(id: string, status: Exclude<DocumentEmbe
   await db.update(documents).set({ embeddingStatus: status, embeddingError: error, ...resetEmbedding, embeddingUpdatedAt: sql`now()` }).where(eq(documents.id, id));
 }
 
-function validateVectors(chunks: DocumentChunkRecord[], vectors: number[][], provider: ModelProviderRecord): void {
-  if (chunks.length !== vectors.length) throw new Error("The number of chunks and vectors must match.");
+function validateVectors(vectors: number[][], provider: ModelProviderRecord): void {
   if (!provider.id.trim() || !provider.embeddingModel.trim()) throw new Error("Vector provider ID and embedding model are required.");
   for (const vector of vectors) {
     if (!Array.isArray(vector) || vector.length === 0 || !vector.every((value) => Number.isFinite(value))) throw new Error("Vectors must contain finite numeric values.");
@@ -301,9 +307,13 @@ function validateVectors(chunks: DocumentChunkRecord[], vectors: number[][], pro
   }
 }
 
-/** 在调用方事务内写入整篇文档的向量，并把文档向量状态置为 ready。 */
-export async function saveDocumentEmbeddings(tx: Executor, documentId: string, chunks: DocumentChunkRecord[], vectors: number[][], provider: ModelProviderRecord): Promise<void> {
-  validateVectors(chunks, vectors, provider);
+/** 在调用方事务内写入整篇文档的切片向量与文章级向量（没有摘要时为 null），并把文档向量状态置为 ready。 */
+export async function saveDocumentEmbeddings(
+  tx: Executor, documentId: string, chunks: DocumentChunkRecord[], vectors: number[][], provider: ModelProviderRecord, summaryVector: number[] | null = null,
+): Promise<void> {
+  if (chunks.length !== vectors.length) throw new Error("The number of chunks and vectors must match.");
+  // 文章级向量与切片向量必须同维度（共用文档的模型与维度信息）。
+  validateVectors(summaryVector ? [...vectors, summaryVector] : vectors, provider);
   if (!chunks.length) throw new Error("Document must have chunks before embedding");
   const model = provider.embeddingModel.trim();
   const dimensions = vectors[0].length;
@@ -316,8 +326,34 @@ export async function saveDocumentEmbeddings(tx: Executor, documentId: string, c
   }
   await tx.update(documents).set({
     embeddingStatus: "ready", embeddingProviderId: provider.id, embeddingModel: model, embeddingDimensions: dimensions,
-    embeddingChunkCount: chunks.length, embeddingError: null, embeddingUpdatedAt: sql`now()`,
+    embeddingChunkCount: chunks.length, summaryEmbedding: summaryVector, embeddingError: null, embeddingUpdatedAt: sql`now()`,
   }).where(eq(documents.id, documentId));
+}
+
+/**
+ * 升级前已向量化、缺少文章级向量的文档，按 ID 分批返回（只含当前模型的 ready 文档且有摘要），
+ * 供 Worker 回填；没有更多文档时 cursor 为 null。
+ */
+export async function listMissingSummaryEmbeddings(afterId: string, batchSize: number, model: string, db: Executor = getDb()) {
+  const rows = await db.select({ id: documents.id, version: documents.processingVersion, title: documents.title, summary: sql<string | null>`${documents.metadata}->>'summary'` })
+    .from(documents)
+    .where(and(sql`${documents.id} > ${afterId}`, eq(documents.embeddingStatus, "ready"), eq(documents.embeddingModel, model), isNull(documents.summaryEmbedding),
+      sql`btrim(coalesce(${documents.metadata}->>'summary', '')) <> ''`))
+    .orderBy(asc(documents.id)).limit(batchSize);
+  return {
+    items: rows.map((row) => ({ id: row.id, version: row.version, input: summaryEmbeddingInput(row.title, row.summary)! })),
+    cursor: rows.at(-1)?.id ?? null,
+  };
+}
+
+/** 回填文章级向量：只在文档仍为同一切片版本、同一模型与维度的 ready 状态时写入，避免覆盖并发的重新处理或向量化。 */
+export async function saveSummaryEmbedding(id: string, version: number, vector: number[], model: string, db: Executor = getDb()): Promise<boolean> {
+  if (!vector.length || !vector.every((value) => Number.isFinite(value)) || !vector.some((value) => value !== 0)) throw new Error("Invalid summary vector");
+  const updated = await db.update(documents).set({ summaryEmbedding: vector })
+    .where(and(eq(documents.id, id), eq(documents.processingVersion, version), eq(documents.embeddingStatus, "ready"), eq(documents.embeddingModel, model),
+      eq(documents.embeddingDimensions, vector.length), isNull(documents.summaryEmbedding)))
+    .returning({ id: documents.id });
+  return updated.length > 0;
 }
 
 export async function deleteDocument(id: string, db: Executor = getDb()): Promise<boolean> {
@@ -470,6 +506,37 @@ export async function vectorSearchChunks(vector: number[], model: string, limit:
   return hits.map(toChunkHit);
 }
 
+/**
+ * 摘要召回：先按文章级向量（标题 + 摘要）召回同模型/维度的 ready 文档，再用同一查询向量定位每篇文章内最相关的切片。
+ * 每篇返回一个切片，得分为摘要的余弦相似度，按文章排序。常用维度走 HNSW，过滤后不足时精确回退。
+ */
+export async function summarySearchChunks(vector: number[], model: string, limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
+  if (!vector.length || vector.length > 16000 || vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0)) throw new Error("Invalid query vector");
+  const dimensions = vector.length;
+  const indexed = HNSW_DIMENSIONS.some((size) => size === dimensions);
+  const expression = indexed ? sql`${documents.summaryEmbedding}::vector(${sql.raw(String(dimensions))})` : sql`${documents.summaryEmbedding}`;
+  const queryVector = `[${vector.join(",")}]`;
+  const distance = sql`${expression} <=> ${queryVector}::vector`;
+  const where = and(documentFilter(filters), eq(documents.embeddingModel, model), sql`${documents.embeddingDimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documents.summaryEmbedding));
+  let matched = await db.select({ id: documents.id, score: sql<number>`1 - (${distance})` }).from(documents).where(where).orderBy(distance, asc(documents.id)).limit(limit);
+  if (indexed && matched.length < limit) {
+    ({ rows: matched } = await db.execute<{ id: string; score: number }>(sql`
+      WITH eligible AS MATERIALIZED (SELECT ${documents.id} AS id, ${documents.summaryEmbedding} AS embedding FROM ${documents} WHERE ${where})
+      SELECT id, 1 - (embedding <=> ${queryVector}::vector) AS score FROM eligible ORDER BY embedding <=> ${queryVector}::vector, id LIMIT ${limit}`));
+  }
+  if (!matched.length) return [];
+
+  const chunkDistance = sql`${documentChunks.embedding} <=> ${queryVector}::vector`;
+  const chunks = await db.selectDistinctOn([documentChunks.documentId], chunkHitColumns).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
+    .where(and(inArray(documentChunks.documentId, matched.map((row) => row.id)), eq(documentChunks.model, model), sql`${documentChunks.dimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documentChunks.embedding)))
+    .orderBy(documentChunks.documentId, chunkDistance, asc(documentChunks.chunkIndex));
+  const byDocument = new Map(chunks.map((chunk) => [chunk.documentId, chunk]));
+  return matched.flatMap(({ id, score }) => {
+    const chunk = byDocument.get(id);
+    return chunk ? [toChunkHit({ ...chunk, score })] : [];
+  });
+}
+
 // ---- 知识库 ----
 
 const toKnowledgeBase = (row: typeof knowledgeBases.$inferSelect): KnowledgeBaseRecord => ({ ...row, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
@@ -588,7 +655,8 @@ const messageColumns = {
   chunks: sql<ChatLogRecord["chunks"]>`COALESCE((
     SELECT json_agg(json_strip_nulls(json_build_object('chunkId', ${messageChunks.chunkId}, 'documentId', ${messageChunks.documentId}, 'citation', ${messageChunks.citation},
       'title', ${messageChunks.title}, 'sectionPath', ${messageChunks.sectionPath}, 'excerpt', ${messageChunks.excerpt}, 'score', ${messageChunks.score},
-      'vectorScore', ${messageChunks.vectorScore}, 'keywordScore', ${messageChunks.keywordScore}, 'rerankScore', ${messageChunks.rerankScore})) ORDER BY ${messageChunks.position})
+      'vectorScore', ${messageChunks.vectorScore}, 'keywordScore', ${messageChunks.keywordScore}, 'summaryScore', ${messageChunks.summaryScore},
+      'rerankScore', ${messageChunks.rerankScore})) ORDER BY ${messageChunks.position})
     FROM ${messageChunks} WHERE ${messageChunks.messageId} = ${outer("chat_messages", "id")}), '[]')`,
 };
 
@@ -634,7 +702,8 @@ export async function createChatMessage(log: NewChatMessage, db?: Executor): Pro
     if (log.chunks?.length) {
       await tx.insert(messageChunks).values(log.chunks.map((chunk, position) => ({
         messageId: log.id, position, chunkId: chunk.chunkId, documentId: chunk.documentId, citation: chunk.citation, title: chunk.title, sectionPath: chunk.sectionPath,
-        excerpt: chunk.excerpt, score: chunk.score, vectorScore: chunk.vectorScore ?? null, keywordScore: chunk.keywordScore ?? null, rerankScore: chunk.rerankScore ?? null,
+        excerpt: chunk.excerpt, score: chunk.score, vectorScore: chunk.vectorScore ?? null, keywordScore: chunk.keywordScore ?? null,
+        summaryScore: chunk.summaryScore ?? null, rerankScore: chunk.rerankScore ?? null,
       })));
     }
   };

@@ -50,6 +50,13 @@
       "when": 1792658264685,
       "tag": "0006_metadata_search_vector",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792659419304,
+      "tag": "0007_summary_embedding",
+      "breakpoints": true
     }
   ]
 }

@@ -69,7 +69,7 @@
 - [x] 向量检索：`vectorSearchChunks` 按模型与维度过滤、余弦相似度与知识库阈值过滤；迁移 `0005` 为 384/512/768/1024/1536/2000 维建立 HNSW 部分表达式索引，查询使用匹配的定维转换。其他维度保留精确扫描；ANN 经模型/元数据过滤后不足候选数时回退到过滤后的精确检索。已用临时 schema 的 `EXPLAIN ANALYZE` 验证索引可用，尚未做全量性能基准
 - [x] 关键词检索：应用层生成重叠二元组，经 `array_to_tsvector` 写入 `document_chunks.search_vector`（GIN），不经过数据库分词器；按最少见的 8 个词项筛选候选、BM25 重排。实测 `text[]` + GIN 慢约 40 倍，未采用。`pg_trgm`、中文分词插件后续按评估集再评估
 - [x] 索引与查询统一做 NFKC 规范化（化学式上下标 `Na₀.₉` → `na0.9`），词项规则变化后运行 `pnpm db:reindex-search`
-- [ ] 摘要级向量：对文章摘要单独向量化，支持先召回文章、再召回切片
+- [x] 摘要级向量：「标题 + 摘要」单独向量化存于 `documents.summary_embedding`（与切片同一次调用、同一事务写入，HNSW 部分索引）；检索新增摘要召回，先召回文章（前 10 篇）、再用同一查询向量定位文章内最相关的切片，作为第三路参与 RRF，得分记为 `summaryScore`；Worker 启动时为升级前的文章补齐。尚未用真实模型评估效果
 - [x] 元数据过滤：`/api/search`、`/api/chat` 与会话 SSE 接收 `filters`，支持发布时间（`publishedFrom` / `publishedTo`，UTC 日期，含首尾整日）、分类、标签、场景及数据源；同字段多值 OR、跨字段 AND，关键词和向量召回在候选截断前统一过滤，关键词词频统计同样限定检索范围
 - [x] 元数据加权：关键词、项目名称、负责人、承担单位的词项写入 `documents.metadata_search_vector`（GIN）。只命中元数据的文档另行召回（最多 20 篇，每篇取一个切片），不占用正文候选；按 IDF × 字段权重（名称/负责人 1.0、单位 0.8、关键词 0.5）加分，同一词项只取最高权重；每篇文档只给最佳切片加一次，常见词项不加分。机构、期刊待解析器提取后加入 `metadataSearchFields`
 - [x] 回答引用同时标注 nyzdata 文章与原始转载源（`sources[].repostSource`，来自 `metadata.sourceMeta`）

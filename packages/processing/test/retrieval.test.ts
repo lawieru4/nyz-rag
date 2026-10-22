@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
 import { createChatModel, createRerankModel } from "../src/models.js";
-import { buildAnswerContext, buildChatMessages, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, type ChunkHit } from "../src/rag.js";
+import { summaryEmbeddingInput } from "../src/chunking.js";
+import { buildAnswerContext, buildChatMessages, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, SUMMARY_RECALL_LIMIT, type ChunkHit } from "../src/rag.js";
 import { metadataScore, metadataSearchFields, metadataSearchTerms, metadataTermWeights, searchTerms, termCounts } from "../src/search-terms.js";
 
 const hit = (chunkId: string, score: number, overrides: Partial<ChunkHit> = {}): ChunkHit => ({
@@ -71,6 +72,34 @@ test("retrieve fuses keyword and vector hits, applies the threshold and reranks"
   });
   assert.equal(rerankInput[0], "文章：标题b\n\n正文b", "rerank sees the context prefix and content");
   assert.deepEqual(reranked.chunks.map((chunk) => [chunk.chunkId, chunk.rerankScore]), [["c", 0.99], ["b", 0.5]]);
+});
+
+test("retrieve fuses summary recall as a third channel", async () => {
+  const limits: number[] = [];
+  const result = await retrieve("固态电池中试线进展", settings, {
+    keywordSearch: async () => [hit("b", 9), hit("a", 5)],
+    vectorSearch: async () => [hit("b", 0.8)],
+    summarySearch: async (_question, limit) => { limits.push(limit); return [hit("c", 0.9, { documentId: "doc-c" }), hit("b", 0.7), hit("d", 0.2)]; },
+  });
+  assert.deepEqual(limits, [SUMMARY_RECALL_LIMIT]);
+  assert.deepEqual(result.chunks.map((chunk) => chunk.chunkId), ["b", "c", "a"], "summary hits add to the fused score; d is below the threshold");
+  assert.deepEqual([result.chunks[0].keywordScore, result.chunks[0].vectorScore, result.chunks[0].summaryScore], [9, 0.8, 0.7]);
+  assert.equal(result.chunks[1].summaryScore, 0.9);
+  assert.equal(result.chunks[1].vectorScore, undefined);
+  assert.equal(retrievedChunkRecords(buildAnswerContext(result.chunks, 1000))[0].summaryScore, 0.7);
+
+  const degraded = await retrieve("电池", settings, {
+    keywordSearch: async () => [hit("a", 3)],
+    summarySearch: async () => { throw new Error("Invalid query vector"); },
+  });
+  assert.deepEqual(degraded.chunks.map((chunk) => chunk.chunkId), ["a"]);
+  assert.match(degraded.warnings[0], /摘要检索失败/);
+});
+
+test("summary embedding input combines the title and summary", () => {
+  assert.equal(summaryEmbeddingInput("钠电综述", "  概括钠离子电池进展。 "), "文章：钠电综述\n\n概括钠离子电池进展。");
+  assert.equal(summaryEmbeddingInput("网页", null), null);
+  assert.equal(summaryEmbeddingInput("空摘要", "  "), null);
 });
 
 test("retrieve degrades to keyword results when the vector search or rerank fails", async () => {
