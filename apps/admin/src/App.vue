@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import type { DocumentRecord, DocumentSummary } from "@nyz-rag/types";
+import { createApiClient, ApiError } from "@nyz-rag/api-client";
 
 type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string };
 type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number; started: string; error?: string };
@@ -15,7 +16,7 @@ type ChatLog = {
 type ModelProvider = { id: string; name: string; provider: string; baseUrl: string; chatModel: string; embeddingModel: string; rerankModel: string; temperature: number; maxTokens: number; credentialEnv: string; enabled: boolean; isDefault: boolean; createdAt: string; updatedAt: string };
 
 const activeModule = ref("数据源");
-const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
+const client = createApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
 const dialogOpen = ref(false);
 const notice = ref("");
 const sources = ref<Source[]>([]);
@@ -60,17 +61,17 @@ const embeddingStatuses = { pending: "待向量化", queued: "向量排队中", 
 const documentBusy = (document: Document) => document.embedding?.status === "queued" || document.embedding?.status === "processing" || document.processingStatus === "cleaning";
 
 async function loadKnowledge() {
-  const response = await fetch(`${apiBase}/api/knowledge`);
-  const data = await response.json();
-  sources.value = data.sources.map((source: { id: string; name: string; url: string; kind: string; frequency: string; status: Source["status"]; documentCount: number; updatedAt: string | null }) => ({ ...source, pages: source.documentCount, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
-  tasks.value = data.tasks.map((task: { id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string; error?: string }) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString(), error: task.error }));
+  const data = await client.request<{
+    sources: Array<{ id: string; name: string; url: string; kind: string; frequency: string; status: Source["status"]; documentCount: number; updatedAt: string | null }>;
+    tasks: Array<{ id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string; error?: string }>;
+  }>("/api/knowledge");
+  sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
+  tasks.value = data.tasks.map((task) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString(), error: task.error }));
 }
 
 async function loadKnowledgeBases() {
   try {
-    const response = await fetch(`${apiBase}/api/admin/knowledge-bases`);
-    if (!response.ok) throw new Error();
-    knowledgeBases.value = await response.json();
+    knowledgeBases.value = await client.request<KnowledgeBase[]>("/api/admin/knowledge-bases");
   } catch {
     notice.value = "知识库列表加载失败，请检查 API 服务";
   }
@@ -82,9 +83,7 @@ async function loadChatLogs() {
   if (chatLogQuery.value.trim()) params.set("query", chatLogQuery.value.trim());
   if (chatLogRating.value) params.set("rating", chatLogRating.value);
   try {
-    const response = await fetch(`${apiBase}/api/admin/chat-logs?${params}`);
-    if (!response.ok) throw new Error();
-    const data = await response.json();
+    const data = await client.request<{ logs: ChatLog[]; total: number }>(`/api/admin/chat-logs?${params}`);
     chatLogs.value = data.logs;
     chatLogTotal.value = data.total;
   } catch {
@@ -96,9 +95,7 @@ async function loadChatLogs() {
 
 async function loadModelProviders() {
   try {
-    const response = await fetch(`${apiBase}/api/admin/model-providers`);
-    if (!response.ok) throw new Error();
-    modelProviders.value = await response.json();
+    modelProviders.value = await client.request<ModelProvider[]>("/api/admin/model-providers");
   } catch {
     notice.value = "模型配置加载失败，请检查 API 服务";
   }
@@ -113,34 +110,35 @@ function editModelProvider(provider?: ModelProvider) {
 async function saveModelProvider() {
   const editing = Boolean(editingModelProviderId.value);
   try {
-    const response = await fetch(`${apiBase}/api/admin/model-providers${editing ? `/${editingModelProviderId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(modelProviderForm.value) });
-    if (!response.ok) {
-      const data = await response.json();
-      notice.value = data.error ?? "模型配置保存失败";
-      return;
-    }
+    await client.request(`/api/admin/model-providers${editing ? `/${editingModelProviderId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(modelProviderForm.value) });
     await loadModelProviders();
     modelProviderDialogOpen.value = false;
     notice.value = editing ? "模型配置已更新" : "模型配置已添加";
-  } catch {
-    notice.value = "模型配置保存失败，请检查 API 服务";
+  } catch (err) {
+    notice.value = err instanceof ApiError ? err.message : "模型配置保存失败，请检查 API 服务";
   }
 }
 
 async function toggleModelProvider(provider: ModelProvider) {
   const { id, createdAt: _createdAt, updatedAt: _updatedAt, ...configuration } = provider;
-  const response = await fetch(`${apiBase}/api/admin/model-providers/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...configuration, enabled: !provider.enabled }) });
-  if (!response.ok) { notice.value = "模型状态更新失败"; return; }
-  await loadModelProviders();
-  notice.value = provider.enabled ? "模型配置已停用" : "模型配置已启用";
+  try {
+    await client.request(`/api/admin/model-providers/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...configuration, enabled: !provider.enabled }) });
+    await loadModelProviders();
+    notice.value = provider.enabled ? "模型配置已停用" : "模型配置已启用";
+  } catch {
+    notice.value = "模型状态更新失败";
+  }
 }
 
 async function deleteModelProvider(provider: ModelProvider) {
   if (!window.confirm(`确定删除模型配置“${provider.name}”？`)) return;
-  const response = await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "DELETE" });
-  if (!response.ok) { notice.value = "模型配置删除失败"; return; }
-  await loadModelProviders();
-  notice.value = "模型配置已删除";
+  try {
+    await client.request(`/api/admin/model-providers/${provider.id}`, { method: "DELETE" });
+    await loadModelProviders();
+    notice.value = "模型配置已删除";
+  } catch {
+    notice.value = "模型配置删除失败";
+  }
 }
 
 function editKnowledgeBase(item?: KnowledgeBase) {
@@ -151,11 +149,14 @@ function editKnowledgeBase(item?: KnowledgeBase) {
 
 async function saveKnowledgeBase() {
   const editing = Boolean(editingKnowledgeBaseId.value);
-  const response = await fetch(`${apiBase}/api/admin/knowledge-bases${editing ? `/${editingKnowledgeBaseId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(knowledgeBaseForm.value) });
-  if (!response.ok) { notice.value = "知识库保存失败，请检查配置"; return; }
-  await loadKnowledgeBases();
-  knowledgeBaseDialogOpen.value = false;
-  notice.value = editing ? "知识库配置已更新" : "知识库已创建";
+  try {
+    await client.request(`/api/admin/knowledge-bases${editing ? `/${editingKnowledgeBaseId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(knowledgeBaseForm.value) });
+    await loadKnowledgeBases();
+    knowledgeBaseDialogOpen.value = false;
+    notice.value = editing ? "知识库配置已更新" : "知识库已创建";
+  } catch {
+    notice.value = "知识库保存失败，请检查配置";
+  }
 }
 
 let documentRefreshTimer: ReturnType<typeof setInterval> | undefined;
@@ -174,9 +175,7 @@ async function loadDocuments() {
   if (documentSource.value) params.set("sourceId", documentSource.value);
   if (documentStatus.value) params.set("status", documentStatus.value);
   try {
-    const response = await fetch(`${apiBase}/api/admin/documents?${params}`);
-    if (!response.ok) throw new Error();
-    const data = await response.json();
+    const data = await client.request<{ documents: Document[]; total: number }>(`/api/admin/documents?${params}`);
     documents.value = data.documents;
     documentTotal.value = data.total;
     if (selectedDocument.value) {
@@ -200,9 +199,7 @@ function searchDocuments() {
 
 async function openDocument(document: Document) {
   try {
-    const response = await fetch(`${apiBase}/api/admin/documents/${document.id}`);
-    if (!response.ok) throw new Error();
-    selectedDocument.value = await response.json();
+    selectedDocument.value = await client.request<DocumentRecord>(`/api/admin/documents/${document.id}`);
   } catch {
     notice.value = "文档详情加载失败";
   }
@@ -210,8 +207,7 @@ async function openDocument(document: Document) {
 
 async function reprocessDocument(document: Document) {
   try {
-    const response = await fetch(`${apiBase}/api/admin/documents/${document.id}/reprocess`, { method: "POST" });
-    if (!response.ok) throw new Error();
+    await client.request(`/api/admin/documents/${document.id}/reprocess`, { method: "POST" });
     notice.value = `《${document.title}》已加入清洗与切片队列`;
     await loadDocuments();
   } catch {
@@ -221,30 +217,25 @@ async function reprocessDocument(document: Document) {
 
 async function embedDocument(document: Document) {
   try {
-    const response = await fetch(`${apiBase}/api/admin/documents/${document.id}/embed`, { method: "POST" });
-    if (!response.ok) {
-      const data = await response.json();
-      notice.value = data.error ?? "向量化任务创建失败";
-      return;
-    }
+    await client.request(`/api/admin/documents/${document.id}/embed`, { method: "POST" });
     notice.value = `《${document.title}》已加入向量化队列`;
     await loadDocuments();
-  } catch {
-    notice.value = "向量化任务创建失败，请检查 API 服务";
+  } catch (err) {
+    notice.value = err instanceof ApiError ? err.message : "向量化任务创建失败，请检查 API 服务";
   }
 }
 
 async function deleteDocument(document: Document) {
   if (!window.confirm(`确定删除《${document.title}》？此操作不可撤销。`)) return;
-  const response = await fetch(`${apiBase}/api/admin/documents/${document.id}`, { method: "DELETE" });
-  if (!response.ok) {
+  try {
+    await client.request(`/api/admin/documents/${document.id}`, { method: "DELETE" });
+    if (documents.value.length === 1 && documentPage.value > 1) documentPage.value -= 1;
+    selectedDocument.value = null;
+    await Promise.all([loadDocuments(), loadKnowledge()]);
+    notice.value = "文档已删除";
+  } catch {
     notice.value = "文档删除失败";
-    return;
   }
-  if (documents.value.length === 1 && documentPage.value > 1) documentPage.value -= 1;
-  selectedDocument.value = null;
-  await Promise.all([loadDocuments(), loadKnowledge()]);
-  notice.value = "文档已删除";
 }
 
 async function addSource() {
@@ -257,19 +248,21 @@ async function addSource() {
     notice.value = "请填写名称和有效的 http(s) 地址";
     return;
   }
-  const response = await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url }) });
-  if (!response.ok) { notice.value = "数据源添加失败"; return; }
-  await loadKnowledge();
-  form.value = { name: "", url: "", kind: "文章 API", frequency: "每天" };
-  dialogOpen.value = false;
-  notice.value = "数据源已添加，当前保存在本地演示状态";
+  try {
+    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url }) });
+    await loadKnowledge();
+    form.value = { name: "", url: "", kind: "文章 API", frequency: "每天" };
+    dialogOpen.value = false;
+    notice.value = "数据源已添加，当前保存在本地演示状态";
+  } catch {
+    notice.value = "数据源添加失败";
+  }
 }
 
 async function toggleSource(source: Source) {
   const status = source.status === "运行中" ? "已暂停" : "运行中";
   try {
-    const response = await fetch(`${apiBase}/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }) });
-    if (!response.ok) throw new Error();
+    await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }) });
     source.status = status;
     notice.value = status === "运行中" ? "数据源已启用" : "数据源已暂停";
   } catch {
@@ -278,10 +271,13 @@ async function toggleSource(source: Source) {
 }
 
 async function startCrawl(source: Source) {
-  const response = await fetch(`${apiBase}/api/admin/sources/${source.id}/sync`, { method: "POST" });
-  if (!response.ok) { notice.value = "同步任务创建失败"; return; }
-  await loadKnowledge();
-  notice.value = `${source.name} 的同步任务已加入处理队列`;
+  try {
+    await client.request(`/api/admin/sources/${source.id}/sync`, { method: "POST" });
+    await loadKnowledge();
+    notice.value = `${source.name} 的同步任务已加入处理队列`;
+  } catch (err) {
+    notice.value = err instanceof ApiError ? `同步任务创建失败：${err.message}` : "同步任务创建失败";
+  }
 }
 </script>
 

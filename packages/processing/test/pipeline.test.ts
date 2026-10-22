@@ -143,6 +143,30 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
     await until(async () => (await getPool().query("SELECT 1 FROM document_chunks WHERE document_id = $1 AND search_vector <> ''::tsvector", [documentId])).rowCount === 2);
 
+    // Exercise the extracted configuration domains through their real request/response schemas.
+    const jsonHeaders = { "content-type": "application/json" };
+    const knowledgeInput = { name: " Test knowledge ", description: "test", topK: 5, similarityThreshold: 0.3, rerankEnabled: false, maxContextLength: 6000, prompt: "", model: "" };
+    const knowledgeCreated = await fetch(`${apiBase}/api/admin/knowledge-bases`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(knowledgeInput) });
+    assert.equal(knowledgeCreated.status, 201);
+    const knowledge = await knowledgeCreated.json();
+    assert.equal(knowledge.name, "Test knowledge");
+    assert.equal(knowledge.rerankEnabled, false);
+    const knowledgeUpdated = await fetch(`${apiBase}/api/admin/knowledge-bases/${knowledge.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ ...knowledgeInput, description: "updated" }) });
+    assert.equal(knowledgeUpdated.status, 200);
+    assert.equal((await knowledgeUpdated.json()).description, "updated");
+    assert.equal((await (await fetch(`${apiBase}/api/admin/knowledge-bases`)).json()).length, 1);
+    const providerInput = { name: "Disabled provider", provider: "OpenAI 兼容", baseUrl: "", chatModel: "test", embeddingModel: "", rerankModel: "", credentialEnv: "UNUSED_KEY", enabled: false, isDefault: false };
+    const providerCreated = await fetch(`${apiBase}/api/admin/model-providers`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(providerInput) });
+    assert.equal(providerCreated.status, 201);
+    const provider = await providerCreated.json();
+    assert.equal(provider.temperature, 0.3);
+    assert.equal(provider.maxTokens, 1024);
+    const providerUpdated = await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ ...providerInput, temperature: 0.7, maxTokens: 512 }) });
+    assert.equal(providerUpdated.status, 200);
+    assert.equal((await providerUpdated.json()).temperature, 0.7);
+    assert.equal((await (await fetch(`${apiBase}/api/admin/model-providers`)).json()).length, 2);
+    assert.equal((await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "DELETE" })).status, 204);
+
     assert.equal((await post("embed")).status, 202);
     await waitEmbedding("ready");
     let rows = await embeddedChunks();
@@ -282,11 +306,13 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal((await fetch(`${apiBase}/api/documents/${synced[0].id}`)).status, 404, "non-ready documents are not publicly readable");
     await getPool().query("UPDATE documents SET status = 'ready' WHERE id = $1", [synced[0].id]);
     for (const path of ["/api/search", "/api/chat"]) {
-      const invalid = await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: JSON.stringify({ query: "文章", question: "文章", filters: { publishedFrom: "2026-02-30" } }) });
+      // Request bodies reject unknown fields, so each endpoint gets only its own text field.
+      const body = (text: string, filters: object) => JSON.stringify(path === "/api/search" ? { query: text, filters } : { question: text, filters });
+      const invalid = await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: body("文章", { publishedFrom: "2026-02-30" }) });
       assert.equal(invalid.status, 400);
-      const filtered = await (await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: JSON.stringify({ query: "文章", question: "文章", filters: { categories: ["not-present"] } }) })).json();
+      const filtered = await (await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: body("文章", { categories: ["not-present"] }) })).json();
       assert.deepEqual(path === "/api/search" ? filtered.results : filtered.sources, []);
-      const included = await (await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: JSON.stringify({ query: "文章一", question: "文章一", filters: { categories: ["科研"], tags: ["钠电"], sourceId: articleSource.id } }) })).json();
+      const included = await (await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: body("文章一", { categories: ["科研"], tags: ["钠电"], sourceId: articleSource.id }) })).json();
       assert.ok((path === "/api/search" ? included.results : included.sources).some((hit: { documentId: string }) => hit.documentId === synced[0].id));
     }
     const filterSession = await (await fetch(`${apiBase}/api/chat/sessions`, { method: "POST", headers: json, body: "{}" })).json();

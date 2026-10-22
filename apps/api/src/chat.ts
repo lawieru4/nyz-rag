@@ -3,11 +3,11 @@ import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import {
   buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, hasProviderCredential, HISTORY_TURNS, keywordSearchChunks,
-  listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
+  listChatMessages, listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
   vectorSearchChunks, type AnswerContext, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
-  ChatAnswerMode, ChatFeedbackRequest, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
+  ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
   ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord, RetrievalFilters,
 } from "@nyz-rag/types";
 import { elapsed, MAX_QUESTION_LENGTH, pageParams } from "./common.js";
@@ -110,6 +110,11 @@ async function saveAnswer(result: AnswerResult, input: { question: string; knowl
 }
 
 export const chatRoutes: FastifyPluginAsync = async (app) => {
+  app.get<{ Querystring: { query?: string; rating?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", async (request): Promise<ChatLogListResponse> => {
+    const { query = "", rating, page = "1", pageSize = "20" } = request.query;
+    return listChatMessages({ query, rating, ...pageParams(page, pageSize) });
+  });
+
   // 单次问答：不属于会话，完整回答一次返回。
   app.post<{ Body: ChatRequest; Reply: ChatResponse }>("/api/chat", async (request, reply) => {
     const question = typeof request.body?.question === "string" ? request.body.question.trim() : undefined;

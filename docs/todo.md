@@ -2,7 +2,7 @@
 
 依据 [技术方案](rag-system-architecture.md) 对照现有代码整理，并结合 [nyzdata 文章样本评估](nyz-article-evaluation.md) 补充；进度记录见 [模块清单](module-status.md)。原则：保留 Fastify + BullMQ 的模块化单体 + 独立 Worker，逐步演进，不整体重写为 NestJS。
 
-建议顺序：一 → 四 → 三，二和五（认证）可以穿插进行。样本评估表明，现有采集和清洗还无法接入 nyzdata 数据源，检索与问答依赖第四阶段产出的结构化数据，所以第四阶段提前到第三阶段之前。标注「依赖」的条目需先确认后再安装。
+建议顺序：一 → 四 → 三，二和五（认证）可以穿插进行（第二阶段已完成）。样本评估表明，现有采集和清洗还无法接入 nyzdata 数据源，检索与问答依赖第四阶段产出的结构化数据，所以第四阶段提前到第三阶段之前。标注「依赖」的条目需先确认后再安装。
 
 ## 样本评估结论（200 篇，2026-10-21）
 
@@ -56,11 +56,11 @@
 
 ## 二、API 结构整理
 
-- [ ] 将 `apps/api/src/index.ts` 按领域拆分为 Fastify plugin：`chat`、`search`、`documents`、`data-sources`、`crawl-tasks`、`knowledge-bases`、`model-providers`、`common`
-- [ ] 队列访问封装为独立模块，统一 jobId 与重复任务检测（当前 `hasDocumentJob`）
-- [ ] 请求/响应校验：选用 Fastify JSON Schema 或 Zod。依赖（若选 Zod）：`zod`、`fastify-type-provider-zod`
-- [ ] 统一错误响应格式与错误处理钩子
-- [ ] 前端 API 调用抽取为共享客户端（文档建议的 `packages/api-client`）
+- [x] 将 `apps/api/src/index.ts` 按领域拆分为 Fastify plugin：`chat`、`search`、`documents`、`data-sources`、`crawl-tasks`、`knowledge-bases`、`model-providers`、`common`；`app.ts` 的 `buildApp` 负责组装（可注入队列，便于无基础设施测试），`index.ts` 只负责迁移与监听
+- [x] 队列访问封装为 `apps/api/src/queue.ts`（`DocumentQueue`）：文档级 jobId `document-<id>`，同步任务 jobId `sync-<taskId>`；同一来源已有等待/运行中的同步任务时返回 409；入队失败时回写任务/文档失败状态
+- [x] 请求/响应校验：选用 Fastify JSON Schema（不新增依赖），集中在 `apps/api/src/schemas.ts`，按 `METHOD /path` 由 `onRoute` 钩子挂载；关闭类型强制转换，参数 ID 校验 UUID（公开文章详情接口除外，未知 ID 返回 404），请求体拒绝未知字段，响应 schema 只输出已声明字段；问答记录 `rating` 筛选取值为 `rated` / `unrated`。测试保证每个路由都有 schema 且 schema 不指向不存在的路由
+- [x] 统一错误响应格式与错误处理钩子：所有错误响应均为 `{ error: string }`；4xx 返回原因（含校验失败与非法 JSON），其余错误记日志并返回 `Internal server error`，不泄露内部信息；未知路由返回 404
+- [x] 前端 API 调用抽取为共享客户端 `packages/api-client`（`ApiClient.request` / `ApiClient.stream`，解析 SSE 并跳过心跳，`{ error }` 转为 `ApiError`），web 与 admin 均已接入。接口返回类型仍由调用方标注，尚未按路由生成类型化方法
 
 ## 三、检索与 RAG 问答
 

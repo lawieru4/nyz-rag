@@ -12,10 +12,10 @@ pnpm dev                 # 先构建 processing，再并行启动 api / web / wo
 pnpm --filter @nyz-rag/admin dev
 pnpm build               # pnpm -r build
 pnpm typecheck           # 先构建 processing，再 pnpm -r typecheck
-pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing> dev|build|typecheck
+pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|build|typecheck
 ```
 
-- 测试只有 `packages/processing`（Node 内置 test runner + tsx）：`pnpm --filter @nyz-rag/processing test`。
+- 测试均使用 Node 内置 test runner + tsx：`pnpm --filter @nyz-rag/processing test`、`pnpm --filter @nyz-rag/api test`（契约测试，用 Fastify inject 和注入的假队列，不需要数据库/Redis）、`pnpm --filter @nyz-rag/api-client test`。
 - 单个测试文件：`pnpm --filter @nyz-rag/processing exec tsx --test test/article.test.ts`（解析、切片、文章接口与增量同步）、`test/retrieval.test.ts`（检索词项、RRF/Rerank、Prompt 组装、Chat 流解析）或 `test/embedding.test.ts`；按名称过滤加 `--test-name-pattern "<名称>"`。
 - 集成测试 `test/pipeline.test.ts` 默认跳过；设置 `NYZ_INTEGRATION_TEST=1` 并提供 `DATABASE_URL`、`REDIS_URL` 启用。它用 tsx 直接拉起 API 和 Worker 源码，使用临时 PostgreSQL schema（连接串 `options=-c search_path=<schema>,public`，结束后删除）、唯一队列名和本地模拟 Embedding 服务。
 - 数据库（Drizzle）：修改 `packages/processing/src/schema.ts` 后运行 `pnpm db:generate` 生成迁移（会去掉外键里写死的 `"public".`，使表可建在任意 schema）；`pnpm db:migrate` 手动执行迁移（API/Worker 启动时也会自动执行）；`pnpm db:import-snapshot [路径]` 把旧 JSON 快照和 `document_vectors` 导入新表，可重复执行；`pnpm db:reindex-search` 按当前词项规则重建全部切片的关键词检索词项（修改 `search-terms.ts` 后执行）。
@@ -25,14 +25,18 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing> dev|build|typeche
 
 ## 架构
 
-- `apps/api`：Fastify，问答相关路由在 `src/chat.ts`（插件），其余路由在 `src/index.ts`，共用的分页与长度常量在 `src/common.ts`。问答在请求内完成检索与生成（`answerQuestion`）：`retrieve`（关键词 + 向量，RRF 合并，知识库开启时 Rerank）→ `buildAnswerContext` → 流式调用默认供应商的 Chat 模型；未配置 Chat 模型、密钥缺失或调用失败时返回原文摘录（`answerMode: "extractive"`），向量检索/Rerank 失败只降级并记日志。检索参数取 `knowledgeBaseId` 指定或最近创建的知识库。用户端接口：单次问答 `/api/chat`；会话 `/api/chat/sessions`（列表/创建）、`/api/chat/sessions/:id/messages`、`DELETE /api/chat/sessions/:id`；流式问答 `POST /api/chat/sessions/:id/stream`（SSE，事件 `source`/`token`/`done`/`error`，`done` 的回答为准；`{ regenerate: messageId }` 只能重新生成最后一轮，被替换的消息标记 `superseded_at`，仍保留在问答记录中；客户端断开时中止模型调用且不保存）；以及 `/api/search`、`/api/messages/:id/feedback`。管理端接口在 `/api/admin/*`（sources、documents、knowledge-bases、model-providers、chat-logs），无认证。API 只负责改元数据和入队，不做采集/切片/向量化。
+- `apps/api`：Fastify，按领域拆为插件（`chat`、`search`、`documents`、`data-sources`、`crawl-tasks`、`knowledge-bases`、`model-providers`、`common`），`src/app.ts` 的 `buildApp({ queue })` 组装（测试注入假队列），`src/index.ts` 只做迁移与监听。
+  - 请求/响应校验用 Fastify JSON Schema，集中在 `src/schemas.ts`，以 `"METHOD /path"` 为键由 `common.ts` 的 `onRoute` 钩子挂载；新增或修改路由必须同步此注册表（`test/app.test.ts` 校验路由与 schema 一一对应）。Ajv 关闭类型强制转换，参数 ID 必须是 UUID（公开文章接口 `GET /api/documents/:id` 除外，未知 ID 一律 404），请求体拒绝未知字段；响应 schema 只输出声明过的字段，给接口加字段时漏改 schema 会被静默丢弃。
+  - `common.ts` 的错误处理钩子把所有错误统一为 `{ error: string }`：4xx 返回原因，其余记日志并返回 `Internal server error`。路由内直接 `reply.code(4xx).send({ error })`。
+  - 队列访问只经过 `src/queue.ts`（`DocumentQueue`）：文档级 jobId `document-<id>`，来源同步 jobId `sync-<taskId>`，`hasDocumentJob` / `hasSourceJob` 做重复任务检测。
+  - 问答（`src/chat.ts`）在请求内完成检索与生成（`answerQuestion`）：`retrieve`（关键词 + 向量，RRF 合并，知识库开启时 Rerank）→ `buildAnswerContext` → 流式调用默认供应商的 Chat 模型；未配置 Chat 模型、密钥缺失或调用失败时返回原文摘录（`answerMode: "extractive"`），向量检索/Rerank 失败只降级并记日志。检索参数取 `knowledgeBaseId` 指定或最近创建的知识库。用户端接口：单次问答 `/api/chat`；会话 `/api/chat/sessions`（列表/创建）、`/api/chat/sessions/:id/messages`、`DELETE /api/chat/sessions/:id`；流式问答 `POST /api/chat/sessions/:id/stream`（SSE，事件 `source`/`token`/`done`/`error`，`done` 的回答为准；`{ regenerate: messageId }` 只能重新生成最后一轮，被替换的消息标记 `superseded_at`，仍保留在问答记录中；客户端断开时中止模型调用且不保存）；以及 `/api/search`、`/api/messages/:id/feedback`。管理端接口在 `/api/admin/*`（sources、documents、knowledge-bases、model-providers、chat-logs），无认证。API 只负责改元数据和入队，不做采集/切片/向量化。
 - `apps/worker`：BullMQ 消费者（`src/index.ts`，concurrency 1），处理三种 job：
   - `sync-source`：按来源类型分两条路径，入库后都在同一事务内由 `processDocument` 切片，再自动向量化。
     - `网页站点`：robots.txt 检查、同源同路径链接，页数/间隔/超时由 `CRAWL_*` 环境变量控制，正文提取保留换行。
     - `文章 API`：来源 `url` 为 nyzdata 文章列表接口，token 只读 Worker 的 `NYZ_ARTICLE_TOKEN`（API 拒绝带 token 的地址）。由 `syncArticles` 按 `updateTime` 增量同步，回填进度与失败文章存于 `data_sources.sync_state`。详情原样存入 `documents.raw_json`，`external_id` 为 articleKey。
   - `reprocess-document`：重新清洗切片并清除旧向量，再自动向量化。文章来源会用当前解析器从 `raw_json` 重新解析，不请求接口。
   - `embed-document`：对已切片文档向量化（手动重试入口）。
-  - 文档级 job 使用 `jobId: document-<id>`，API 据此及 active 的 `sync-source` 判断重复任务并返回 409。
+  - 文档级 job 使用 `jobId: document-<id>`，API 据此及 active 的 `sync-source` 判断重复任务并返回 409；同一来源已有等待/运行中的 `sync-source` 时再次同步也返回 409。
 - `packages/processing`：API 与 Worker 共享的运行时逻辑。
   - `schema.ts` / `db.ts`：Drizzle ORM（`node-postgres` 驱动，`casing: "snake_case"`）。`db.ts` 提供连接池（`DATABASE_URL` 必填）、`getDb()`、`withTransaction`、`migrate()`；迁移由 drizzle-kit 生成到 `migrations/`，运行时用 Drizzle migrator 执行，外加咨询锁串行，迁移记录表 `__drizzle_migrations` 放在当前 schema。不要手改已执行的迁移文件。
   - Drizzle 在单表查询里渲染列名不带表名：`sql` 模板中的相关子查询引用外层列时须用 `repository.ts` 的 `outer()` 显式限定（查询构建器生成的子查询不受影响）。
@@ -48,7 +52,8 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing> dev|build|typeche
   - `models.ts` / `provider.ts`：统一模型接口 `EmbeddingModel` / `ChatModel`（`streamChat`，SSE）/ `RerankModel`，基础地址追加 `/embeddings`、`/chat/completions`、`/rerank`；错误信息不含地址、密钥和响应正文。
   - `embedding.ts`：OpenAI 兼容 `/embeddings`，32 条一批。`selectEmbeddingProvider` 选唯一“启用 + 默认 + 有 embeddingModel”的 provider（数据库唯一索引保证最多一个默认）；provider 记录只保存密钥的**环境变量名**，运行时从 `process.env` 读取，密钥值不入库。
 - `packages/types`：前后端共享的接口类型（`DocumentSummary` 为列表项、`DocumentRecord` 为含正文和切片的详情、`KnowledgeOverview` 等），以 `@nyz-rag/types` 引用。新增/修改接口时先改这里。
-- `apps/web`、`apps/admin`：Vue 3 + Vite，各自基本是单个 `src/App.vue`。通过 `VITE_API_URL` 访问 API；Docker 构建中 `VITE_API_URL` 为空，由 Nginx 将同源 `/api/` 代理到 api:3000。
+- `packages/api-client`：前端共享的 fetch 客户端（直接导出 `src/index.ts`，无需构建）。`request<T>` 把 `{ error }` 响应转为 `ApiError`；`stream` 解析 SSE（跳过心跳），未收到 `done` 即结束时调用 `onIncomplete`，读取中被中止时静默返回。
+- `apps/web`、`apps/admin`：Vue 3 + Vite，各自基本是单个 `src/App.vue`，通过 `@nyz-rag/api-client` 访问 API。`VITE_API_URL` 为 API 地址；Docker 构建中 `VITE_API_URL` 为空，由 Nginx 将同源 `/api/` 代理到 api:3000。
 - 会话（`chat_sessions`）尚无用户归属，对所有访问者可见。追问时最近 3 轮问答作为历史送入模型（去掉旧引用编号），检索只用当前问题（未做问题改写）。问答记录的召回片段与得分存于 `message_chunks`。部分状态值是中文字面量（如任务状态 `等待中`/`运行中`/`已完成`/`失败`、来源类型 `网页站点`），修改时保持一致。
 
 ## 环境与基础设施
@@ -62,4 +67,4 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing> dev|build|typeche
 
 ## 验证
 
-修改后运行 `pnpm typecheck`、`pnpm build` 和 `pnpm --filter @nyz-rag/processing test`；涉及 API/队列/Worker 链路时在本地基础设施可用时加跑集成测试。
+修改后运行 `pnpm typecheck`、`pnpm build`、`pnpm --filter @nyz-rag/processing test`，涉及 API 或前端客户端时加跑 `pnpm --filter @nyz-rag/api test` 与 `pnpm --filter @nyz-rag/api-client test`；涉及 API/队列/Worker 链路时在本地基础设施可用时加跑集成测试。

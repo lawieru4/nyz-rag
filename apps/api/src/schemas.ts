@@ -1,0 +1,856 @@
+/**
+ * schemas.ts — Fastify JSON Schema registry for all API routes.
+ *
+ * Each entry is keyed by `METHOD /path/with/:params` (upper-case method,
+ * single space, exact path template matching Fastify route registration).
+ *
+ * `body` and `querystring` schemas feed Fastify's AJV request validator.
+ * `response` schemas feed Fastify's fast-json-stringify response serializer.
+ *
+ * Design notes:
+ *  - `additionalProperties: false` on responses to prevent accidental leaks,
+ *    while still preserving every documented field.
+ *  - No coercion: expects the app to be created with `ajv: { coerceTypes: false }`.
+ *  - Params with `:id` are UUID strings; validated with format:"uuid" so
+ *    garbage IDs get a 400 before handlers hit the DB. The public article
+ *    detail route is the exception (404 for any unknown ID).
+ *  - SSE route (/api/chat/sessions/:id/stream): body schema only — no JSON
+ *    response schema because the response is a raw event-stream.
+ *  - Pagination querystrings accept string representations of integers
+ *    (standard HTTP query string). Coercion is intentionally NOT done here;
+ *    common.ts pageParams already handles parseInt.
+ */
+
+// ─── Shared primitives ────────────────────────────────────────────────────────
+
+const uuidParam = { type: "string", format: "uuid" };
+// Handlers trim names and URLs, so whitespace-only values must be rejected here.
+const nonBlankString = { type: "string", pattern: "\\S" } as const;
+
+const pageQuerystring = {
+  type: "object",
+  properties: {
+    page: { type: "string", pattern: "^[1-9][0-9]*$" },
+    pageSize: { type: "string", pattern: "^[1-9][0-9]*$" },
+  },
+  additionalProperties: false,
+} as const;
+
+const errorResponse = {
+  type: "object",
+  properties: { error: { type: "string" } },
+  required: ["error"],
+  additionalProperties: false,
+} as const;
+
+// Common error status codes block used across most routes
+const errorResponses = {
+  "400": errorResponse,
+  "404": errorResponse,
+  "409": errorResponse,
+  "500": errorResponse,
+} as const;
+
+// ─── Retrieval filter (shared sub-schema) ────────────────────────────────────
+
+const retrievalFiltersSchema = {
+  type: "object",
+  properties: {
+    publishedFrom: { type: "string" },
+    publishedTo: { type: "string" },
+    categories: { type: "array", items: { type: "string" } },
+    tags: { type: "array", items: { type: "string" } },
+    scenarios: { type: "array", items: { type: "string" } },
+    sourceId: { type: "string" },
+  },
+  additionalProperties: false,
+} as const;
+
+// ─── Chat source (shared sub-schema) ─────────────────────────────────────────
+
+const chatSourceSchema = {
+  type: "object",
+  properties: {
+    documentId: { type: "string" },
+    title: { type: "string" },
+    url: { type: "string" },
+    repostSource: { type: "string" },
+  },
+  required: ["documentId", "title", "url"],
+  additionalProperties: false,
+} as const;
+
+const chatSessionMessageSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    question: { type: "string" },
+    answer: { type: "string" },
+    answerMode: { type: "string", enum: ["generated", "extractive"] },
+    sources: { type: "array", items: chatSourceSchema },
+    rating: { type: "string", nullable: true },
+    createdAt: { type: "string" },
+  },
+  required: ["id", "question", "answer", "answerMode", "sources", "createdAt"],
+  additionalProperties: false,
+} as const;
+
+const chatSessionRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    title: { type: "string" },
+    knowledgeBaseId: { type: "string" },
+    messageCount: { type: "number" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+  required: ["id", "title", "messageCount", "createdAt", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
+// ─── Chat routes ─────────────────────────────────────────────────────────────
+
+const chatBodySchema = {
+  type: "object",
+  properties: {
+    question: { type: "string", maxLength: 2000 },
+    filters: retrievalFiltersSchema,
+    knowledgeBaseId: { type: "string" },
+  },
+  required: ["question"],
+  additionalProperties: false,
+} as const;
+
+const chatResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      messageId: { type: "string" },
+      answer: { type: "string" },
+      answerMode: { type: "string", enum: ["generated", "extractive"] },
+      sources: { type: "array", items: chatSourceSchema },
+    },
+    required: ["messageId", "answer", "answerMode", "sources"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+// ─── Chat sessions ───────────────────────────────────────────────────────────
+
+const createChatSessionBodySchema = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    knowledgeBaseId: { type: "string" },
+  },
+  additionalProperties: false,
+} as const;
+
+const chatSessionsListResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      sessions: { type: "array", items: chatSessionRecordSchema },
+      total: { type: "number" },
+    },
+    required: ["sessions", "total"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+const chatSessionMessagesResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      session: chatSessionRecordSchema,
+      messages: { type: "array", items: chatSessionMessageSchema },
+    },
+    required: ["session", "messages"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+// ─── SSE stream: body only, no JSON success response schema ──────────────────
+
+const chatStreamBodySchema = {
+  type: "object",
+  properties: {
+    question: { type: "string", maxLength: 2000 },
+    regenerate: { type: "string" },
+    filters: retrievalFiltersSchema,
+  },
+  additionalProperties: false,
+  // At least one of question or regenerate must be present — enforced in handler.
+} as const;
+
+// ─── Chat feedback ───────────────────────────────────────────────────────────
+
+const chatFeedbackBodySchema = {
+  type: "object",
+  properties: {
+    rating: { type: "string", enum: ["positive", "negative"] },
+  },
+  required: ["rating"],
+  additionalProperties: false,
+} as const;
+
+// ─── Admin: documents ────────────────────────────────────────────────────────
+
+const embeddingRecordSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["pending", "queued", "processing", "ready", "failed"] },
+    providerId: { type: "string" },
+    model: { type: "string" },
+    dimensions: { type: "number" },
+    chunkCount: { type: "number" },
+    updatedAt: { type: "string" },
+    error: { type: "string" },
+  },
+  required: ["status", "chunkCount"],
+  additionalProperties: false,
+} as const;
+
+const documentChunkRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    index: { type: "number" },
+    content: { type: "string" },
+    tokenEstimate: { type: "number" },
+    context: { type: "string" },
+    sectionPath: { type: "array", items: { type: "string" } },
+    contentType: { type: "string", enum: ["text", "table"] },
+  },
+  required: ["id", "index", "content", "tokenEstimate"],
+  additionalProperties: false,
+} as const;
+
+const documentSummarySchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    sourceId: { type: "string" },
+    title: { type: "string" },
+    url: { type: "string" },
+    externalId: { type: "string" },
+    author: { type: "string" },
+    category: { type: "string" },
+    tags: { type: "array", items: { type: "string" } },
+    publishedAt: { type: "string" },
+    parserVersion: { type: "number" },
+    status: { type: "string", enum: ["pending", "processing", "ready", "failed"] },
+    processingStatus: { type: "string", enum: ["pending", "cleaning", "chunked", "failed"] },
+    processingError: { type: "string" },
+    embedding: embeddingRecordSchema,
+    chunkCount: { type: "number" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+  required: ["id", "sourceId", "title", "url", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
+const articleSourceMetaSchema = {
+  type: "object",
+  properties: {
+    generator: { type: "string", nullable: true },
+    repostSource: { type: "string", nullable: true },
+    keywords: { type: "array", items: { type: "string" } },
+    scenarios: { type: "array", items: { type: "string" } },
+  },
+  required: ["keywords", "scenarios"],
+  additionalProperties: false,
+} as const;
+
+const articleImageSchema = {
+  type: "object",
+  properties: {
+    index: { type: "number" },
+    src: { type: "string" },
+    alt: { type: "string", nullable: true },
+    title: { type: "string", nullable: true },
+    caption: { type: "string", nullable: true },
+    sectionPath: { type: "array", items: { type: "string" } },
+    nodeIndex: { type: "number" },
+  },
+  required: ["index", "src", "sectionPath", "nodeIndex"],
+  additionalProperties: false,
+} as const;
+
+const articleMediaSchema = {
+  type: "object",
+  properties: {
+    index: { type: "number" },
+    url: { type: "string" },
+    fileType: { type: "string", nullable: true },
+    title: { type: "string", nullable: true },
+    sectionPath: { type: "array", items: { type: "string" } },
+    nodeIndex: { type: "number" },
+  },
+  required: ["index", "url", "sectionPath", "nodeIndex"],
+  additionalProperties: false,
+} as const;
+
+const articleAttachmentSchema = {
+  type: "object",
+  properties: {
+    originalName: { type: "string", nullable: true },
+    storageKey: { type: "string", nullable: true },
+    canDownload: { type: "boolean" },
+  },
+  required: ["canDownload"],
+  additionalProperties: false,
+} as const;
+
+const articleMetadataSchema = {
+  type: "object",
+  properties: {
+    summary: { type: "string", nullable: true },
+    cover: { type: "string", nullable: true },
+    doi: { type: "string", nullable: true },
+    sourceMeta: { ...articleSourceMetaSchema, nullable: true },
+    relatedArticleKeys: { type: "array", items: { type: "string" } },
+    followUpQuestions: { type: "array", items: { type: "string" } },
+    attachments: { type: "array", items: articleAttachmentSchema },
+    images: { type: "array", items: articleImageSchema },
+    media: { type: "array", items: articleMediaSchema },
+    isVIP: { type: "boolean" },
+    original: { type: "boolean" },
+    unknownNodeTypes: { type: "array", items: { type: "string" } },
+    demotedHeadings: { type: "number" },
+  },
+  required: ["relatedArticleKeys", "followUpQuestions", "attachments", "images", "media", "isVIP", "original", "unknownNodeTypes", "demotedHeadings"],
+  additionalProperties: false,
+} as const;
+
+const documentRecordSchema = {
+  type: "object",
+  properties: {
+    ...documentSummarySchema.properties,
+    content: { type: "string" },
+    markdown: { type: "string" },
+    rawHtml: { type: "string" },
+    metadata: articleMetadataSchema,
+    chunks: { type: "array", items: documentChunkRecordSchema },
+  },
+  required: [...documentSummarySchema.required, "content", "chunks"],
+  additionalProperties: false,
+} as const;
+
+const adminDocumentsQuerySchema = {
+  type: "object",
+  properties: {
+    query: { type: "string" },
+    sourceId: { type: "string" },
+    status: { type: "string", enum: ["pending", "processing", "ready", "failed"] },
+    page: { type: "string", pattern: "^[1-9][0-9]*$" },
+    pageSize: { type: "string", pattern: "^[1-9][0-9]*$" },
+  },
+  additionalProperties: false,
+} as const;
+
+const documentListResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      documents: { type: "array", items: documentSummarySchema },
+      total: { type: "number" },
+    },
+    required: ["documents", "total"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+const queuedResponseSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string" },
+    documentId: { type: "string" },
+  },
+  required: ["status", "documentId"],
+  additionalProperties: false,
+} as const;
+
+// ─── Public document detail ───────────────────────────────────────────────────
+
+const documentDetailSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    title: { type: "string" },
+    url: { type: "string" },
+    content: { type: "string" },
+    markdown: { type: "string" },
+    author: { type: "string" },
+    category: { type: "string" },
+    tags: { type: "array", items: { type: "string" } },
+    publishedAt: { type: "string" },
+    updatedAt: { type: "string" },
+    summary: { type: "string" },
+    repostSource: { type: "string" },
+    keywords: { type: "array", items: { type: "string" } },
+    scenarios: { type: "array", items: { type: "string" } },
+  },
+  required: ["id", "title", "url", "content", "tags", "updatedAt", "keywords", "scenarios"],
+  additionalProperties: false,
+} as const;
+
+// ─── Knowledge bases ──────────────────────────────────────────────────────────
+
+const knowledgeBaseRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    description: { type: "string" },
+    topK: { type: "number" },
+    similarityThreshold: { type: "number" },
+    rerankEnabled: { type: "boolean" },
+    maxContextLength: { type: "number" },
+    prompt: { type: "string" },
+    model: { type: "string" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+  required: ["id", "name", "description", "topK", "similarityThreshold", "rerankEnabled", "maxContextLength", "prompt", "model", "createdAt", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
+const saveKnowledgeBaseBodySchema = {
+  type: "object",
+  properties: {
+    name: nonBlankString,
+    description: { type: "string" },
+    topK: { type: "integer", minimum: 1, maximum: 100 },
+    similarityThreshold: { type: "number", minimum: 0, maximum: 1 },
+    rerankEnabled: { type: "boolean" },
+    maxContextLength: { type: "integer", minimum: 256 },
+    prompt: { type: "string" },
+    model: { type: "string" },
+  },
+  required: ["name", "topK", "similarityThreshold", "rerankEnabled", "maxContextLength", "prompt", "model"],
+  additionalProperties: false,
+} as const;
+
+// ─── Model providers ──────────────────────────────────────────────────────────
+
+const modelProviderRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    provider: { type: "string" },
+    baseUrl: { type: "string" },
+    chatModel: { type: "string" },
+    embeddingModel: { type: "string" },
+    rerankModel: { type: "string" },
+    temperature: { type: "number" },
+    maxTokens: { type: "number" },
+    credentialEnv: { type: "string" },
+    enabled: { type: "boolean" },
+    isDefault: { type: "boolean" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+  required: ["id", "name", "provider", "baseUrl", "chatModel", "embeddingModel", "rerankModel", "temperature", "maxTokens", "credentialEnv", "enabled", "isDefault", "createdAt", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
+// temperature and maxTokens are optional (defaults applied by handler)
+const saveModelProviderBodySchema = {
+  type: "object",
+  properties: {
+    name: nonBlankString,
+    provider: nonBlankString,
+    baseUrl: { type: "string" },
+    chatModel: nonBlankString,
+    embeddingModel: { type: "string" },
+    rerankModel: { type: "string" },
+    credentialEnv: { type: "string", pattern: "^[A-Z][A-Z0-9_]*$" },
+    enabled: { type: "boolean" },
+    isDefault: { type: "boolean" },
+    temperature: { type: "number", minimum: 0, maximum: 2 },
+    maxTokens: { type: "integer", minimum: 1, maximum: 32768 },
+  },
+  required: ["name", "provider", "chatModel", "credentialEnv", "enabled", "isDefault"],
+  additionalProperties: false,
+} as const;
+
+// ─── Sources ──────────────────────────────────────────────────────────────────
+
+const dataSourceRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    url: { type: "string" },
+    kind: { type: "string", enum: ["文章 API", "网页站点"] },
+    frequency: { type: "string" },
+    status: { type: "string", enum: ["运行中", "已暂停"] },
+    documentCount: { type: "number" },
+    updatedAt: { type: "string", nullable: true },
+  },
+  required: ["id", "name", "url", "kind", "frequency", "status", "documentCount"],
+  additionalProperties: false,
+} as const;
+
+const createSourceBodySchema = {
+  type: "object",
+  properties: {
+    name: nonBlankString,
+    url: nonBlankString,
+    kind: { type: "string", enum: ["文章 API", "网页站点"] },
+    frequency: { type: "string" },
+  },
+  required: ["name", "url", "kind"],
+  additionalProperties: false,
+} as const;
+
+const updateSourceStatusBodySchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["运行中", "已暂停"] },
+  },
+  required: ["status"],
+  additionalProperties: false,
+} as const;
+
+// ─── Chat logs ────────────────────────────────────────────────────────────────
+
+const chatLogsQuerySchema = {
+  type: "object",
+  properties: {
+    query: { type: "string" },
+    // Filters by whether feedback exists (see listChatMessages), not by the rating value.
+    rating: { type: "string", enum: ["rated", "unrated"] },
+    page: { type: "string", pattern: "^[1-9][0-9]*$" },
+    pageSize: { type: "string", pattern: "^[1-9][0-9]*$" },
+  },
+  additionalProperties: false,
+} as const;
+
+const chatRetrievedChunkSchema = {
+  type: "object",
+  properties: {
+    chunkId: { type: "string" },
+    documentId: { type: "string" },
+    citation: { type: "number" },
+    title: { type: "string" },
+    sectionPath: { type: "array", items: { type: "string" } },
+    excerpt: { type: "string" },
+    score: { type: "number" },
+    vectorScore: { type: "number" },
+    keywordScore: { type: "number" },
+    rerankScore: { type: "number" },
+  },
+  required: ["chunkId", "documentId", "citation", "title", "sectionPath", "excerpt", "score"],
+  additionalProperties: false,
+} as const;
+
+const chatLogRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    sessionId: { type: "string" },
+    supersededAt: { type: "string" },
+    question: { type: "string" },
+    answer: { type: "string" },
+    answerMode: { type: "string", enum: ["generated", "extractive"] },
+    knowledgeBaseId: { type: "string" },
+    model: { type: "string" },
+    retrievalMs: { type: "number" },
+    firstTokenMs: { type: "number" },
+    totalMs: { type: "number" },
+    promptTokens: { type: "number" },
+    completionTokens: { type: "number" },
+    sources: { type: "array", items: chatSourceSchema },
+    chunks: { type: "array", items: chatRetrievedChunkSchema },
+    rating: { type: "string", nullable: true },
+    createdAt: { type: "string" },
+  },
+  required: ["id", "question", "answer", "answerMode", "sources", "chunks", "createdAt"],
+  additionalProperties: false,
+} as const;
+
+const chatLogsListResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      logs: { type: "array", items: chatLogRecordSchema },
+      total: { type: "number" },
+    },
+    required: ["logs", "total"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+const searchBodySchema = {
+  type: "object",
+  properties: {
+    query: { type: "string", maxLength: 2000 },
+    filters: retrievalFiltersSchema,
+  },
+  required: ["query"],
+  additionalProperties: false,
+} as const;
+
+const searchResultSchema = {
+  type: "object",
+  properties: {
+    documentId: { type: "string" },
+    title: { type: "string" },
+    url: { type: "string" },
+    excerpt: { type: "string" },
+    score: { type: "number" },
+  },
+  required: ["documentId", "title", "url", "excerpt", "score"],
+  additionalProperties: false,
+} as const;
+
+const searchResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      query: { type: "string" },
+      results: { type: "array", items: searchResultSchema },
+      total: { type: "number" },
+    },
+    required: ["query", "results", "total"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+// ─── Health ───────────────────────────────────────────────────────────────────
+
+const healthResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["ok"] },
+      service: { type: "string", enum: ["nyz-rag-api"] },
+      timestamp: { type: "string" },
+    },
+    required: ["status", "service", "timestamp"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+// ─── Knowledge overview ───────────────────────────────────────────────────────
+
+const crawlTaskRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    sourceId: { type: "string" },
+    sourceName: { type: "string" },
+    status: { type: "string", enum: ["等待中", "运行中", "已完成", "失败"] },
+    progress: { type: "number" },
+    createdAt: { type: "string" },
+    error: { type: "string" },
+  },
+  required: ["id", "sourceId", "sourceName", "status", "progress", "createdAt"],
+  additionalProperties: false,
+} as const;
+
+const knowledgeStatsSchema = {
+  type: "object",
+  properties: {
+    documents: { type: "number" },
+    sources: { type: "number" },
+    processingTasks: { type: "number" },
+    lastUpdated: { type: "string", nullable: true },
+  },
+  required: ["documents", "sources", "processingTasks"],
+  additionalProperties: false,
+} as const;
+
+const knowledgeOverviewResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      sources: { type: "array", items: dataSourceRecordSchema },
+      tasks: { type: "array", items: crawlTaskRecordSchema },
+      stats: knowledgeStatsSchema,
+    },
+    required: ["sources", "tasks", "stats"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
+// ─── Registry ─────────────────────────────────────────────────────────────────
+
+export interface RouteSchema {
+  body?: Record<string, unknown>;
+  querystring?: Record<string, unknown>;
+  params?: Record<string, unknown>;
+  response?: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * Registry keyed by `"METHOD /path/template"` exactly as registered in Fastify.
+ * Consumed by the `onRoute` hook in configureCommon to attach schemas.
+ */
+export const routeSchemas: Record<string, RouteSchema> = {
+  // ── Health ──────────────────────────────────────────────────────────────────
+  "GET /health": {
+    response: healthResponseSchema,
+  },
+
+  // ── Knowledge overview ──────────────────────────────────────────────────────
+  "GET /api/knowledge": {
+    response: knowledgeOverviewResponseSchema,
+  },
+
+  // ── Chat ────────────────────────────────────────────────────────────────────
+  "POST /api/chat": {
+    body: chatBodySchema,
+    response: chatResponseSchema,
+  },
+
+  "GET /api/chat/sessions": {
+    querystring: pageQuerystring,
+    response: chatSessionsListResponseSchema,
+  },
+
+  "POST /api/chat/sessions": {
+    body: createChatSessionBodySchema,
+    response: {
+      "201": chatSessionRecordSchema,
+      ...errorResponses,
+    },
+  },
+
+  "GET /api/chat/sessions/:id/messages": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: chatSessionMessagesResponseSchema,
+  },
+
+  "DELETE /api/chat/sessions/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  // SSE: body validated, no JSON success response schema
+  "POST /api/chat/sessions/:id/stream": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: chatStreamBodySchema,
+    response: errorResponses,
+  },
+
+  "POST /api/messages/:id/feedback": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: chatFeedbackBodySchema,
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  // ── Admin: chat logs ────────────────────────────────────────────────────────
+  "GET /api/admin/chat-logs": {
+    querystring: chatLogsQuerySchema,
+    response: chatLogsListResponseSchema,
+  },
+
+  // ── Admin: documents ────────────────────────────────────────────────────────
+  "GET /api/admin/documents": {
+    querystring: adminDocumentsQuerySchema,
+    response: documentListResponseSchema,
+  },
+
+  "GET /api/admin/documents/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "200": documentRecordSchema, ...errorResponses },
+  },
+
+  "POST /api/admin/documents/:id/reprocess": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "202": queuedResponseSchema, ...errorResponses },
+  },
+
+  "POST /api/admin/documents/:id/embed": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "202": queuedResponseSchema, ...errorResponses },
+  },
+
+  "DELETE /api/admin/documents/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  // ── Public document detail ──────────────────────────────────────────────────
+  // Public article links are user-visible: unknown or malformed IDs return 404 rather than a validation error.
+  "GET /api/documents/:id": {
+    params: { type: "object", properties: { id: nonBlankString }, required: ["id"], additionalProperties: false },
+    response: { "200": documentDetailSchema, ...errorResponses },
+  },
+
+  // ── Admin: knowledge bases ──────────────────────────────────────────────────
+  "GET /api/admin/knowledge-bases": {
+    response: { "200": { type: "array", items: knowledgeBaseRecordSchema }, ...errorResponses },
+  },
+
+  "POST /api/admin/knowledge-bases": {
+    body: saveKnowledgeBaseBodySchema,
+    response: { "201": knowledgeBaseRecordSchema, ...errorResponses },
+  },
+
+  "PATCH /api/admin/knowledge-bases/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: saveKnowledgeBaseBodySchema,
+    response: { "200": knowledgeBaseRecordSchema, ...errorResponses },
+  },
+
+  // ── Admin: model providers ──────────────────────────────────────────────────
+  "GET /api/admin/model-providers": {
+    response: { "200": { type: "array", items: modelProviderRecordSchema }, ...errorResponses },
+  },
+
+  "POST /api/admin/model-providers": {
+    body: saveModelProviderBodySchema,
+    response: { "201": modelProviderRecordSchema, ...errorResponses },
+  },
+
+  "PATCH /api/admin/model-providers/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: saveModelProviderBodySchema,
+    response: { "200": modelProviderRecordSchema, ...errorResponses },
+  },
+
+  "DELETE /api/admin/model-providers/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  // ── Admin: sources ──────────────────────────────────────────────────────────
+  "POST /api/admin/sources": {
+    body: createSourceBodySchema,
+    response: { "200": dataSourceRecordSchema, ...errorResponses },
+  },
+
+  "POST /api/admin/sources/:id/sync": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "200": crawlTaskRecordSchema, ...errorResponses },
+  },
+
+  "PATCH /api/admin/sources/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: updateSourceStatusBodySchema,
+    response: { "200": dataSourceRecordSchema, ...errorResponses },
+  },
+
+  // ── Search ──────────────────────────────────────────────────────────────────
+  "POST /api/search": {
+    body: searchBodySchema,
+    response: searchResponseSchema,
+  },
+};

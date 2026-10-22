@@ -68,6 +68,8 @@
 - 本轮核对（2026-10-22）：HNSW、元数据过滤、公开文章详情接口及文章页已有实现，保留而不重复开发。补齐文章原文链接协议检查、无效 hash 地址错误状态、切换页面时旧请求失效以及移动端样式优先级；浏览器使用模拟文章响应验证正文/表格、安全链接、无效地址及 390px 布局，API 真实链路由隔离 schema 集成测试验证。
 - 评估进度：50 条文章衍生合成问题及证据已具备，提供离线和数据库关键词评估命令与 Recall@K、MRR、线性增益 nDCG@K。修复评估命令默认路径与数据库语料覆盖统计，缺失语料单独报告；合成题不是人工标注真实问题，尚不能用于证明生产问答质量。
 - 本轮验证：`pnpm typecheck`、`pnpm build` 通过；加载根 `.env` 并启用 `NYZ_INTEGRATION_TEST=1` 后 29 项测试全部通过，无跳过。离线模式对 50 条问题逐条核验原文证据，词项重叠基线 Recall@1/3/5/10 为 0.32/0.64/0.70/0.82，MRR 为 0.5091；不是生产混合检索指标。数据库模式可评估问题为 0、缺失标注为 50（按问题-文章关联计数，共 25 篇文章），报告覆盖不足并返回非零退出码；未导入业务数据。
+- 本轮完成（架构调整第二阶段，2026-10-22）：API 按领域拆为 Fastify 插件（`chat`、`search`、`documents`、`data-sources`、`crawl-tasks`、`knowledge-bases`、`model-providers`、`common`），由 `app.ts` 组装；队列访问收敛到 `queue.ts`，来源同步改用 `sync-<taskId>` 作为 jobId 并拒绝同一来源的重复同步（409）；请求/响应校验采用 Fastify JSON Schema（`schemas.ts`），统一 `{ error }` 错误响应和错误处理钩子；web 与 admin 改用共享客户端 `packages/api-client`。迁移到 JSON Schema 时补回了原手写校验中的知识库取值范围（topK 1～100、相似度阈值 0～1、上下文 ≥256）、整数 `maxTokens` 与名称非空白约束。
+- 验证：`apps/api` 契约测试（Fastify inject，无需数据库/Redis）覆盖各路由的校验、序列化、错误格式与路由—schema 一一对应；`packages/api-client` 测试覆盖错误解析与 SSE 读取。
 
 ## 向量化运行配置
 
@@ -76,4 +78,4 @@
 - `vector` 扩展需管理员预先创建；表结构由迁移创建。向量列不限维度，384/512/768/1024/1536/2000 维使用 HNSW 部分表达式索引，其他维度保留精确扫描，均按模型与维度过滤。ANN 过滤后候选不足时精确回退；首次建索引宜安排维护窗口，不是并发建索引。
 - 问答使用同一默认供应商：填写 Chat 模型即启用生成回答（系统追加 `/chat/completions`，流式调用）；填写 Rerank 模型并在知识库开启重排序后调用 `/rerank`（Jina/Cohere/SiliconFlow 兼容格式）。检索参数取请求指定或最近创建的知识库，没有知识库时为 topK 5、相似度阈值 0.3、上下文 6000 字。
 - 根目录 `pnpm dev` 和 `pnpm typecheck` 会先构建共享处理包；单独启动 API 或 Worker 前，先执行 `pnpm --filter @nyz-rag/processing build`。
-- 验证命令：`pnpm --filter @nyz-rag/processing test`；本地基础设施启动后运行 `NYZ_INTEGRATION_TEST=1 pnpm --filter @nyz-rag/processing test`。集成测试使用临时 PostgreSQL schema、本地模拟模型接口及隔离的 Redis 队列，结束时删除该 schema。
+- 验证命令：`pnpm --filter @nyz-rag/processing test`、`pnpm --filter @nyz-rag/api test`、`pnpm --filter @nyz-rag/api-client test`；本地基础设施启动后运行 `NYZ_INTEGRATION_TEST=1 pnpm --filter @nyz-rag/processing test`。集成测试使用临时 PostgreSQL schema、本地模拟模型接口及隔离的 Redis 队列，结束时删除该 schema。

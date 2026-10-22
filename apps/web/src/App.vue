@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import type {
-  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamEvent, ChatStreamRequest, DocumentDetail, RetrievalFilters,
+  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamRequest, DocumentDetail, RetrievalFilters,
 } from "@nyz-rag/types";
+import { createApiClient } from "@nyz-rag/api-client";
 
 interface Turn {
   id?: string;
@@ -19,7 +20,7 @@ interface Turn {
 }
 
 const SESSION_KEY = "nyz-rag:session";
-const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
+const client = createApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
 const question = ref("");
 const busy = ref(false);
 const sourcesCount = ref(0);
@@ -170,12 +171,7 @@ function clearFilters() { dateFrom.value = ""; dateTo.value = ""; categoriesText
 const lastTurn = computed(() => turns.value.at(-1));
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, init);
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error ?? `请求失败（${response.status}）`);
-  }
-  return response.status === 204 ? undefined as T : response.json();
+  return client.request<T>(path, init);
 }
 
 onMounted(async () => {
@@ -239,30 +235,6 @@ async function scrollToEnd() {
   thread.value?.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });
 }
 
-/** 读取 SSE 响应流；忽略心跳注释行。 */
-async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ChatStreamEvent> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) return;
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
-    let boundary: number;
-    while ((boundary = buffer.indexOf("\n\n")) >= 0) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      let event = "";
-      let data = "";
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) data += line.slice(5).trim();
-      }
-      if (event && data) yield { event, data: JSON.parse(data) } as ChatStreamEvent;
-    }
-  }
-}
-
 /** 返回本轮是否完成并保存。 */
 async function stream(turn: Turn, request: ChatStreamRequest): Promise<boolean> {
   busy.value = true;
@@ -275,23 +247,24 @@ async function stream(turn: Turn, request: ChatStreamRequest): Promise<boolean> 
       sessionId.value = session.id;
       localStorage.setItem(SESSION_KEY, session.id);
     }
-    const response = await fetch(`${apiBase}/api/chat/sessions/${sessionId.value}/stream`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...request, filters: currentFilters() }), signal: controller.signal,
-    });
-    if (!response.ok || !response.body) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data.error ?? "请求失败");
-    }
-    for await (const { event, data } of readEvents(response.body)) {
-      if (event === "source") turn.sources.push({ documentId: data.documentId, title: data.title, url: data.url, repostSource: data.repostSource });
-      else if (event === "token") turn.answer += data.content;
-      else if (event === "done") {
-        Object.assign(turn, data);
-        finished = true;
-      } else if (event === "error") throw new Error(data.error);
-      if (event !== "source") void scrollToEnd();
-    }
-    if (!finished) throw new Error("连接已中断，本轮回答未保存。");
+    await client.stream(
+      `/api/chat/sessions/${sessionId.value}/stream`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...request, filters: currentFilters() }), signal: controller.signal },
+      {
+        onEvent(ev) {
+          if (ev.event === "source") turn.sources.push({ documentId: ev.data.documentId, title: ev.data.title, url: ev.data.url, repostSource: ev.data.repostSource });
+          else if (ev.event === "token") turn.answer += ev.data.content;
+          else if (ev.event === "done") { Object.assign(turn, ev.data); finished = true; }
+          else if (ev.event === "error") throw new Error(ev.data.error);
+          if (ev.event !== "source") void scrollToEnd();
+        },
+        onIncomplete(reason) {
+          turn.notice = reason;
+        },
+      },
+    );
+    // 读取过程中停止生成时，客户端静默返回而不是抛出 AbortError。
+    if (!finished && controller.signal.aborted) turn.notice = "已停止生成，本轮回答未保存。";
   } catch (error) {
     turn.notice = controller.signal.aborted ? "已停止生成，本轮回答未保存。" : error instanceof Error ? error.message : "无法连接 API 服务";
   } finally {
