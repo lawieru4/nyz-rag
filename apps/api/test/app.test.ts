@@ -3,6 +3,7 @@ import test from "node:test";
 import { buildApp } from "../src/app.js";
 import type { DocumentQueue } from "../src/queue.js";
 import { routeSchemas } from "../src/schemas.js";
+import { adminAuth, adminHeaders, memoryAuthStore } from "./auth-helpers.js";
 
 test("the application registers all domains and rejects bad requests before accessing infrastructure", async () => {
   let closed = false;
@@ -11,7 +12,7 @@ test("the application registers all domains and rejects bad requests before acce
     hasDocumentJob: unexpected, hasSourceJob: unexpected, enqueueDocument: unexpected, enqueueSource: unexpected,
     close: async () => { closed = true; },
   };
-  const app = buildApp({ queue });
+  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore() });
   try {
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200);
@@ -22,8 +23,11 @@ test("the application registers all domains and rejects bad requests before acce
       ["GET", "/api/admin/knowledge-bases"], ["GET", "/api/admin/model-providers"], ["GET", "/api/admin/chat-logs"],
     ] as const) assert.ok(app.hasRoute({ method, url }), `${method} ${url}`);
 
+    const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: adminAuth.username, password: adminAuth.password } });
+    assert.equal(login.statusCode, 200, login.body);
+    const cookie = String(login.headers["set-cookie"]).split(";")[0]!;
     for (const url of ["/api/chat", "/api/search", "/api/admin/sources", "/api/admin/knowledge-bases", "/api/admin/model-providers", "/api/chat/sessions/session/stream"]) {
-      const result = await app.inject({ method: "POST", url, payload: { question: 42, query: [], name: 23 } });
+      const result = await app.inject({ method: "POST", url, headers: { ...adminHeaders, cookie }, payload: { question: 42, query: [], name: 23 } });
       assert.equal(result.statusCode, 400, `${url}: ${result.body}`);
       assert.deepEqual(Object.keys(result.json()), ["error"]);
     }

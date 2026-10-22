@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import type { DocumentRecord, DocumentSummary } from "@nyz-rag/types";
-import { createApiClient, ApiError } from "@nyz-rag/api-client";
+import type { AdminSession, DocumentRecord, DocumentSummary } from "@nyz-rag/types";
+import { AdminApiClient, ApiError } from "./adminClient";
+import AdminLogin from "./AdminLogin.vue";
 
 type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string };
 type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number; started: string; error?: string };
@@ -16,7 +17,11 @@ type ChatLog = {
 type ModelProvider = { id: string; name: string; provider: string; baseUrl: string; chatModel: string; embeddingModel: string; rerankModel: string; temperature: number; maxTokens: number; credentialEnv: string; enabled: boolean; isDefault: boolean; createdAt: string; updatedAt: string };
 
 const activeModule = ref("数据源");
-const client = createApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
+const client = new AdminApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
+const session = ref<AdminSession | null>(null);
+const authChecking = ref(true);
+const loginBusy = ref(false);
+const loginError = ref("");
 const dialogOpen = ref(false);
 const notice = ref("");
 const sources = ref<Source[]>([]);
@@ -64,7 +69,7 @@ async function loadKnowledge() {
   const data = await client.request<{
     sources: Array<{ id: string; name: string; url: string; kind: string; frequency: string; status: Source["status"]; documentCount: number; updatedAt: string | null }>;
     tasks: Array<{ id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string; error?: string }>;
-  }>("/api/knowledge");
+  }>("/api/admin/knowledge");
   sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
   tasks.value = data.tasks.map((task) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString(), error: task.error }));
 }
@@ -159,11 +164,73 @@ async function saveKnowledgeBase() {
   }
 }
 
+// 退出或会话失效时清空页面数据与弹窗，避免下次登录前残留管理数据。
+function resetWorkspace() {
+  session.value = null;
+  activeModule.value = "数据源";
+  notice.value = "";
+  dialogOpen.value = knowledgeBaseDialogOpen.value = modelProviderDialogOpen.value = false;
+  selectedDocument.value = null;
+  selectedChatLog.value = null;
+  sources.value = []; tasks.value = []; documents.value = []; knowledgeBases.value = []; chatLogs.value = []; modelProviders.value = [];
+  documentTotal.value = chatLogTotal.value = 0;
+}
+
+client.onUnauthorized = () => {
+  if (!session.value) return;
+  resetWorkspace();
+  loginError.value = "登录已失效，请重新登录";
+};
+
+function enterWorkspace(value: AdminSession) {
+  session.value = value;
+  loginError.value = "";
+  notice.value = "";
+  loadKnowledge().catch(() => { notice.value = "数据源加载失败，请检查 API 服务"; });
+}
+
+async function restoreSession() {
+  try {
+    enterWorkspace(await client.request<AdminSession>("/api/admin/auth/session"));
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 401)) loginError.value = err instanceof ApiError ? err.message : "无法连接 API 服务";
+  } finally {
+    authChecking.value = false;
+  }
+}
+
+async function login(username: string, password: string) {
+  if (!username || !password) {
+    loginError.value = "请输入用户名和密码";
+    return;
+  }
+  loginBusy.value = true;
+  loginError.value = "";
+  try {
+    enterWorkspace(await client.request<AdminSession>("/api/admin/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }));
+  } catch (err) {
+    loginError.value = err instanceof ApiError ? err.message : "无法连接 API 服务";
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+async function logout() {
+  try {
+    await client.request("/api/admin/auth/logout", { method: "POST" });
+  } catch (err) {
+    // 401 表示会话已失效，onUnauthorized 已切回登录页。
+    if (!(err instanceof ApiError && err.status === 401)) notice.value = err instanceof ApiError ? err.message : "退出失败，请检查 API 服务";
+    return;
+  }
+  resetWorkspace();
+}
+
 let documentRefreshTimer: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
-  void loadKnowledge();
+  void restoreSession();
   documentRefreshTimer = setInterval(() => {
-    if (activeModule.value === "文档管理" && !documentsLoading.value) void loadDocuments();
+    if (session.value && activeModule.value === "文档管理" && !documentsLoading.value) void loadDocuments();
   }, 3000);
 });
 onUnmounted(() => { clearInterval(documentRefreshTimer); clearTimeout(searchTimer); });
@@ -282,7 +349,8 @@ async function startCrawl(source: Source) {
 </script>
 
 <template>
-  <div class="admin-shell">
+  <AdminLogin v-if="!session" :error="loginError" :busy="authChecking || loginBusy" @submit="login" />
+  <div v-else class="admin-shell">
     <aside class="sidebar">
       <a class="brand" href="/"><span class="brand-mark">N</span><span>NYZ <b>KNOWLEDGE OPS</b></span></a>
       <div class="workspace-label">工作空间</div>
@@ -291,7 +359,7 @@ async function startCrawl(source: Source) {
           <span class="nav-icon">{{ item.icon }}</span>{{ item.name }}<span v-if="item.name === '数据源'" class="nav-count">{{ sources.length }}</span>
         </button>
       </nav>
-      <div class="sidebar-bottom"><span class="avatar">NY</span><span class="operator"><b>知识库管理员</b><small>本地演示环境</small></span><span class="more">···</span></div>
+      <div class="sidebar-bottom"><span class="avatar">{{ session.username.slice(0, 2).toUpperCase() }}</span><span class="operator"><b>{{ session.username }}</b><small>管理员</small></span><button class="logout-button" title="退出登录" @click="logout">退出</button></div>
     </aside>
 
     <main class="main-area">

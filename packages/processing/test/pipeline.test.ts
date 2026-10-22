@@ -92,6 +92,15 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   const apiPort = (portServer.address() as { port: number }).port;
   await new Promise<void>((resolve, reject) => portServer.close((error) => error ? reject(error) : resolve()));
   const apiBase = `http://127.0.0.1:${apiPort}`;
+  const adminPassword = randomBytes(24).toString("hex");
+  let adminCookie = "";
+  const fetch = (url: string, init: RequestInit = {}) => {
+    if (!url.startsWith(`${apiBase}/api/admin/`)) return globalThis.fetch(url, init);
+    const headers = new Headers(init.headers);
+    headers.set("x-nyz-admin", "1");
+    if (adminCookie) headers.set("cookie", adminCookie);
+    return globalThis.fetch(url, { ...init, headers });
+  };
   let output = "";
   const children: ChildProcess[] = [];
   const start = (entry: string) => {
@@ -100,6 +109,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       env: {
         ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), TEST_EMBEDDING_KEY: "integration-test-key", DOCUMENT_QUEUE_NAME: `test-${schema}`,
         NYZ_ARTICLE_TOKEN: articleToken, CRAWL_REQUEST_DELAY_MS: "1000",
+        ADMIN_USERNAME: "admin", ADMIN_PASSWORD: adminPassword, ADMIN_COOKIE_SECURE: "false",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -141,6 +151,13 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     start("apps/api/src/index.ts");
     start("apps/worker/src/index.ts");
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
+    assert.equal((await fetch(`${apiBase}/api/admin/documents`)).status, 401);
+    const login = await fetch(`${apiBase}/api/admin/auth/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: adminPassword }),
+    });
+    assert.equal(login.status, 200);
+    adminCookie = login.headers.get("set-cookie")!.split(";")[0]!;
     await until(async () => (await getPool().query("SELECT 1 FROM document_chunks WHERE document_id = $1 AND search_vector <> ''::tsvector", [documentId])).rowCount === 2);
 
     // Exercise the extracted configuration domains through their real request/response schemas.
@@ -259,7 +276,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal((await (await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).json()).messages.length, 2, "an aborted answer is not saved");
     assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}`, { method: "DELETE" })).status, 204);
     assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).status, 404);
-    const overview = await (await fetch(`${apiBase}/api/knowledge`)).json();
+    const overview = await (await fetch(`${apiBase}/api/admin/knowledge`)).json();
     assert.equal(overview.sources[0].documentCount, 1);
     assert.equal(overview.stats.documents, 1);
 
@@ -334,6 +351,9 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(synced[1].title, "文章二（更新）");
     assert.deepEqual(articleRequests.filter((path) => path.endsWith("/articleDetail")).length, 1, "only the changed article is fetched again");
     assert.doesNotMatch(output, new RegExp(articleToken));
+    assert.doesNotMatch(output, new RegExp(adminPassword));
+    assert.equal((await fetch(`${apiBase}/api/admin/auth/logout`, { method: "POST" })).status, 204);
+    assert.equal((await fetch(`${apiBase}/api/admin/documents`)).status, 401);
   } finally {
     for (const child of children) {
       if (child.exitCode === null) { child.kill("SIGTERM"); await once(child, "exit"); }

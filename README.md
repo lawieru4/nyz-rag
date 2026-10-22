@@ -25,7 +25,7 @@ Docker Desktop 将显示独立的 `nyz-rag` 分组，包含 `api`、`worker`、`
 - `.env` 只注入后端运行时，不进入镜像。后端启动器将连接串中的 `localhost` / `127.0.0.1` / `::1` 转为 `host.docker.internal`，通过宿主机端口连接已有服务；非本机地址保持不变。
 - 前端使用 Nginx 提供构建产物并将 `/api/` 代理到 API，浏览器不依赖容器 DNS，也不需要在镜像中配置宿主机 API 地址。Docker 构建固定使用同源 API，不使用本机的 `VITE_API_URL`。
 - 元数据与向量都存于 `DATABASE_URL` 指向的 PostgreSQL，容器不挂载数据目录；API 和 Worker 启动时自动执行数据库迁移。不要同时启动本机 Worker 和容器 Worker 消费同一队列。
-- 仅将端口暴露到 `127.0.0.1`。当前管理 API 没有认证，不应直接开放到公网。
+- 仅将端口暴露到 `127.0.0.1`。管理后台需在 `.env` 设置 `ADMIN_PASSWORD`（16 位以上随机密码）后才能登录；对外部署时设置实际 HTTPS 来源的 `ADMIN_ORIGINS` 与 `ADMIN_COOKIE_SECURE=true`。
 - `docker compose down` 移除本项目应用容器，不会停止外部共享数据库。
 - API 健康检查仅代表 HTTP 可用，Worker 为长驻队列进程；完整依赖状态仍需通过实际文档任务验证。
 

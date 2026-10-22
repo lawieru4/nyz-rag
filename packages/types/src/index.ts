@@ -1,3 +1,13 @@
+export interface AdminLoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface AdminSession {
+  username: string;
+  expiresAt: string;
+}
+
 export interface ApiHealth {
   status: "ok";
   service: "nyz-rag-api";
@@ -279,6 +289,7 @@ export interface KnowledgeStats {
   lastUpdated: string | null;
 }
 
+/** Administrative overview returned only by /api/admin/knowledge. */
 export interface KnowledgeOverview {
   sources: DataSourceRecord[];
   tasks: CrawlTaskRecord[];

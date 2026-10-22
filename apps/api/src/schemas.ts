@@ -46,9 +46,13 @@ const errorResponse = {
 // Common error status codes block used across most routes
 const errorResponses = {
   "400": errorResponse,
+  "401": errorResponse,
+  "403": errorResponse,
   "404": errorResponse,
   "409": errorResponse,
+  "429": errorResponse,
   "500": errorResponse,
+  "503": errorResponse,
 } as const;
 
 // ─── Retrieval filter (shared sub-schema) ────────────────────────────────────
@@ -709,11 +713,29 @@ export interface RouteSchema {
   response?: Record<string, Record<string, unknown>>;
 }
 
+const adminSessionSchema = {
+  type: "object",
+  properties: { username: { type: "string" }, expiresAt: { type: "string" } },
+  required: ["username", "expiresAt"],
+  additionalProperties: false,
+} as const;
+
 /**
  * Registry keyed by `"METHOD /path/template"` exactly as registered in Fastify.
  * Consumed by the `onRoute` hook in configureCommon to attach schemas.
  */
 export const routeSchemas: Record<string, RouteSchema> = {
+  "POST /api/admin/auth/login": {
+    body: {
+      type: "object",
+      properties: { username: { type: "string", minLength: 1, maxLength: 128 }, password: { type: "string", minLength: 1, maxLength: 1024 } },
+      required: ["username", "password"],
+      additionalProperties: false,
+    },
+    response: { "200": adminSessionSchema, ...errorResponses },
+  },
+  "GET /api/admin/auth/session": { response: { "200": adminSessionSchema, ...errorResponses } },
+  "POST /api/admin/auth/logout": { response: { "204": { type: "object" }, ...errorResponses } },
   // ── Health ──────────────────────────────────────────────────────────────────
   "GET /health": {
     response: healthResponseSchema,
@@ -721,6 +743,17 @@ export const routeSchemas: Record<string, RouteSchema> = {
 
   // ── Knowledge overview ──────────────────────────────────────────────────────
   "GET /api/knowledge": {
+    response: {
+      "200": {
+        type: "object",
+        properties: { stats: knowledgeStatsSchema },
+        required: ["stats"],
+        additionalProperties: false,
+      },
+      ...errorResponses,
+    },
+  },
+  "GET /api/admin/knowledge": {
     response: knowledgeOverviewResponseSchema,
   },
 

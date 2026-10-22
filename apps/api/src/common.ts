@@ -39,6 +39,7 @@
  * root level and do NOT depend on a BullMQ queue:
  *  - GET /health
  *  - GET /api/knowledge
+ *  - GET /api/admin/knowledge (authenticated operational overview)
  */
 
 import type { FastifyError, FastifyInstance, FastifyPluginAsync } from "fastify";
@@ -120,6 +121,7 @@ export function configureCommon(app: FastifyInstance): void {
  * require a document queue:
  *  - GET /health
  *  - GET /api/knowledge
+ *  - GET /api/admin/knowledge
  */
 export const commonRoutes: FastifyPluginAsync = async (app) => {
   app.get("/health", async () => ({
@@ -129,6 +131,10 @@ export const commonRoutes: FastifyPluginAsync = async (app) => {
   }));
 
   app.get("/api/knowledge", async () => {
+    return { stats: await getStats() };
+  });
+
+  app.get("/api/admin/knowledge", async () => {
     const [sources, tasks, stats] = await Promise.all([listSources(), listTasks(), getStats()]);
     return { sources, tasks, stats };
   });
