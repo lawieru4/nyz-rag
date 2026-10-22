@@ -74,6 +74,10 @@ interface StoredSession {
 
 const principals = new WeakMap<FastifyRequest, Principal>();
 
+export function requestUserId(request: FastifyRequest): string | undefined {
+  return principals.get(request)?.user?.id;
+}
+
 /** 当前请求的问答归属：已登录为账号，否则为本浏览器的匿名访客。 */
 export function requestOwner(request: FastifyRequest): ChatOwner {
   const principal = principals.get(request);

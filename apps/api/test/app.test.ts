@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildApp } from "../src/app.js";
+import { buildTestApp as buildApp } from "./auth-helpers.js";
 import type { DocumentQueue } from "../src/queue.js";
 import { routeSchemas } from "../src/schemas.js";
 import { adminAuth, adminHeaders, memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";

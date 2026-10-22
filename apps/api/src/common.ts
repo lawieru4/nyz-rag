@@ -43,7 +43,7 @@
  */
 
 import type { FastifyError, FastifyInstance, FastifyPluginAsync } from "fastify";
-import { getStats, listSources, listTasks } from "@nyz-rag/processing";
+import { AdmissionError, getStats, listSources, listTasks } from "@nyz-rag/processing";
 import { routeSchemas } from "./schemas.js";
 
 // ─── Re-exported utilities (preserve existing public API) ─────────────────────
@@ -88,6 +88,9 @@ export function configureCommon(app: FastifyInstance): void {
 
   // 2. Unified error handler.
   app.setErrorHandler((error: FastifyError, _request, reply) => {
+    if (error instanceof AdmissionError) {
+      return reply.header("Retry-After", error.retryAfter).code(error.statusCode).send({ error: error.message });
+    }
     // Fastify validation errors (AJV) carry a statusCode of 400 and a validation array.
     if (error.validation) {
       const messages = (error.validation as Array<{ message?: string }>)

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import {
-  buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
+  AdmissionError, buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, hasProviderCredential, HISTORY_TURNS, keywordSearchChunks,
   listChatMessages, listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
   summarySearchChunks, vectorSearchChunks, type AnswerContext, type ChatOwner, type ChatTurn,
@@ -47,6 +47,7 @@ async function resolveKnowledgeBase(id: string | undefined) {
 /**
  * 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用默认供应商的 Chat 模型回答；
  * 未配置 Chat 模型、密钥缺失或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
+ * 限流拒绝与限流服务故障不降级，返回错误且不保存回答。
  * signal 中止（客户端断开）时直接返回，由调用方丢弃结果。
  */
 async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
@@ -100,6 +101,7 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
         log.warn("Chat model returned an empty answer; using extractive answer");
       }
     } catch (error) {
+      if (error instanceof AdmissionError) throw error;
       if (!options.signal?.aborted) log.warn(`Chat model failed; using extractive answer: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   }
@@ -222,7 +224,7 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
       send({ event: "done", data: { id, question, answer: result.answer, answerMode: result.answerMode, sources: result.context.sources, rating: null, createdAt } });
     } catch (error) {
       request.log.error(error);
-      send({ event: "error", data: { error: error instanceof ChatConflictError ? error.message : "回答生成失败，请稍后重试。" } });
+      send({ event: "error", data: { error: error instanceof ChatConflictError || error instanceof AdmissionError ? error.message : "回答生成失败，请稍后重试。" } });
     } finally {
       clearInterval(heartbeat);
       if (!raw.writableEnded) raw.end();

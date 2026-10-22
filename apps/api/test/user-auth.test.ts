@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import Fastify from "fastify";
-import { buildApp } from "../src/app.js";
+import { buildTestApp as buildApp } from "./auth-helpers.js";
 import { configureCommon } from "../src/common.js";
 import { configureUserAuth, requestOwner, userAuthConfig } from "../src/user-auth.js";
 import { memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";

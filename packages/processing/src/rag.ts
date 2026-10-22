@@ -2,6 +2,7 @@
 // 数据访问与模型调用通过参数注入，便于单元测试；API 负责接线。
 import type { ChatRetrievedChunk, ChatSource, DocumentChunkRecord } from "@nyz-rag/types";
 import { embeddingInput } from "./chunking.js";
+import { AdmissionError } from "./admission.js";
 import type { ChatMessage, RerankResult } from "./models.js";
 import { searchTerms } from "./search-terms.js";
 
@@ -73,10 +74,10 @@ export async function retrieve(question: string, settings: RetrievalSettings, de
   const [keywordHits, vectorHits, summaryHits] = await Promise.all([
     terms.length ? dependencies.keywordSearch(terms, RECALL_LIMIT) : [],
     dependencies.vectorSearch
-      ? dependencies.vectorSearch(question, RECALL_LIMIT).catch((error: unknown) => { warnings.push(`向量检索失败，仅使用关键词检索：${reason(error)}`); return []; })
+      ? dependencies.vectorSearch(question, RECALL_LIMIT).catch((error: unknown) => { if (error instanceof AdmissionError) throw error; warnings.push(`向量检索失败，仅使用关键词检索：${reason(error)}`); return []; })
       : [],
     dependencies.summarySearch
-      ? dependencies.summarySearch(question, SUMMARY_RECALL_LIMIT).catch((error: unknown) => { warnings.push(`摘要检索失败，跳过文章级召回：${reason(error)}`); return []; })
+      ? dependencies.summarySearch(question, SUMMARY_RECALL_LIMIT).catch((error: unknown) => { if (error instanceof AdmissionError) throw error; warnings.push(`摘要检索失败，跳过文章级召回：${reason(error)}`); return []; })
       : [],
   ]);
 
@@ -101,6 +102,7 @@ export async function retrieve(question: string, settings: RetrievalSettings, de
       const results = await dependencies.rerank(question, candidates.map((chunk) => embeddingInput({ ...chunk, id: chunk.chunkId, index: 0, tokenEstimate: 0 })), settings.topK);
       candidates = results.map((result) => ({ ...candidates[result.index], rerankScore: result.score }));
     } catch (error) {
+      if (error instanceof AdmissionError) throw error;
       warnings.push(`重排序失败，使用合并排序：${reason(error)}`);
     }
   }

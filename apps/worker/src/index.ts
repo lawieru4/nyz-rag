@@ -2,13 +2,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  backfillContentHashes, canonicalUrlFromHtml, closeDatabase, contentFingerprint, createArticleClient, embedChunks, embeddingInput, findDocumentByCanonicalUrl, getSource, getSourceSyncState,
-  getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, normalizeUrl, processDocument,
+  backfillContentHashes, canonicalUrlFromHtml, closeDatabase, closeModelAdmissionLimiter, contentFingerprint, createArticleClient, embedChunks, embeddingInput, findDocumentByCanonicalUrl, getSource, getSourceSyncState,
+  getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
   reindexChunkSearchTerms, reindexDocumentMetadataTerms, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState,
   syncArticles, updateTask, upsertDocument, withTransaction, type ProcessDocumentResult,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
 
+modelAdmissionConfig();
 const connection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
 const maxPages = Math.max(1, Math.min(100, Number.parseInt(process.env.CRAWL_MAX_PAGES ?? "20", 10) || 20));
 const requestDelayMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_DELAY_MS ?? "1000", 10) || 1000);
@@ -271,7 +272,7 @@ const worker = new Worker(queueName, async (job) => {
 worker.on("completed", (job) => console.info(`Job ${job.id} completed`));
 worker.on("failed", (job, error) => console.error(`Job ${job?.id} failed`, error.message));
 
-const shutdown = async () => { await worker.close(); await connection.quit(); await closeDatabase(); };
+const shutdown = async () => { await worker.close(); await connection.quit(); await closeDatabase(); await closeModelAdmissionLimiter(); };
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 console.info(`NYZ RAG worker listening on ${queueName} queue`);

@@ -1,9 +1,11 @@
-import { closeDatabase, migrate } from "@nyz-rag/processing";
+import { closeDatabase, closeModelAdmissionLimiter, migrate, modelAdmissionConfig } from "@nyz-rag/processing";
 import { buildApp } from "./app.js";
 
+modelAdmissionConfig();
 const app = buildApp({ logger: true });
 const port = Number(process.env.API_PORT ?? 3000);
 app.addHook("onClose", closeDatabase);
+app.addHook("onClose", closeModelAdmissionLimiter);
 process.once("SIGINT", () => void app.close());
 process.once("SIGTERM", () => void app.close());
 

@@ -23,6 +23,7 @@
   "dependencies": {
     "@nyz-rag/types": "workspace:*",
     "drizzle-orm": "^0.45.4",
+    "ioredis": "^5.8.1",
     "pg": "^8.16.3"
   },
   "devDependencies": {

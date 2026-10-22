@@ -14,3 +14,12 @@ export { parseArticle, PARSER_VERSION, type ArticleBlock, type ArticleDetail, ty
 export { syncArticles, type ArticleSyncOptions, type ArticleSyncResult } from "./article/sync.js";
 export * from "./repository.js";
 export * as schema from "./schema.js";
+export {
+  AdmissionError,
+  createRedisAdmissionLimiter,
+  type AdmissionLease,
+  type AdmissionLimiter,
+  type AdmissionLimiterConfig,
+  type AdmissionRule,
+} from "./admission.js";
+export { closeModelAdmissionLimiter, modelAdmissionConfig, modelBucketKey } from "./model-admission.js";

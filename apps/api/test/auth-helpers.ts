@@ -4,6 +4,11 @@ import type { AdminAuthConfig } from "../src/admin-auth.js";
 import type { AuthStore } from "../src/auth-store.js";
 import type { MailMessage, Mailer } from "../src/mailer.js";
 import type { UserAuthConfig, UserRepository } from "../src/user-auth.js";
+import { buildApp } from "../src/app.js";
+
+export function buildTestApp(options: Parameters<typeof buildApp>[0] = {}) {
+  return buildApp({ limiter: { async acquire() { return { async release() {} }; }, async close() {} }, ...options });
+}
 
 export const adminAuth: AdminAuthConfig = {
   username: "admin", password: "test-only-password-not-for-deployment",

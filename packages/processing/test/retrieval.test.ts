@@ -5,6 +5,7 @@ import { createChatModel, createRerankModel } from "../src/models.js";
 import { summaryEmbeddingInput } from "../src/chunking.js";
 import { buildAnswerContext, buildChatMessages, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, SUMMARY_RECALL_LIMIT, type ChunkHit } from "../src/rag.js";
 import { metadataScore, metadataSearchFields, metadataSearchTerms, metadataTermWeights, searchTerms, termCounts } from "../src/search-terms.js";
+import { noopLimiter } from "./admission-helpers.js";
 
 const hit = (chunkId: string, score: number, overrides: Partial<ChunkHit> = {}): ChunkHit => ({
   chunkId, documentId: `doc-${chunkId}`, title: `标题${chunkId}`, url: `https://example.test/${chunkId}`, content: `正文${chunkId}`, context: `文章：标题${chunkId}`,
@@ -187,7 +188,7 @@ test("chat model streams tokens and usage from server-sent events", async (conte
     return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
   });
   const chunks = [];
-  for await (const chunk of createChatModel(provider()).streamChat([{ role: "user", content: "问题" }])) chunks.push(chunk);
+  for await (const chunk of createChatModel(provider(), noopLimiter()).streamChat([{ role: "user", content: "问题" }])) chunks.push(chunk);
   assert.equal(request?.url, "https://models.example/v1/chat/completions");
   assert.equal(request?.body.model, "chat-model");
   assert.equal(request?.body.temperature, 0.2);
@@ -198,22 +199,22 @@ test("chat model streams tokens and usage from server-sent events", async (conte
 
 test("chat and rerank errors hide provider bodies; rerank results are validated", async (context) => {
   mockFetch(context, () => new Response("sensitive provider body test-secret", { status: 401 }));
-  const consume = async () => { for await (const _chunk of createChatModel(provider()).streamChat([{ role: "user", content: "问题" }])) { /* drain */ } };
+  const consume = async () => { for await (const _chunk of createChatModel(provider(), noopLimiter()).streamChat([{ role: "user", content: "问题" }])) { /* drain */ } };
   await assert.rejects(consume(), (error: unknown) => {
     assert(error instanceof Error);
     assert.match(error.message, /chat request failed with HTTP 401/);
     assert.doesNotMatch(error.message, /sensitive|test-secret/);
     return true;
   });
-  await assert.rejects(createRerankModel(provider()).rerank("q", ["a", "b"]), /rerank request failed with HTTP 401/);
+  await assert.rejects(createRerankModel(provider(), noopLimiter()).rerank("q", ["a", "b"]), /rerank request failed with HTTP 401/);
 
   let body: Record<string, unknown> = {};
   globalThis.fetch = (async (_input: string, init?: RequestInit) => {
     body = JSON.parse(String(init?.body));
     return new Response(JSON.stringify({ results: [{ index: 0, relevance_score: 0.1 }, { index: 1, relevance_score: 0.8 }] }), { status: 200 });
   }) as typeof fetch;
-  assert.deepEqual(await createRerankModel(provider()).rerank("q", ["a", "b"], 5), [{ index: 1, score: 0.8 }, { index: 0, score: 0.1 }]);
+  assert.deepEqual(await createRerankModel(provider(), noopLimiter()).rerank("q", ["a", "b"], 5), [{ index: 1, score: 0.8 }, { index: 0, score: 0.1 }]);
   assert.equal(body.top_n, 2);
   globalThis.fetch = (async () => new Response(JSON.stringify({ output: { results: [{ index: 3, relevance_score: 0.5 }] } }), { status: 200 })) as typeof fetch;
-  await assert.rejects(createRerankModel(provider()).rerank("q", ["a", "b"]), /invalid results/);
+  await assert.rejects(createRerankModel(provider(), noopLimiter()).rerank("q", ["a", "b"]), /invalid results/);
 });

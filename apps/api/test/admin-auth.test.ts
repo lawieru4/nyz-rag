@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash, randomUUID } from "node:crypto";
 import Fastify, { type HTTPMethods } from "fastify";
-import { buildApp } from "../src/app.js";
+import { buildTestApp as buildApp } from "./auth-helpers.js";
 import { adminAuthConfig, configureAdminAuth, createAdminAuthStore } from "../src/admin-auth.js";
 import { configureCommon } from "../src/common.js";
 import { routeSchemas } from "../src/schemas.js";
