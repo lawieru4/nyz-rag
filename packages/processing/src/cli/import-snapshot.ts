@@ -8,7 +8,7 @@ import { closeDatabase, migrate, withTransaction } from "../db.js";
 import { createChatMessage } from "../repository.js";
 import { chatMessages, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, modelProviders } from "../schema.js";
 
-type LegacyDocument = Omit<DocumentRecord, "processingStatus" | "embedding" | "chunks" | "chunkCount"> & {
+type LegacyDocument = Omit<DocumentRecord, "canonicalUrl" | "processingStatus" | "embedding" | "chunks" | "chunkCount"> & {
   processingStatus?: DocumentRecord["processingStatus"];
   embedding?: DocumentEmbeddingRecord;
   chunks?: DocumentChunkRecord[];
@@ -57,7 +57,7 @@ try {
       const processingStatus = document.processingStatus === "cleaning" ? "pending" : document.processingStatus ?? (document.status === "ready" ? "chunked" : "pending");
       const embedding = document.embedding?.status === "ready" || document.embedding?.status === "failed" ? document.embedding : { status: "pending" as const, chunkCount: 0 };
       const inserted = await tx.insert(documents).values({
-        id: document.id, sourceId: document.sourceId, title: document.title, url: document.url, content: document.content ?? "", rawHtml: document.rawHtml ?? null,
+        id: document.id, sourceId: document.sourceId, title: document.title, url: document.url, canonicalUrl: document.url, content: document.content ?? "", rawHtml: document.rawHtml ?? null,
         status: document.status, processingStatus, processingError: document.processingError ?? null, processingVersion: processingStatus === "chunked" ? 1 : 0,
         embeddingStatus: embedding.status, embeddingProviderId: embedding.providerId ?? null, embeddingModel: embedding.model ?? null,
         embeddingDimensions: embedding.dimensions ?? null, embeddingChunkCount: embedding.chunkCount, embeddingError: embedding.error ?? null,

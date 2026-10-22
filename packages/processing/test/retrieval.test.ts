@@ -56,6 +56,24 @@ test("metadata search fields weight project fields and keywords without double c
   assert.equal(metadataScore(null, [{ term: "崔屹", idf: 2 }]), 0);
 });
 
+test("metadata search fields include title institutions and journal names at low weight", () => {
+  const metadata = {
+    projectMeta: { name: "固态电池项目", principal: null, institution: "清华大学", keywords: [] },
+    titleMeta: { journal: "Advanced Functional Materials", journalAbbreviation: "AFM", institutions: ["清华大学", "北京科技大学"] },
+  };
+  assert.deepEqual(metadataSearchFields(metadata), {
+    projectName: "固态电池项目", institution: "清华大学", titleInstitutions: "清华大学\n北京科技大学", journal: "Advanced Functional Materials\nAFM",
+  });
+  assert.ok(!metadataSearchTerms(metadata).includes("学北"), "adjacent institutions do not form cross-value bigrams");
+  const weights = metadataTermWeights(metadata);
+  assert.equal(weights.get("清华"), 0.8, "project institution keeps its higher weight");
+  assert.equal(weights.get("科技"), 0.5);
+  assert.equal(weights.get("functional"), 0.5);
+  assert.equal(weights.get("afm"), 0.5);
+  assert.deepEqual(metadataSearchFields({ titleMeta: { journal: "Nature Synthesis", journalAbbreviation: null, institutions: [] } }), { journal: "Nature Synthesis" });
+  assert.deepEqual(metadataSearchFields({ titleMeta: null }), {});
+});
+
 test("retrieve fuses keyword and vector hits, applies the threshold and reranks", async () => {
   const keyword = [hit("a", 9), hit("b", 5)];
   const vector = [hit("b", 0.9), hit("c", 0.6), hit("d", 0.4)];

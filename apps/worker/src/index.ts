@@ -2,9 +2,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  closeDatabase, createArticleClient, embedChunks, embeddingInput, getProcessingInput, getSource, getSourceSyncState, getSummaryInput, getTask, listArticleVersions, listDocumentChunks,
-  listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, prepareDocument, reindexChunkSearchTerms, reindexDocumentMetadataTerms, replaceDocumentChunks,
-  saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState, syncArticles, updateTask, upsertDocument, withTransaction, type Executor,
+  backfillContentHashes, canonicalUrlFromHtml, closeDatabase, contentFingerprint, createArticleClient, embedChunks, embeddingInput, findDocumentByCanonicalUrl, getSource, getSourceSyncState,
+  getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, normalizeUrl, processDocument,
+  reindexChunkSearchTerms, reindexDocumentMetadataTerms, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState,
+  syncArticles, updateTask, upsertDocument, withTransaction, type ProcessDocumentResult,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
 
@@ -17,6 +18,7 @@ const articleSyncLimit = Math.max(1, Math.min(5000, Number.parseInt(process.env.
 const articleOverlapPages = Math.max(1, Math.min(20, Number.parseInt(process.env.NYZ_ARTICLE_OVERLAP_PAGES ?? "2", 10) || 2));
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message.slice(0, 500) : fallback;
 
+// url 已规范化；links 为同源 http(s) 链接，规范化后返回。
 function extractPage(html: string, url: string) {
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
   const main = html.match(/<(?:main|article)\b[^>]*>([\s\S]*?)<\/(?:main|article)>/i)?.[1] ?? html;
@@ -27,19 +29,9 @@ function extractPage(html: string, url: string) {
     .replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
     .replace(/[\t\r ]+/g, " ").replace(/\n\s+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   const links = [...html.matchAll(/<a\b[^>]*href\s*=\s*(["'])(.*?)\1[^>]*>/gi)]
-    .map((match) => { try { return new URL(match[2], url); } catch { return null; } })
-    .filter((link): link is URL => Boolean(link && link.origin === new URL(url).origin && ["http:", "https:"].includes(link.protocol)))
-    .map((link) => { link.hash = ""; return link.toString(); });
-  return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links, rawHtml: html };
-}
-
-/** 在调用方事务内清洗并重新切片；旧切片与向量一并替换。文章来源从原始 JSON 重新解析。 */
-async function processDocument(tx: Executor, documentId: string) {
-  if (!await lockDocument(tx, documentId)) throw new Error("document not found");
-  const input = await getProcessingInput(tx, documentId);
-  if (!input) throw new Error("document not found");
-  const { update, chunks } = prepareDocument(documentId, input);
-  await replaceDocumentChunks(tx, documentId, update, chunks);
+    .map((match) => normalizeUrl(match[2].replace(/&amp;/gi, "&"), url))
+    .filter((link): link is string => Boolean(link && new URL(link).origin === new URL(url).origin));
+  return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links, canonicalUrl: canonicalUrlFromHtml(html, url), rawHtml: html };
 }
 
 async function embedDocument(documentId: string) {
@@ -70,12 +62,16 @@ async function embedDocument(documentId: string) {
   }
 }
 
-async function autoEmbedDocument(documentId: string) {
+/** 切片后自动向量化：本文档（重复文档除外）及接替为主文档的文档。 */
+async function autoEmbedDocuments({ embed }: ProcessDocumentResult) {
+  if (!embed.length) return;
   const providers = await listModelProviders();
   if (!providers.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
   // An embedding failure remains retryable without discarding successfully crawled content.
-  await embedDocument(documentId).catch(() => console.error(`Embedding failed for document ${documentId}`));
+  for (const documentId of embed) await embedDocument(documentId).catch(() => console.error(`Embedding failed for document ${documentId}`));
 }
+
+const duplicateNote = (count: number) => count ? `${count} 篇与已有文档内容相同，标记为重复，未切片和向量化` : "";
 
 async function fetchHtml(url: string, userAgent: string) {
   const response = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs), headers: { "user-agent": userAgent, accept: "text/html,application/xhtml+xml" }, redirect: "follow" });
@@ -86,6 +82,7 @@ async function fetchHtml(url: string, userAgent: string) {
 
 async function syncArticleSource(source: DataSourceRecord, taskId: string) {
   const client = createArticleClient({ listUrl: source.url, token: process.env.NYZ_ARTICLE_TOKEN ?? "", timeoutMs: requestTimeoutMs });
+  let duplicates = 0;
   const result = await syncArticles({
     client,
     known: await listArticleVersions(source.id),
@@ -97,15 +94,16 @@ async function syncArticleSource(source: DataSourceRecord, taskId: string) {
     onProgress: (count) => updateTask(taskId, { progress: Math.min(95, Math.round(count / articleSyncLimit * 100)) }),
     process: async (item) => {
       const detail = await client.detail(item._key);
-      const documentId = await withTransaction(async (tx) => {
+      const url = normalizeUrl(client.articleUrl(detail._key))!;
+      const processed = await withTransaction(async (tx) => {
         const id = await upsertDocument(tx, {
-          sourceId: source.id, externalId: detail._key, url: client.articleUrl(detail._key), title: detail.title?.trim() || detail._key, content: "",
+          sourceId: source.id, externalId: detail._key, url, title: detail.title?.trim() || detail._key, content: "",
           rawJson: detail, sourceUpdatedAt: detail.updateTime ? new Date(detail.updateTime) : null, status: "ready",
         });
-        await processDocument(tx, id);
-        return id;
+        return processDocument(tx, id);
       });
-      await autoEmbedDocument(documentId);
+      if (processed.duplicateOf) duplicates += 1;
+      await autoEmbedDocuments(processed);
     },
   });
   console.info(`Source ${source.id}: ${result.processed} articles synced, ${result.failures.length} failed, ${result.pages} list pages${result.limitReached ? ", limit reached" : ""}`);
@@ -113,8 +111,28 @@ async function syncArticleSource(source: DataSourceRecord, taskId: string) {
   const notes = [
     result.failures.length ? `${result.failures.length} 篇失败，下次同步重试（${result.failures[0].articleKey}：${result.failures[0].error}）` : "",
     result.limitReached ? `已达单次上限 ${articleSyncLimit} 篇，再次同步继续` : "",
+    duplicateNote(duplicates),
   ].filter(Boolean);
   return { count: result.processed, note: notes.length ? notes.join("；") : null };
+}
+
+/**
+ * 网页文档在来源内按规范地址识别。页面声明的 canonical 已被另一抓取地址的文档占用时：正文相同说明是同一页面的别名地址，
+ * 跳过（返回 null）；正文不同多为站点配置错误，不信任 canonical，改用抓取地址，避免不同页面互相覆盖。
+ */
+async function saveWebPage(sourceId: string, url: string, page: ReturnType<typeof extractPage>) {
+  return withTransaction(async (tx) => {
+    let canonicalUrl = page.canonicalUrl ?? url;
+    if (canonicalUrl !== url) {
+      const existing = await findDocumentByCanonicalUrl(tx, sourceId, canonicalUrl);
+      if (existing && existing.url !== url) {
+        if (existing.contentHash === contentFingerprint(page.content)) return null;
+        canonicalUrl = url;
+      }
+    }
+    const id = await upsertDocument(tx, { sourceId, url, canonicalUrl, title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" });
+    return processDocument(tx, id);
+  });
 }
 
 async function crawlSite(source: DataSourceRecord, taskId: string) {
@@ -131,40 +149,42 @@ async function crawlSite(source: DataSourceRecord, taskId: string) {
     throw new Error(`Unable to check robots.txt (HTTP ${robotsResponse.status})`);
   }
 
-  const pending = [baseUrl.toString()];
+  // 待抓取与已访问地址均已规范化；重定向目标和页面声明的 canonical 也计入已访问，避免同一页面重复抓取。
+  const pending = [normalizeUrl(baseUrl.toString())!];
   const visited = new Set<string>();
   let processed = 0;
+  let duplicates = 0;
   while (pending.length && processed < maxPages) {
     const url = pending.shift()!;
     if (visited.has(url)) continue;
     visited.add(url);
-    const { html, url: finalUrl } = await fetchHtml(url, userAgent);
-    const page = extractPage(html, finalUrl);
+    const fetched = await fetchHtml(url, userAgent);
+    const finalUrl = normalizeUrl(fetched.url) ?? url;
+    if (finalUrl !== url && visited.has(finalUrl)) continue;
+    visited.add(finalUrl);
+    const page = extractPage(fetched.html, finalUrl);
+    if (page.canonicalUrl) visited.add(page.canonicalUrl);
     if (page.title && page.content) {
-      const documentId = await withTransaction(async (tx) => {
-        const id = await upsertDocument(tx, { sourceId: source.id, url: finalUrl, title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" });
-        await processDocument(tx, id);
-        return id;
-      });
-      await autoEmbedDocument(documentId);
-      processed += 1;
+      const result = await saveWebPage(source.id, finalUrl, page);
+      if (result) {
+        if (result.duplicateOf) duplicates += 1;
+        await autoEmbedDocuments(result);
+        processed += 1;
+      }
     }
     for (const link of page.links) if (!visited.has(link) && !pending.includes(link) && new URL(link).pathname === baseUrl.pathname) pending.push(link);
     await updateTask(taskId, { progress: Math.min(95, Math.round(processed / maxPages * 100)) });
     if (pending.length && processed < maxPages) await new Promise((resolveDelay) => setTimeout(resolveDelay, requestDelayMs));
   }
   if (!processed) throw new Error("No article content found; expected a page with a title and readable text");
-  return processed;
+  return { count: processed, note: duplicateNote(duplicates) || null };
 }
 
 async function reprocessDocument(documentId: string) {
   try {
-    const chunks = await withTransaction(async (tx) => {
-      await processDocument(tx, documentId);
-      return (await listDocumentChunks(documentId, tx)).length;
-    });
-    await autoEmbedDocument(documentId);
-    return chunks;
+    const result = await withTransaction((tx) => processDocument(tx, documentId));
+    await autoEmbedDocuments(result);
+    return result;
   } catch (error) {
     await setProcessingState(documentId, "failed", errorMessage(error, "Document processing failed"));
     throw error;
@@ -176,7 +196,7 @@ async function syncSource(sourceId: string, taskId: string) {
   if (!task || !source) throw new Error("source or task not found");
   await updateTask(taskId, { status: "运行中", progress: 0, error: null });
   try {
-    const { count, note } = source.kind === "文章 API" ? await syncArticleSource(source, taskId) : { count: await crawlSite(source, taskId), note: null };
+    const { count, note } = source.kind === "文章 API" ? await syncArticleSource(source, taskId) : await crawlSite(source, taskId);
     await withTransaction(async (tx) => {
       await markSourceSynced(sourceId, tx);
       // 部分失败或达到单次上限时任务仍算完成，说明写在 error 字段供管理端展示。
@@ -187,6 +207,13 @@ async function syncSource(sourceId: string, taskId: string) {
     await updateTask(taskId, { status: "失败", error: errorMessage(error, "Unknown crawl error") });
     throw error;
   }
+}
+
+/** 升级前的文档没有正文指纹（或按旧规则计算），启动时在后台补齐；只补指纹，已有的重复内容在下次重新处理时判定。 */
+async function backfillHashes() {
+  let batches = 0;
+  for (let cursor = await backfillContentHashes("", 500); cursor; cursor = await backfillContentHashes(cursor, 500)) batches += 1;
+  if (batches) console.info(`Backfilled document content hashes (${batches} batches)`);
 }
 
 /** 升级前的切片与文档没有关键词检索词项，启动时在后台补齐；也可手动运行 pnpm db:reindex-search。 */
@@ -225,6 +252,7 @@ async function backfillSummaryEmbeddings() {
 
 const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
 await migrate();
+void backfillHashes().catch((error: unknown) => console.error("Content hash backfill failed", errorMessage(error, "unknown error")));
 void backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error")));
 void backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error")));
 const worker = new Worker(queueName, async (job) => {
@@ -233,8 +261,8 @@ const worker = new Worker(queueName, async (job) => {
     return { status: "embedded", documentId: job.data.documentId };
   }
   if (job.name === "reprocess-document") {
-    const chunks = await reprocessDocument(job.data.documentId);
-    return { status: "chunked", documentId: job.data.documentId, chunks };
+    const { duplicateOf, chunks } = await reprocessDocument(job.data.documentId);
+    return duplicateOf ? { status: "duplicate", documentId: job.data.documentId, duplicateOf } : { status: "chunked", documentId: job.data.documentId, chunks };
   }
   const count = await syncSource(job.data.sourceId, job.data.taskId);
   return { status: "ready", documentsProcessed: count };

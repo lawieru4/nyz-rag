@@ -57,6 +57,13 @@
       "when": 1792659419304,
       "tag": "0007_summary_embedding",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792660867062,
+      "tag": "0008_document_dedup",
+      "breakpoints": true
     }
   ]
 }

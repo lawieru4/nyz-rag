@@ -1,6 +1,6 @@
 // Drizzle 表结构定义；修改后运行 pnpm db:generate 生成迁移。列名由 casing: "snake_case" 自动映射。
 import { sql } from "drizzle-orm";
-import { boolean, check, customType, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
   ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus,
 } from "@nyz-rag/types";
@@ -53,7 +53,10 @@ export const documents = pgTable("documents", {
   id: text().primaryKey(),
   sourceId: text().notNull().references(() => dataSources.id, { onDelete: "cascade" }),
   title: text().notNull(),
+  // 规范化后的抓取地址（引用与「打开原文」使用）。
   url: text().notNull(),
+  // 规范地址：网页声明的 canonical（规范化后）或抓取地址，同一来源内按它识别同一篇文档。
+  canonicalUrl: text().notNull(),
   content: text().notNull().default(""),
   rawHtml: text(),
   // 文章 API 来源：来源标识、原始详情 JSON（解析器升级时据此重新解析）与解析结果。
@@ -65,7 +68,10 @@ export const documents = pgTable("documents", {
   category: text(),
   tags: text().array().notNull().default(sql`'{}'::text[]`),
   publishedAt: timestamptz(),
+  // 正文指纹（dedup.ts 的 contentFingerprint），切片时计算，用于跨来源/跨地址的重复判定。
   contentHash: text(),
+  // 正文相同的主文档：重复文档保留来源记录与原始内容，但不切片、不向量化。主文档删除时由 API 选出接替者，此处置空只是兜底。
+  duplicateOf: text().references((): AnyPgColumn => documents.id, { onDelete: "set null" }),
   parserVersion: integer(),
   metadata: jsonb().$type<ArticleMetadata>(),
   // 元数据检索词项（关键词、项目名称、负责人、承担单位），规则与切片词项相同，用于关键词检索加权。
@@ -87,7 +93,7 @@ export const documents = pgTable("documents", {
   createdAt: timestamptz().notNull().defaultNow(),
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
-  unique("documents_source_id_url_key").on(table.sourceId, table.url),
+  unique("documents_source_id_canonical_url_key").on(table.sourceId, table.canonicalUrl),
   unique("documents_source_id_external_id_key").on(table.sourceId, table.externalId),
   index("documents_published_at_idx").on(table.publishedAt.desc()),
   index("documents_category_idx").on(table.category),
@@ -95,13 +101,16 @@ export const documents = pgTable("documents", {
   index("documents_scenarios_idx").using("gin", sql`(${table.metadata}->'sourceMeta'->'scenarios')`),
   index("documents_metadata_search_vector_idx").using("gin", table.metadataSearchVector),
   index("documents_status_idx").on(table.status),
+  index("documents_content_hash_idx").on(table.contentHash),
+  index("documents_duplicate_of_idx").on(table.duplicateOf),
   index("documents_updated_at_idx").on(table.updatedAt.desc()),
   ...HNSW_DIMENSIONS.map((dimensions) => index(`documents_summary_embedding_${dimensions}_hnsw_idx`)
     .using("hnsw", sql`(${table.summaryEmbedding}::vector(${sql.raw(String(dimensions))})) vector_cosine_ops`)
     .where(sql`${table.embeddingDimensions} = ${sql.raw(String(dimensions))}`)),
   check("documents_summary_embedding_check", sql`${table.summaryEmbedding} IS NULL OR vector_dims(${table.summaryEmbedding}) = ${table.embeddingDimensions}`),
   check("documents_status_check", sql`${table.status} IN ('pending', 'processing', 'ready', 'failed')`),
-  check("documents_processing_status_check", sql`${table.processingStatus} IN ('pending', 'cleaning', 'chunked', 'failed')`),
+  check("documents_processing_status_check", sql`${table.processingStatus} IN ('pending', 'cleaning', 'chunked', 'duplicate', 'failed')`),
+  check("documents_duplicate_of_check", sql`${table.duplicateOf} <> ${table.id}`),
   check("documents_embedding_status_check", sql`${table.embeddingStatus} IN ('pending', 'queued', 'processing', 'ready', 'failed')`),
 ]);
 

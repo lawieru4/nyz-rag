@@ -129,13 +129,16 @@ export interface DocumentEmbeddingRecord {
   error?: string;
 }
 
-export type DocumentProcessingStatus = "pending" | "cleaning" | "chunked" | "failed";
+/** duplicate：正文与已有文档相同，保留记录但不切片、不向量化，见 DocumentSummary.duplicateOf。 */
+export type DocumentProcessingStatus = "pending" | "cleaning" | "chunked" | "duplicate" | "failed";
 
 export interface DocumentSummary {
   id: string;
   sourceId: string;
   title: string;
   url: string;
+  /** 规范地址（网页声明的 canonical 或规范化后的抓取地址），同一来源内唯一。 */
+  canonicalUrl: string;
   /** 来源系统中的标识，例如 nyzdata 的 articleKey；网页文档没有。 */
   externalId?: string;
   author?: string;
@@ -146,10 +149,20 @@ export interface DocumentSummary {
   status: DocumentStatus;
   processingStatus: DocumentProcessingStatus;
   processingError?: string;
+  /** 正文相同的主文档 ID；重复文档不参与检索。主文档被删除后为空，需重新处理。 */
+  duplicateOf?: string;
   embedding: DocumentEmbeddingRecord;
   chunkCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 重复关系中另一篇文档的简要信息。 */
+export interface DocumentReference {
+  id: string;
+  sourceId: string;
+  title: string;
+  url: string;
 }
 
 export interface DocumentRecord extends DocumentSummary {
@@ -160,6 +173,10 @@ export interface DocumentRecord extends DocumentSummary {
   rawHtml?: string;
   metadata?: ArticleMetadata;
   chunks: DocumentChunkRecord[];
+  /** 重复文档所指向的主文档。 */
+  primary?: DocumentReference;
+  /** 以本文档为主文档的重复文档（同内容的其他来源或地址）。 */
+  duplicates?: DocumentReference[];
 }
 
 /** Public article view: no raw input, internal processing errors or model configuration. */
@@ -207,6 +224,15 @@ export interface ArticleProjectMeta {
   keywords: string[];
 }
 
+/** 学术快讯标题（「机构 + 作者 + 期刊：正文标题」）中识别出的期刊与机构；未识别出期刊的标题为 null。 */
+export interface ArticleTitleMeta {
+  /** 期刊全称（按期刊词典规范化）。 */
+  journal: string;
+  journalAbbreviation: string | null;
+  /** 保留标题中的写法，按出现顺序去重；仅期刊的标题为空数组。 */
+  institutions: string[];
+}
+
 export interface ArticleImage {
   index: number;
   src: string;
@@ -240,6 +266,8 @@ export interface ArticleMetadata {
   sourceMeta: ArticleSourceMeta | null;
   /** 旧版本解析结果可能尚未包含此字段。 */
   projectMeta?: ArticleProjectMeta | null;
+  /** 旧版本解析结果可能尚未包含此字段。 */
+  titleMeta?: ArticleTitleMeta | null;
   relatedArticleKeys: string[];
   /** 「延伸思考」中的编辑提问，可用作推荐追问。 */
   followUpQuestions: string[];

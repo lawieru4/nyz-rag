@@ -1,9 +1,10 @@
 // nyzdata 文章解析：ProseMirror/Tiptap JSON → 结构化块、Markdown 与纯文本。未知节点记录后继续处理。
 // 原型为 scripts/nyz-articles/parse.mjs（v3），规则调整时同步提升 PARSER_VERSION。
 import { createHash } from "node:crypto";
-import type { ArticleAttachment, ArticleImage, ArticleMedia, ArticleProjectMeta, ArticleSourceMeta } from "@nyz-rag/types";
+import type { ArticleAttachment, ArticleImage, ArticleMedia, ArticleProjectMeta, ArticleSourceMeta, ArticleTitleMeta } from "@nyz-rag/types";
+import { parseArticleTitle } from "./title.js";
 
-export const PARSER_VERSION = 4;
+export const PARSER_VERSION = 5;
 
 export type BlockRole = "content" | "meta" | "related" | "reference" | "questions";
 export type BlockType = "paragraph" | "heading" | "quote" | "list" | "code" | "table" | "image" | "caption" | "media";
@@ -38,6 +39,7 @@ export interface ParsedArticle {
   doi: string | null;
   sourceMeta: ArticleSourceMeta | null;
   projectMeta: ArticleProjectMeta | null;
+  titleMeta: ArticleTitleMeta | null;
   relatedArticleKeys: string[];
   images: ArticleImage[];
   media: ArticleMedia[];
@@ -301,10 +303,11 @@ export function parseArticle(detail: ArticleDetail): ParsedArticle {
   const doi = ctx.links.map((link) => link.match(/10\.\d{4,9}\/[^\s?#]+/)?.[0]).find(Boolean) ?? null;
   const relatedArticleKeys = [...new Set(ctx.links.map((link) => link.match(/ArticleDetail\?id=(\d+)/)?.[1]).filter((key): key is string => Boolean(key)))];
   const markdown = ctx.blocks.map((item) => item.markdown).filter(Boolean).join("\n\n");
+  const title = detail.title?.trim() ?? "";
   const plainText = ctx.blocks.map((item) => item.text).filter(Boolean).join("\n\n");
   return {
     articleKey: detail._key,
-    title: detail.title?.trim() ?? "",
+    title,
     author: detail.creator?.nickName ?? null,
     category: detail.tagName ?? null,
     tags: (detail.tagArray ?? []).map((tag) => tag.name).filter((name): name is string => Boolean(name)),
@@ -318,6 +321,7 @@ export function parseArticle(detail: ArticleDetail): ParsedArticle {
     doi,
     sourceMeta: ctx.sourceMeta,
     projectMeta,
+    titleMeta: parseArticleTitle(title),
     relatedArticleKeys,
     images: ctx.images,
     media: ctx.media,

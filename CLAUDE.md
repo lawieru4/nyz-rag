@@ -32,9 +32,10 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|bu
   - 问答（`src/chat.ts`）在请求内完成检索与生成（`answerQuestion`）：`retrieve`（关键词 + 切片向量 + 摘要召回三路，RRF 合并，知识库开启时 Rerank；两路向量召回共用一次查询 Embedding）→ `buildAnswerContext` → 流式调用默认供应商的 Chat 模型；未配置 Chat 模型、密钥缺失或调用失败时返回原文摘录（`answerMode: "extractive"`），向量检索/摘要召回/Rerank 失败只降级并记日志。检索参数取 `knowledgeBaseId` 指定或最近创建的知识库。用户端接口：单次问答 `/api/chat`；会话 `/api/chat/sessions`（列表/创建）、`/api/chat/sessions/:id/messages`、`DELETE /api/chat/sessions/:id`；流式问答 `POST /api/chat/sessions/:id/stream`（SSE，事件 `source`/`token`/`done`/`error`，`done` 的回答为准；`{ regenerate: messageId }` 只能重新生成最后一轮，被替换的消息标记 `superseded_at`，仍保留在问答记录中；客户端断开时中止模型调用且不保存）；以及 `/api/search`、`/api/messages/:id/feedback`。管理端接口在 `/api/admin/*`（sources、documents、knowledge-bases、model-providers、chat-logs、knowledge），由 `src/admin-auth.ts` 的 `onRequest` 钩子统一鉴权：单管理员账号（`ADMIN_USERNAME`/`ADMIN_PASSWORD`，未设密码时返回 503），登录 `/api/admin/auth/login`、`/session`、`/logout`；会话为 HttpOnly + SameSite=Strict Cookie（Path=/api/admin，8 小时），存于 Redis（键前缀 `<DOCUMENT_QUEUE_NAME>:admin-auth:`，凭据变更即全部失效），校验 `ADMIN_ORIGINS` 精确来源，非 GET/HEAD 须带 `X-NYZ-Admin: 1` 防 CSRF，登录按 IP 与全局限流。测试用 `buildApp({ adminAuth, authStore })` 注入配置和内存存储（`test/auth-helpers.ts`）。公开 `/api/knowledge` 只返回统计，完整概览在 `/api/admin/knowledge`。API 只负责改元数据和入队，不做采集/切片/向量化。
 - `apps/worker`：BullMQ 消费者（`src/index.ts`，concurrency 1），处理三种 job：
   - `sync-source`：按来源类型分两条路径，入库后都在同一事务内由 `processDocument` 切片，再自动向量化。
-    - `网页站点`：robots.txt 检查、同源同路径链接，页数/间隔/超时由 `CRAWL_*` 环境变量控制，正文提取保留换行。
+    - `网页站点`：robots.txt 检查、同源同路径链接，页数/间隔/超时由 `CRAWL_*` 环境变量控制，正文提取保留换行。地址经 `normalizeUrl` 规范化后判重抓取；文档在来源内按 `canonical_url`（页面 `<link rel="canonical">` 或抓取地址）识别，canonical 已被另一地址占用时正文相同则跳过、不同则改用抓取地址。
     - `文章 API`：来源 `url` 为 nyzdata 文章列表接口，token 只读 Worker 的 `NYZ_ARTICLE_TOKEN`（API 拒绝带 token 的地址）。由 `syncArticles` 按 `updateTime` 增量同步，回填进度与失败文章存于 `data_sources.sync_state`。详情原样存入 `documents.raw_json`，`external_id` 为 articleKey。
   - `reprocess-document`：重新清洗切片并清除旧向量，再自动向量化。文章来源会用当前解析器从 `raw_json` 重新解析，不请求接口。
+  - 清洗切片统一走 processing 的 `processDocument`（`process.ts`），其中做正文指纹去重：与已有主文档（同 `content_hash`、最早入库的非重复文档）相同则标记 `duplicate_of`、处理状态 `duplicate`，只保存清洗结果，不切片、不向量化、不参与检索与统计（`documentFilter` 排除）；正文不足 50 字不判重。主文档内容变化时名下重复文档重新判定、最早一篇接替；删除主文档时 API（`deleteDocument`）在事务内选出接替者并入队 `reprocess-document`。凡改变重复关系的操作都先用 `lockContentHashes` 按新旧指纹加事务级咨询锁。
   - `embed-document`：对已切片文档向量化（手动重试入口）。
   - 文档级 job 使用 `jobId: document-<id>`，API 据此及 active 的 `sync-source` 判断重复任务并返回 409；同一来源已有等待/运行中的 `sync-source` 时再次同步也返回 409。
 - `packages/processing`：API 与 Worker 共享的运行时逻辑。
@@ -43,7 +44,8 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|bu
   - `repository.ts`：按实体的数据访问函数（数据源、任务、文档/切片、知识库、模型供应商、问答记录），负责数据库行与 `@nyz-rag/types` 结构的映射。需要多步一致性的操作接收事务内的执行器（`Executor`）。向量存在 `document_chunks.embedding`（pgvector，不限维度），切片和向量随文档级联删除。
   - 文章级向量：`documents.summary_embedding` 存「标题 + 摘要」（`summaryEmbeddingInput`）的向量，与切片在同一次 Embedding 调用中生成、同一事务写入，模型与维度沿用 `documents.embedding_model` / `embedding_dimensions`（常用维度有 HNSW 部分索引）；没有摘要的文档（网页）为空，重新切片或重新向量化开始时清除。`summarySearchChunks` 先按它召回文章，再用同一查询向量取每篇文章内最相关的一个切片（得分为摘要相似度，记为 `summaryScore`）。升级前已向量化的文章由 Worker 启动时在后台补齐（只处理与当前默认模型一致的文档）。
   - 向量化并发约定：模型调用放在事务外；`documents.processing_version` 在每次重新切片时加一，向量回写前用 `SELECT ... FOR UPDATE` 比对版本，不一致则失败（参见 worker 的 `embedDocument`）。
-  - `article/`：nyzdata 文章接口客户端（`client.ts`，错误信息不含 URL/token，token 失效等 `fatal` 错误中止整次同步）、ProseMirror 解析器（`parse.ts`，由 `scripts/nyz-articles/parse.mjs` 移植；修改解析规则时提升 `PARSER_VERSION` 并同步原型）、增量同步（`sync.ts`）。
+  - `dedup.ts`：去重纯函数——`normalizeUrl`（去片段、默认端口、跟踪参数，查询参数排序，路径不动）、`canonicalUrlFromHtml`（忽略非首页指向首页）、`contentFingerprint`（检索正文 NFKC + 去空白后 SHA-256，文章与网页同一规则，写入 `content_hash`）。
+  - `article/`：nyzdata 文章接口客户端（`client.ts`，错误信息不含 URL/token，token 失效等 `fatal` 错误中止整次同步）、ProseMirror 解析器（`parse.ts`，由 `scripts/nyz-articles/parse.mjs` 移植；修改解析规则时提升 `PARSER_VERSION` 并同步原型）、标题解析（`title.ts`，期刊词典 + 「机构 + 人名」规则，结果存于 `metadata.titleMeta`，只在识别出期刊时提取机构）、增量同步（`sync.ts`）。
   - `chunking.ts` / `prepare.ts`：纯函数，Worker 调用。
     - 结构化切片：同章节累积约 800 字，过短章节并入下一节，表格整块保留，超长段按句切分。
     - 文章只切正文章节；元信息、相关阅读、本文链接、延伸思考不进入 `content` 与切片，提取到 `documents.metadata`。

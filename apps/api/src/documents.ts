@@ -44,6 +44,7 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     const document = await getDocumentSummary(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     if (await queue.hasDocumentJob(document)) return reply.code(409).send({ error: "document already has a processing job" });
+    if (document.processingStatus === "duplicate") return reply.code(409).send({ error: "重复文档不单独向量化，内容由主文档提供" });
     if (document.processingStatus !== "chunked" || !document.chunkCount) return reply.code(409).send({ error: "请先完成文档清洗与切片" });
     try {
       const provider = selectEmbeddingProvider(await listModelProviders());
@@ -65,7 +66,17 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     const document = await getDocumentSummary(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     if (await queue.hasDocumentJob(document)) return reply.code(409).send({ error: "document already has a processing job" });
-    if (!await deleteDocument(document.id)) return reply.code(404).send({ error: "document not found" });
+    const deleted = await deleteDocument(document.id);
+    if (!deleted) return reply.code(404).send({ error: "document not found" });
+    // 删除的是主文档时，接替的重复文档已置为待处理，需要重新切片和向量化。
+    if (deleted.promotedId) {
+      try {
+        await queue.enqueueDocument("reprocess-document", deleted.promotedId);
+      } catch (error) {
+        await setProcessingState(deleted.promotedId, "failed", "接替主文档后重新处理入队失败，请手动重新处理");
+        request.log.error(error, "Failed to enqueue promoted duplicate document");
+      }
+    }
     return reply.code(204).send();
   });
 };

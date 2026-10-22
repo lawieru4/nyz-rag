@@ -71,7 +71,7 @@
 - [x] 索引与查询统一做 NFKC 规范化（化学式上下标 `Na₀.₉` → `na0.9`），词项规则变化后运行 `pnpm db:reindex-search`
 - [x] 摘要级向量：「标题 + 摘要」单独向量化存于 `documents.summary_embedding`（与切片同一次调用、同一事务写入，HNSW 部分索引）；检索新增摘要召回，先召回文章（前 10 篇）、再用同一查询向量定位文章内最相关的切片，作为第三路参与 RRF，得分记为 `summaryScore`；Worker 启动时为升级前的文章补齐。尚未用真实模型评估效果
 - [x] 元数据过滤：`/api/search`、`/api/chat` 与会话 SSE 接收 `filters`，支持发布时间（`publishedFrom` / `publishedTo`，UTC 日期，含首尾整日）、分类、标签、场景及数据源；同字段多值 OR、跨字段 AND，关键词和向量召回在候选截断前统一过滤，关键词词频统计同样限定检索范围
-- [x] 元数据加权：关键词、项目名称、负责人、承担单位的词项写入 `documents.metadata_search_vector`（GIN）。只命中元数据的文档另行召回（最多 20 篇，每篇取一个切片），不占用正文候选；按 IDF × 字段权重（名称/负责人 1.0、单位 0.8、关键词 0.5）加分，同一词项只取最高权重；每篇文档只给最佳切片加一次，常见词项不加分。机构、期刊待解析器提取后加入 `metadataSearchFields`
+- [x] 元数据加权：关键词、项目名称、负责人、承担单位的词项写入 `documents.metadata_search_vector`（GIN）。只命中元数据的文档另行召回（最多 20 篇，每篇取一个切片），不占用正文候选；按 IDF × 字段权重（名称/负责人 1.0、单位 0.8、关键词 0.5）加分，同一词项只取最高权重；每篇文档只给最佳切片加一次，常见词项不加分。标题中提取的机构与期刊（全称 + 缩写）以 0.5 权重加入（标题已在切片上下文中计过一次）
 - [x] 回答引用同时标注 nyzdata 文章与原始转载源（`sources[].repostSource`，来自 `metadata.sourceMeta`）
 - [x] 文章衍生的合成检索评估集：`packages/processing/test/evaluation/retrieval-dataset.json` 含 50 条问题、稳定文章 ID、相关性等级与证据摘录；`pnpm evaluate:retrieval` 提供离线及数据库关键词基线，输出 Recall@K、MRR、nDCG@K 和语料缺失统计。不代表真实用户或人工复核标注，不用于宣称混合检索质量
 - [ ] 建立 50 条以上带标注的真实问题评估集，作为切片与检索调整的回归基线；现有合成集仍需收集真实问题、人工复核并补充多文章及分级相关性标注
@@ -89,14 +89,14 @@
 - [x] ProseMirror/Tiptap 解析器（纯函数，`packages/processing/src/article/parse.ts`）：由 `parse.mjs`（v3）移植，初始版本在 200 篇样本上输出一致；当前 v4 增加项目导读元信息提取。生成 Markdown 与纯文本，未知节点记录到 `metadata.unknownNodeTypes` 并继续
 - [x] 章节角色：相关阅读、本文链接不进入正文与切片，提取为 `relatedArticleKeys` 与 DOI；延伸思考不做向量化，提取为 `metadata.followUpQuestions`
 - [x] 文首元信息（作者/转载源/关键词/场景，`[[双链]]`）与项目导读信息（项目名称/负责人/承担单位/关键词）提取为结构化字段，不进入检索正文与切片正文。分别存于 `metadata.sourceMeta` / `metadata.projectMeta`，完整 Markdown 保留原始字段；项目关键词加入切片上下文，管理端详情 API 保留项目字段。引用已标注原始转载源（见第三阶段）。解析器 v4 对文首连续字段块保守识别，不推断机构或负责人，不单独拆解嵌在名称中的项目编号；历史文档需执行「重新处理」后生效
-- [ ] 误用标题（超长、以句末或冒号结尾）降级为段落，标题文字计入切片；从标题解析机构与期刊。（降级已完成；机构与期刊解析未做）
+- [x] 误用标题（超长、以句末或冒号结尾）降级为段落，标题文字计入切片；从标题解析机构与期刊（解析器 v5，`article/title.ts`，存于 `metadata.titleMeta`）。期刊只认词典并须紧挨标题头部末尾，识别出期刊才提取机构，机构须为「纯汉字机构名 + 人名」的完整项，其余忽略；历史文档需「重新处理」后生效
 - [x] 列表接口增量同步：按 `updateTime` 判断变化，置顶文章不参与停止判断，连续 `NYZ_ARTICLE_OVERLAP_PAGES` 页无变化才停止；单次上限 `NYZ_ARTICLE_SYNC_LIMIT`，回填进度与失败文章记录在 `data_sources.sync_state`，下次继续；`invalidToken`、401/403 中止同步，无正文（VIP/无权限）的文章记为失败
 - [ ] 近似去重（MinHash 等）：同一论文的多版改写只保留一篇或合并
 - [ ] PDF 附件解析（样本中 21 篇报告导读、项目导读的完整内容在附件中）
 - [ ] 与数据提供方确认转载内容的使用授权（样本中 85.5% 转载自微信公众号并经 AI 改写）
 - [x] 保存原始 JSON（`documents.raw_json`）与 `parser_version`；「重新处理」用当前解析器重新解析和切片，无需再次请求接口
-- [ ] 文档补充字段：`canonical_url`、`author`、`category`、`published_at`、`content_hash`、`parse_status`、`parse_error` 等。（已加 `external_id`、`author`、`category`、`tags`、`published_at`、`source_updated_at`、`content_hash`、`markdown`、`metadata`；解析状态复用 `processing_status`/`processing_error`；`canonical_url` 未做）
-- [ ] 去重：URL、canonical URL、内容 hash
+- [x] 文档补充字段：`canonical_url`、`author`、`category`、`published_at`、`content_hash`、`parse_status`、`parse_error` 等。（已加 `external_id`、`canonical_url`、`author`、`category`、`tags`、`published_at`、`source_updated_at`、`content_hash`、`duplicate_of`、`markdown`、`metadata`；解析状态复用 `processing_status`/`processing_error`）
+- [x] 去重：URL 规范化、canonical URL、正文指纹（`content_hash`）。跨来源重复保留为重复文档（`duplicate_of` 指向最早入库的主文档，不切片、不向量化、不参与检索），管理端展示其他来源；主文档变化或删除时由重复文档接替；按指纹咨询锁处理并发。标题 + 发布时间去重未做
 - [ ] 网页正文提取改用 Cheerio + Readability 替代正则。依赖：`cheerio`、`@mozilla/readability`（及 DOM 实现）
 - [ ] robots.txt 按 User-agent 分组完整解析 Disallow/Allow 规则
 - [x] 结构化切片（`packages/processing/src/chunking.ts`）：同章节累积约 800 字，过短章节并入下一节，表格不超过两倍目标长度时整块保留（更长按行切分并重复表头），超长段落按句切分；网页按行切分，不再折叠空白

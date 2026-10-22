@@ -241,6 +241,7 @@ const documentSummarySchema = {
     sourceId: { type: "string" },
     title: { type: "string" },
     url: { type: "string" },
+    canonicalUrl: { type: "string" },
     externalId: { type: "string" },
     author: { type: "string" },
     category: { type: "string" },
@@ -248,14 +249,15 @@ const documentSummarySchema = {
     publishedAt: { type: "string" },
     parserVersion: { type: "number" },
     status: { type: "string", enum: ["pending", "processing", "ready", "failed"] },
-    processingStatus: { type: "string", enum: ["pending", "cleaning", "chunked", "failed"] },
+    processingStatus: { type: "string", enum: ["pending", "cleaning", "chunked", "duplicate", "failed"] },
     processingError: { type: "string" },
+    duplicateOf: { type: "string" },
     embedding: embeddingRecordSchema,
     chunkCount: { type: "number" },
     createdAt: { type: "string" },
     updatedAt: { type: "string" },
   },
-  required: ["id", "sourceId", "title", "url", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
+  required: ["id", "sourceId", "title", "url", "canonicalUrl", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
   additionalProperties: false,
 } as const;
 
@@ -329,6 +331,16 @@ const articleMetadataSchema = {
       required: ["name", "principal", "institution", "keywords"],
       additionalProperties: false,
     },
+    titleMeta: {
+      type: "object", nullable: true,
+      properties: {
+        journal: { type: "string" },
+        journalAbbreviation: { type: "string", nullable: true },
+        institutions: { type: "array", items: { type: "string" } },
+      },
+      required: ["journal", "journalAbbreviation", "institutions"],
+      additionalProperties: false,
+    },
     relatedArticleKeys: { type: "array", items: { type: "string" } },
     followUpQuestions: { type: "array", items: { type: "string" } },
     attachments: { type: "array", items: articleAttachmentSchema },
@@ -343,6 +355,18 @@ const articleMetadataSchema = {
   additionalProperties: false,
 } as const;
 
+const documentReferenceSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    sourceId: { type: "string" },
+    title: { type: "string" },
+    url: { type: "string" },
+  },
+  required: ["id", "sourceId", "title", "url"],
+  additionalProperties: false,
+} as const;
+
 const documentRecordSchema = {
   type: "object",
   properties: {
@@ -352,6 +376,8 @@ const documentRecordSchema = {
     rawHtml: { type: "string" },
     metadata: articleMetadataSchema,
     chunks: { type: "array", items: documentChunkRecordSchema },
+    primary: documentReferenceSchema,
+    duplicates: { type: "array", items: documentReferenceSchema },
   },
   required: [...documentSummarySchema.required, "content", "chunks"],
   additionalProperties: false,

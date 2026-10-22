@@ -29,19 +29,21 @@ export const searchTerms = (text: string): string[] => [...termCounts(text).keys
 
 // ---- 元数据加权 ----
 
-/** 参与检索加权的文档元数据字段。机构、期刊等字段在解析器提取后加入。 */
-export type MetadataSearchField = "projectName" | "principal" | "institution" | "keywords";
+/** 参与检索加权的文档元数据字段。institution 为项目承担单位，titleInstitutions / journal 从标题提取。 */
+export type MetadataSearchField = "projectName" | "principal" | "institution" | "keywords" | "titleInstitutions" | "journal";
 
-// 字段权重乘在词项 IDF 上。关键词已写入切片上下文、在正文 BM25 中计过一次，权重较低。
-export const METADATA_FIELD_WEIGHTS: Record<MetadataSearchField, number> = { projectName: 1, principal: 1, institution: 0.8, keywords: 0.5 };
+// 字段权重乘在词项 IDF 上。关键词与标题已写入切片上下文、在正文 BM25 中计过一次，权重较低；
+// 期刊全称不在标题中，但标题里的缩写已计过一次，同样取低权重。
+export const METADATA_FIELD_WEIGHTS: Record<MetadataSearchField, number> = { projectName: 1, principal: 1, institution: 0.8, keywords: 0.5, titleInstitutions: 0.5, journal: 0.5 };
 
 /** 只读取检索用到的字段，兼容旧版本解析结果缺失的字段。 */
 export interface SearchableMetadata {
   sourceMeta?: { keywords?: string[] | null } | null;
   projectMeta?: { name?: string | null; principal?: string | null; institution?: string | null; keywords?: string[] | null } | null;
+  titleMeta?: { journal?: string | null; journalAbbreviation?: string | null; institutions?: string[] | null } | null;
 }
 
-/** 各字段的检索文本；关键词逐行分隔，避免相邻关键词拼出跨词的二元组。 */
+/** 各字段的检索文本；关键词、机构等多值字段逐行分隔，避免相邻值拼出跨词的二元组。 */
 export function metadataSearchFields(metadata: SearchableMetadata | null | undefined): Partial<Record<MetadataSearchField, string>> {
   const project = metadata?.projectMeta;
   const keywords = [...new Set([...(metadata?.sourceMeta?.keywords ?? []), ...(project?.keywords ?? [])])];
@@ -50,6 +52,10 @@ export function metadataSearchFields(metadata: SearchableMetadata | null | undef
   if (project?.principal) fields.principal = project.principal;
   if (project?.institution) fields.institution = project.institution;
   if (keywords.length) fields.keywords = keywords.join("\n");
+  const title = metadata?.titleMeta;
+  if (title?.institutions?.length) fields.titleInstitutions = title.institutions.join("\n");
+  const journal = [title?.journal, title?.journalAbbreviation].filter(Boolean).join("\n");
+  if (journal) fields.journal = journal;
   return fields;
 }
 

@@ -682,6 +682,7 @@ test("GET /api/admin/documents/:id — response serializer preserves nested meta
     sourceId: UUID,
     title: "Test",
     url: "https://example.com",
+    canonicalUrl: "https://example.com/",
     tags: ["tag1"],
     status: "ready",
     processingStatus: "chunked",
@@ -691,12 +692,14 @@ test("GET /api/admin/documents/:id — response serializer preserves nested meta
     updatedAt: "2026-01-01",
     content: "Full content here",
     chunks: [{ id: UUID, index: 0, content: "chunk text", tokenEstimate: 10 }],
+    duplicates: [{ id: UUID, sourceId: UUID, title: "Repost", url: "https://mirror.example.com/a" }],
     metadata: {
       summary: "summary text",
       cover: null,
       doi: null,
       sourceMeta: null,
       projectMeta: { name: "Battery project", principal: "A. Smith", institution: "National Lab", keywords: ["battery"] },
+      titleMeta: { journal: "Advanced Materials", journalAbbreviation: "AM", institutions: ["浙江大学"] },
       relatedArticleKeys: [],
       followUpQuestions: ["q1"],
       attachments: [],
@@ -715,21 +718,27 @@ test("GET /api/admin/documents/:id — response serializer preserves nested meta
   assertOk(res, (b) => {
     const body = b as Record<string, unknown>;
     assert.ok(Array.isArray(body.chunks));
+    assert.equal(body.canonicalUrl, "https://example.com/");
+    assert.deepEqual(body.duplicates, mockDoc.duplicates);
     const meta = body.metadata as Record<string, unknown>;
     assert.equal(meta.summary, "summary text");
     assert.deepEqual(meta.projectMeta, mockDoc.metadata.projectMeta);
+    assert.deepEqual(meta.titleMeta, mockDoc.metadata.titleMeta);
     assert.ok(Array.isArray(meta.followUpQuestions));
   });
   // 历史文档没有该字段，新解析的非项目文章则显式返回 null。
   const metadata = mockDoc.metadata as Partial<typeof mockDoc.metadata>;
   delete metadata.projectMeta;
+  delete metadata.titleMeta;
   const legacy = await app.inject({ method: "GET", url: `/api/admin/documents/${UUID}` });
   assertOk(legacy);
   assert.equal(Object.hasOwn(legacy.json().metadata, "projectMeta"), false);
-  Object.assign(metadata, { projectMeta: null });
+  assert.equal(Object.hasOwn(legacy.json().metadata, "titleMeta"), false);
+  Object.assign(metadata, { projectMeta: null, titleMeta: null });
   const regular = await app.inject({ method: "GET", url: `/api/admin/documents/${UUID}` });
   assertOk(regular);
   assert.equal(regular.json().metadata.projectMeta, null);
+  assert.equal(regular.json().metadata.titleMeta, null);
 });
 
 test("POST /api/chat — response serializer preserves all ChatSuccessResponse fields", async () => {

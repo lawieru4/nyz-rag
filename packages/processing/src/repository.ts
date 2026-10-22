@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { ArticleDetail } from "./article/parse.js";
 import { embeddingInput, summaryEmbeddingInput } from "./chunking.js";
+import { contentFingerprint } from "./dedup.js";
 import type { ChunkHit } from "./rag.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
   ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
-  DocumentDetail, DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
+  DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, withTransaction, type Executor } from "./db.js";
@@ -100,7 +101,8 @@ export async function updateTask(id: string, patch: { status?: CrawlTaskRecord["
 
 export async function getStats(db: Executor = getDb()): Promise<KnowledgeStats> {
   const [[documentStats], [sourceStats], [taskStats]] = await Promise.all([
-    db.select({ ready: count(sql`CASE WHEN ${documents.status} = 'ready' THEN 1 END`), lastUpdated: sql<string | null>`max(${documents.updatedAt})` }).from(documents),
+    // 重复文档不参与检索，不计入知识库文档数。
+    db.select({ ready: count(sql`CASE WHEN ${documents.status} = 'ready' AND ${documents.duplicateOf} IS NULL THEN 1 END`), lastUpdated: sql<string | null>`max(${documents.updatedAt})` }).from(documents),
     db.select({ total: count() }).from(dataSources),
     db.select({ active: count() }).from(crawlTasks).where(or(eq(crawlTasks.status, "等待中"), eq(crawlTasks.status, "运行中"))),
   ]);
@@ -120,9 +122,9 @@ const summaryColumns = {
 
 type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawHtml" | "rawJson" | "markdown" | "metadata"> & { chunkCount: number };
 const toSummary = (row: SummaryRow): DocumentSummary => compact<DocumentSummary>({
-  id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, externalId: row.externalId, author: row.author, category: row.category,
+  id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, canonicalUrl: row.canonicalUrl, externalId: row.externalId, author: row.author, category: row.category,
   tags: row.tags, publishedAt: iso(row.publishedAt) ?? null, parserVersion: row.parserVersion, status: row.status,
-  processingStatus: row.processingStatus, processingError: row.processingError,
+  processingStatus: row.processingStatus, processingError: row.processingError, duplicateOf: row.duplicateOf,
   embedding: compact<DocumentEmbeddingRecord>({
     status: row.embeddingStatus, providerId: row.embeddingProviderId ?? undefined, model: row.embeddingModel ?? undefined, dimensions: row.embeddingDimensions ?? undefined,
     chunkCount: row.embeddingChunkCount, updatedAt: iso(row.embeddingUpdatedAt), error: row.embeddingError ?? undefined,
@@ -158,12 +160,19 @@ export async function getDocumentSummary(id: string, db: Executor = getDb()): Pr
   return row ? toSummary(row) : null;
 }
 
+const referenceColumns = { id: documents.id, sourceId: documents.sourceId, title: documents.title, url: documents.url };
+
 export async function getDocument(id: string, db: Executor = getDb()): Promise<DocumentRecord | null> {
   const [row] = await db.select({ ...summaryColumns, content: documents.content, rawHtml: documents.rawHtml, markdown: documents.markdown, metadata: documents.metadata })
     .from(documents).where(eq(documents.id, id));
   if (!row) return null;
+  const [chunks, [primary], duplicates] = await Promise.all([
+    listDocumentChunks(id, db),
+    row.duplicateOf ? db.select(referenceColumns).from(documents).where(eq(documents.id, row.duplicateOf)) : Promise.resolve([] as DocumentReference[]),
+    db.select(referenceColumns).from(documents).where(eq(documents.duplicateOf, id)).orderBy(asc(documents.createdAt), asc(documents.id)),
+  ]);
   return compact<DocumentRecord>({
-    ...toSummary(row), content: row.content, markdown: row.markdown, rawHtml: row.rawHtml, metadata: row.metadata, chunks: await listDocumentChunks(id, db),
+    ...toSummary(row), content: row.content, markdown: row.markdown, rawHtml: row.rawHtml, metadata: row.metadata, chunks, primary: primary ?? null, duplicates,
   });
 }
 
@@ -181,7 +190,9 @@ export async function getDocumentDetail(id: string, db: Executor = getDb()): Pro
 
 /** 在事务内锁定文档行，用于切片和向量化回写前的一致性校验。 */
 export async function lockDocument(tx: Executor, id: string) {
-  const [row] = await tx.select({ id: documents.id, content: documents.content, processingStatus: documents.processingStatus, processingVersion: documents.processingVersion })
+  const [row] = await tx.select({
+    id: documents.id, content: documents.content, contentHash: documents.contentHash, processingStatus: documents.processingStatus, processingVersion: documents.processingVersion,
+  })
     .from(documents).where(eq(documents.id, id)).for("update");
   return row ?? null;
 }
@@ -208,6 +219,8 @@ export async function listArticleVersions(sourceId: string, db: Executor = getDb
 export interface UpsertDocumentInput {
   sourceId: string;
   url: string;
+  /** 规范地址，默认与 url 相同；没有 externalId 的文档按它识别同一篇。 */
+  canonicalUrl?: string;
   title: string;
   content: string;
   rawHtml?: string;
@@ -217,16 +230,24 @@ export interface UpsertDocumentInput {
   status: DocumentStatus;
 }
 
+/** 有 externalId（文章 API）时按来源标识更新，否则按规范地址；地址随之更新。并发写入同一篇时由唯一约束串行化。 */
 export async function upsertDocument(tx: Executor, input: UpsertDocumentInput): Promise<string> {
   const values = {
-    title: input.title, content: input.content, rawHtml: input.rawHtml ?? null, externalId: input.externalId ?? null, rawJson: input.rawJson ?? null,
-    sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
+    url: input.url, canonicalUrl: input.canonicalUrl ?? input.url, title: input.title, content: input.content, rawHtml: input.rawHtml ?? null,
+    externalId: input.externalId ?? null, rawJson: input.rawJson ?? null, sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
   };
   const [row] = await tx.insert(documents)
-    .values({ id: randomUUID(), sourceId: input.sourceId, url: input.url, ...values })
-    .onConflictDoUpdate({ target: [documents.sourceId, documents.url], set: { ...values, updatedAt: sql`now()` } })
+    .values({ id: randomUUID(), sourceId: input.sourceId, ...values })
+    .onConflictDoUpdate({ target: input.externalId ? [documents.sourceId, documents.externalId] : [documents.sourceId, documents.canonicalUrl], set: { ...values, updatedAt: sql`now()` } })
     .returning({ id: documents.id });
   return row.id;
+}
+
+/** 来源内按规范地址查找文档（网页采集判断 canonical 是否可信）。 */
+export async function findDocumentByCanonicalUrl(tx: Executor, sourceId: string, canonicalUrl: string) {
+  const [row] = await tx.select({ id: documents.id, url: documents.url, contentHash: documents.contentHash })
+    .from(documents).where(and(eq(documents.sourceId, sourceId), eq(documents.canonicalUrl, canonicalUrl)));
+  return row ?? null;
 }
 
 // 文章级向量的模型与维度沿用文档的向量信息，因此随之清除；切片向量自带模型与维度，向量化失败时保留。
@@ -246,18 +267,74 @@ export interface DocumentContentUpdate {
   metadata?: ArticleMetadata | null;
 }
 
-/** 替换正文与全部切片；旧切片的向量随之删除，向量状态重置为待向量化。 */
-export async function replaceDocumentChunks(tx: Executor, documentId: string, update: DocumentContentUpdate, chunks: DocumentChunkRecord[]): Promise<void> {
+// 写入清洗结果并删除旧切片（向量随之删除），切片版本加一，向量状态重置为待向量化。
+async function writeDocumentContent(tx: Executor, documentId: string, update: DocumentContentUpdate, state: { processingStatus: "chunked" | "duplicate"; duplicateOf: string | null }) {
   await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
   await tx.update(documents).set({
-    ...update, ...(update.metadata !== undefined ? { metadataSearchVector: metadataSearchVector(update.metadata) } : {}), processingStatus: "chunked", processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
+    ...update, ...(update.metadata !== undefined ? { metadataSearchVector: metadataSearchVector(update.metadata) } : {}), ...state, processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
     embeddingStatus: "pending", ...resetEmbedding, embeddingError: null, embeddingUpdatedAt: null, updatedAt: sql`now()`,
   }).where(eq(documents.id, documentId));
+}
+
+/** 替换正文与全部切片；旧切片的向量随之删除，向量状态重置为待向量化。文档不再是重复文档。 */
+export async function replaceDocumentChunks(tx: Executor, documentId: string, update: DocumentContentUpdate, chunks: DocumentChunkRecord[]): Promise<void> {
+  await writeDocumentContent(tx, documentId, update, { processingStatus: "chunked", duplicateOf: null });
   if (!chunks.length) return;
   await tx.insert(documentChunks).values(chunks.map((chunk) => ({
     id: chunk.id, documentId, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate,
     context: chunk.context ?? "", sectionPath: chunk.sectionPath ?? [], contentType: chunk.contentType ?? "text", searchVector: searchVector(embeddingInput(chunk)),
   })));
+}
+
+// ---- 重复文档 ----
+
+/**
+ * 在事务内按正文指纹加咨询锁（按值排序，避免死锁）。凡是改变重复关系的操作（切片、删除）都先锁住涉及的新旧指纹，
+ * 使「查找主文档 → 标记重复」与主文档的内容变化、删除互斥。
+ */
+export async function lockContentHashes(tx: Executor, hashes: Array<string | null | undefined>): Promise<void> {
+  for (const hash of [...new Set(hashes.filter((value): value is string => Boolean(value)))].sort()) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`nyz-rag:content-hash:${hash}`}, 0))`);
+  }
+}
+
+/** 同一正文指纹的主文档（最早入库的非重复文档），不含 excludeId 本身。调用前应先 lockContentHashes。 */
+export async function findPrimaryDocument(tx: Executor, contentHash: string, excludeId: string): Promise<string | null> {
+  const [row] = await tx.select({ id: documents.id }).from(documents)
+    .where(and(eq(documents.contentHash, contentHash), isNull(documents.duplicateOf), ne(documents.processingStatus, "duplicate"), ne(documents.id, excludeId)))
+    .orderBy(asc(documents.createdAt), asc(documents.id)).limit(1);
+  return row?.id ?? null;
+}
+
+/** 写入清洗结果并标记为 primaryId 的重复文档：删除切片与向量，不再参与检索与向量化。 */
+export async function markDocumentDuplicate(tx: Executor, documentId: string, primaryId: string, update: DocumentContentUpdate): Promise<void> {
+  await writeDocumentContent(tx, documentId, update, { processingStatus: "duplicate", duplicateOf: primaryId });
+}
+
+/** 以 primaryId 为主文档的重复文档（按入库先后），并锁定这些行。 */
+export async function listDuplicateDocuments(tx: Executor, primaryId: string) {
+  return tx.select({ id: documents.id, contentHash: documents.contentHash }).from(documents)
+    .where(eq(documents.duplicateOf, primaryId)).orderBy(asc(documents.createdAt), asc(documents.id)).for("update");
+}
+
+/** 改变重复文档的主文档；primaryId 为 null 时解除重复关系（状态仍为 duplicate，需重新处理）。 */
+export async function setDuplicateOf(tx: Executor, ids: string[], primaryId: string | null): Promise<void> {
+  if (ids.length) await tx.update(documents).set({ duplicateOf: primaryId }).where(inArray(documents.id, ids));
+}
+
+/**
+ * 升级前的文档没有正文指纹，按当前规则补齐一批（不改变重复关系），返回最后处理的文档 ID；没有更多时返回 null。
+ * 只处理已切片或已判定重复的文档，切片版本变化时跳过。
+ */
+export async function backfillContentHashes(afterId: string, batchSize: number, db: Executor = getDb()): Promise<string | null> {
+  const rows = await db.select({ id: documents.id, content: documents.content, version: documents.processingVersion }).from(documents)
+    .where(and(sql`${documents.id} > ${afterId}`, isNull(documents.contentHash), inArray(documents.processingStatus, ["chunked", "duplicate"])))
+    .orderBy(asc(documents.id)).limit(batchSize);
+  for (const row of rows) {
+    await db.update(documents).set({ contentHash: contentFingerprint(row.content) })
+      .where(and(eq(documents.id, row.id), eq(documents.processingVersion, row.version), isNull(documents.contentHash)));
+  }
+  return rows.at(-1)?.id ?? null;
 }
 
 /**
@@ -356,8 +433,23 @@ export async function saveSummaryEmbedding(id: string, version: number, vector: 
   return updated.length > 0;
 }
 
-export async function deleteDocument(id: string, db: Executor = getDb()): Promise<boolean> {
-  return (await db.delete(documents).where(eq(documents.id, id)).returning({ id: documents.id })).length > 0;
+/**
+ * 删除文档。被删除的是主文档时，最早入库的重复文档接替为主文档（状态置为待处理，由调用方入队重新切片），
+ * 其余重复文档改为指向它。返回 null 表示文档不存在。
+ */
+export async function deleteDocument(id: string): Promise<{ promotedId: string | null } | null> {
+  return withTransaction(async (tx) => {
+    const target = await lockDocument(tx, id);
+    if (!target) return null;
+    await lockContentHashes(tx, [target.contentHash]);
+    const [promoted, ...rest] = await listDuplicateDocuments(tx, id);
+    if (promoted) {
+      await tx.update(documents).set({ duplicateOf: null, processingStatus: "pending", processingError: null }).where(eq(documents.id, promoted.id));
+      await setDuplicateOf(tx, rest.map((row) => row.id), promoted.id);
+    }
+    await tx.delete(documents).where(eq(documents.id, id));
+    return { promotedId: promoted?.id ?? null };
+  });
 }
 
 // ---- 检索 ----
@@ -387,6 +479,8 @@ const tsqueryOf = (terms: string[]) => terms.map((term) => `'${term}'`).join(" |
 function documentFilter(filters: RetrievalFilters): SQL | undefined {
   return and(
     eq(documents.status, "ready"),
+    // 重复文档没有切片；排除后也不占用元数据召回名额和词项文档频率。
+    isNull(documents.duplicateOf),
     filters.sourceId ? eq(documents.sourceId, filters.sourceId) : undefined,
     filters.publishedFrom ? sql`${documents.publishedAt} >= ${`${filters.publishedFrom}T00:00:00Z`}::timestamptz` : undefined,
     filters.publishedTo ? sql`${documents.publishedAt} < (${`${filters.publishedTo}T00:00:00Z`}::timestamptz + interval '24 hours')` : undefined,
@@ -421,7 +515,7 @@ export async function keywordSearchChunks(terms: string[], limit: number, db: Ex
     .filter((row) => row.df <= commonLimit).map((row) => ({ term: row.term, idf: idf(row.df) }));
   if (!weighted.length && !metadataTerms.length) return [];
 
-  const searchMetadata = sql<SearchableMetadata | null>`jsonb_build_object('sourceMeta', jsonb_build_object('keywords', ${documents.metadata}->'sourceMeta'->'keywords'), 'projectMeta', ${documents.metadata}->'projectMeta')`;
+  const searchMetadata = sql<SearchableMetadata | null>`jsonb_build_object('sourceMeta', jsonb_build_object('keywords', ${documents.metadata}->'sourceMeta'->'keywords'), 'projectMeta', ${documents.metadata}->'projectMeta', 'titleMeta', ${documents.metadata}->'titleMeta')`;
   const weights = sql.join(weighted.map((row) => sql.raw(row.idf.toFixed(6))), sql`, `);
   const prescore = sql<number>`(SELECT coalesce(sum(q.weight), 0) FROM unnest(${textArray(weighted.map((row) => row.term))}, ARRAY[${weights}]::float8[]) AS q(term, weight) WHERE ${documentChunks.searchVector} @@ quote_literal(q.term)::tsquery)`;
   const candidates: (ChunkHit & { searchMetadata: SearchableMetadata | null })[] = [];

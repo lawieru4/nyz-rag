@@ -148,6 +148,17 @@ test("project extraction preserves ambiguous or non-intro body text", () => {
   assert.equal(parseArticle(sample).projectMeta, null);
 });
 
+test("article title metadata is stored without changing title, content or chunk context", () => {
+  const title = "浙江大学范修林、上海交通大学邓涛AM：三阴离子协同溶剂化重塑双电层";
+  const rawJson = detail([paragraph(text("有效正文"))], { title });
+  const { update, chunks } = prepareDocument("title", { title: "", content: "", rawJson });
+  assert.deepEqual(update.metadata?.titleMeta, { journal: "Advanced Materials", journalAbbreviation: "AM", institutions: ["浙江大学", "上海交通大学"] });
+  assert.equal(update.title, title);
+  assert.equal(update.content, "有效正文");
+  assert.ok(chunks[0].context.startsWith(`文章：${title}`));
+  assert.equal(prepareDocument("plain", { title: "", content: "", rawJson: detail([paragraph(text("正文"))], { title: "电芯寿命衰减的机理" }) }).update.metadata?.titleMeta, null);
+});
+
 test("project and repost metadata coexist and merge keyword context without duplicates", () => {
   const rawJson = detail([
     { type: "blockquote", content: [paragraph(text("作者：qwen\n转载源：原始来源\n关键词：[[电池]]\n场景：[[研发]]"))] },

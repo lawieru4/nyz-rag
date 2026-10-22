@@ -39,8 +39,26 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   });
   const articles = new Map([["a1", article("a1", "文章一", 100)], ["a2", article("a2", "文章二", 100)]]);
   const articleRequests: string[] = [];
+  // 模拟网页站点（同一路径、按 id 区分的页面）：2 声明自身为 canonical；3 与 1 正文相同（排版不同）；4 是 2 的别名地址。
+  const siteBody = (topic: string) => `${topic}正极材料的研究进展与产业化前景。`.repeat(4);
+  const sitePages: Record<string, { head?: string; body: string; links?: string[] }> = {
+    "1": { body: siteBody("钠离子电池"), links: ["page?utm_source=feed&id=2", "page?id=1#top", "page?id=3", "page?id=4"] },
+    "2": { head: '<link rel="canonical" href="/site/page?id=2">', body: siteBody("固态电池") },
+    "3": { body: siteBody("钠离子电池").replace(/。/g, "。<br>") },
+    "4": { head: '<link rel="canonical" href="/site/page?id=2&amp;utm_medium=x">', body: siteBody("固态电池") },
+  };
+  const siteRequests: string[] = [];
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://mock");
+    if (url.pathname === "/site/page") {
+      siteRequests.push(url.search);
+      const page = sitePages[url.searchParams.get("id") ?? ""];
+      if (!page) { response.writeHead(404).end(); return; }
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      const links = (page.links ?? []).map((href) => `<a href="${href}">link</a>`).join("");
+      response.end(`<html><head><title>页面 ${url.searchParams.get("id")}</title>${page.head ?? ""}</head><body><main>${page.body}</main><nav>${links}</nav></body></html>`);
+      return;
+    }
     if (url.pathname.startsWith("/nyz/")) {
       articleRequests.push(url.pathname);
       assert.equal(url.searchParams.get("token"), articleToken);
@@ -356,6 +374,31 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     synced = await articleDocuments();
     assert.equal(synced[1].title, "文章二（更新）");
     assert.deepEqual(articleRequests.filter((path) => path.endsWith("/articleDetail")).length, 1, "only the changed article is fetched again");
+    // 网页站点：地址规范化后去重抓取；同来源不同地址的相同正文标记为重复，canonical 别名地址不另存。
+    const siteSource = await (await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Site", url: `http://127.0.0.1:${mockPort}/site/page?id=1`, kind: "网页站点", frequency: "" }) })).json();
+    await fetch(`${apiBase}/api/admin/sources/${siteSource.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ status: "运行中" }) });
+    const siteTask = await (await fetch(`${apiBase}/api/admin/sources/${siteSource.id}/sync`, { method: "POST" })).json();
+    await until(async () => ["已完成", "失败"].includes((await getPool().query("SELECT status FROM crawl_tasks WHERE id = $1", [siteTask.id])).rows[0].status));
+    const { rows: [siteTaskRow] } = await getPool().query("SELECT status, error FROM crawl_tasks WHERE id = $1", [siteTask.id]);
+    assert.equal(siteTaskRow.status, "已完成", siteTaskRow.error ?? output);
+    assert.match(siteTaskRow.error, /1 篇与已有文档内容相同/);
+    assert.deepEqual(siteRequests, ["?id=1", "?id=2", "?id=3", "?id=4"], "fragments and tracking params do not cause refetches");
+    const siteDocuments = (await getPool().query("SELECT id, url, canonical_url, processing_status, duplicate_of FROM documents WHERE source_id = $1 ORDER BY url", [siteSource.id])).rows;
+    const pageUrl = (id: string) => `http://127.0.0.1:${mockPort}/site/page?id=${id}`;
+    assert.deepEqual(siteDocuments.map((row) => [row.url, row.canonical_url, row.processing_status]), [
+      [pageUrl("1"), pageUrl("1"), "chunked"], [pageUrl("2"), pageUrl("2"), "chunked"], [pageUrl("3"), pageUrl("3"), "duplicate"],
+    ]);
+    assert.equal(siteDocuments[2].duplicate_of, siteDocuments[0].id);
+    assert.equal((await fetch(`${apiBase}/api/admin/documents/${siteDocuments[2].id}/embed`, { method: "POST" })).status, 409, "duplicates are not embedded");
+    const primaryDetail = await (await fetch(`${apiBase}/api/admin/documents/${siteDocuments[0].id}`)).json();
+    assert.deepEqual(primaryDetail.duplicates.map((item: { id: string }) => item.id), [siteDocuments[2].id]);
+    // 删除主文档：重复文档接替，重新切片并向量化。
+    assert.equal((await fetch(`${apiBase}/api/admin/documents/${siteDocuments[0].id}`, { method: "DELETE" })).status, 204);
+    await until(async () => (await getDocumentSummary(siteDocuments[2].id))?.embedding.status === "ready");
+    const promoted = (await getDocumentSummary(siteDocuments[2].id))!;
+    assert.equal(promoted.processingStatus, "chunked");
+    assert.equal(promoted.duplicateOf, undefined);
+
     assert.doesNotMatch(output, new RegExp(articleToken));
     assert.doesNotMatch(output, new RegExp(adminPassword));
     assert.equal((await fetch(`${apiBase}/api/admin/auth/logout`, { method: "POST" })).status, 204);
