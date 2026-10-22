@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
 import { createChatModel, createRerankModel } from "../src/models.js";
 import { buildAnswerContext, buildChatMessages, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, type ChunkHit } from "../src/rag.js";
-import { searchTerms, termCounts } from "../src/search-terms.js";
+import { metadataScore, metadataSearchFields, metadataSearchTerms, metadataTermWeights, searchTerms, termCounts } from "../src/search-terms.js";
 
 const hit = (chunkId: string, score: number, overrides: Partial<ChunkHit> = {}): ChunkHit => ({
   chunkId, documentId: `doc-${chunkId}`, title: `标题${chunkId}`, url: `https://example.test/${chunkId}`, content: `正文${chunkId}`, context: `文章：标题${chunkId}`,
@@ -35,6 +35,24 @@ test("search terms normalize formulas and full-width text into bigrams and words
   assert.deepEqual(searchTerms("钠离子，Ｌｉ 与 x"), ["钠离", "离子", "li", "与"]);
   assert.deepEqual(searchTerms(`${"a".repeat(65)} ab`), ["ab"], "overlong tokens are skipped");
   assert.equal(termCounts("电池电池").get("电池"), 2);
+});
+
+test("metadata search fields weight project fields and keywords without double counting", () => {
+  const metadata = {
+    sourceMeta: { keywords: ["锂硫电池", "硫正极"] },
+    projectMeta: { name: "锂硫电池项目", principal: "Yi Cui（崔屹）", institution: "Stanford University", keywords: ["硫正极", "预锂化"] },
+  };
+  assert.deepEqual(metadataSearchFields(metadata), { projectName: "锂硫电池项目", principal: "Yi Cui（崔屹）", institution: "Stanford University", keywords: "锂硫电池\n硫正极\n预锂化" });
+  assert.deepEqual(metadataSearchFields({ sourceMeta: { keywords: null }, projectMeta: null }), {}, "legacy and non-project metadata");
+  assert.deepEqual(metadataSearchFields(null), {});
+  assert.ok(!metadataSearchTerms(metadata).includes("池硫"), "adjacent keywords do not form cross-keyword bigrams");
+  const weights = metadataTermWeights(metadata);
+  assert.equal(weights.get("崔屹"), 1);
+  assert.equal(weights.get("stanford"), 0.8);
+  assert.equal(weights.get("预锂"), 0.5);
+  assert.equal(weights.get("锂硫"), 1, "a term in several fields takes the highest weight");
+  assert.equal(metadataScore(metadata, [{ term: "崔屹", idf: 2 }, { term: "锂硫", idf: 1 }, { term: "钠离", idf: 5 }]), 3);
+  assert.equal(metadataScore(null, [{ term: "崔屹", idf: 2 }]), 0);
 });
 
 test("retrieve fuses keyword and vector hits, applies the threshold and reranks", async () => {

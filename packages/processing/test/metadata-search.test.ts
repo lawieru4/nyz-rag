@@ -5,7 +5,8 @@ import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { closeDatabase, getDb, getPool, migrate, withTransaction } from "../src/db.js";
 import { parseRetrievalFilters } from "../src/retrieval-filters.js";
-import { createSource, getDocumentDetail, keywordSearchChunks, replaceDocumentChunks, upsertDocument, vectorSearchChunks } from "../src/repository.js";
+import type { ArticleMetadata } from "@nyz-rag/types";
+import { createSource, getDocumentDetail, keywordSearchChunks, reindexDocumentMetadataTerms, replaceDocumentChunks, upsertDocument, vectorSearchChunks } from "../src/repository.js";
 import { searchTerms } from "../src/search-terms.js";
 
 test("metadata filters validate dates, limits, exact lists and unknown fields", () => {
@@ -101,6 +102,62 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
     await assert.rejects(vectorSearchChunks([], "test-model", 1), /Invalid query vector/);
     await getPool().query("UPDATE document_chunks SET search_vector = array_to_tsvector(ARRAY['battery','rareone','raretwo','rarethree','rarefour','rarefive','raresix','rareseven','rareeight']) WHERE document_id = $1", [c.id]);
     assert.deepEqual((await keywordSearchChunks(searchTerms("battery rareone raretwo rarethree rarefour rarefive raresix rareseven rareeight"), 20, getDb(), { categories: ["report"] })).map((hit) => hit.documentId), [b.id], "rare terms outside the filtered corpus must not crowd out eligible terms");
+  } finally {
+    await closeDatabase();
+    await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    await admin.end();
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
+  }
+});
+
+test("metadata boost recalls project fields once per document in an isolated schema", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
+  const previousUrl = process.env.DATABASE_URL;
+  const admin = new pg.Pool({ connectionString: previousUrl ?? "postgresql://nyzrag:nyzrag@localhost:5432/nyzrag" });
+  const schema = `nyz_boost_test_${randomBytes(6).toString("hex")}`;
+  await admin.query(`CREATE SCHEMA ${schema}`);
+  const url = new URL(previousUrl ?? "postgresql://nyzrag:nyzrag@localhost:5432/nyzrag");
+  url.searchParams.set("options", `-c search_path=${schema},public`);
+  process.env.DATABASE_URL = url.toString();
+  try {
+    await migrate();
+    const source = await createSource({ name: "Boost fixtures", url: "https://example.test", kind: "网页站点", frequency: "" });
+    const create = async (name: string, contents: string[], metadata: Partial<ArticleMetadata> | null, category = "research") => withTransaction(async (tx) => {
+      const id = await upsertDocument(tx, { sourceId: source.id, url: `https://example.test/${name}`, title: name, content: contents.join("\n"), status: "ready" });
+      await replaceDocumentChunks(tx, id, { content: contents.join("\n"), category, ...(metadata ? { metadata: metadata as ArticleMetadata } : {}) },
+        contents.map((content, index) => ({ id: `${id}-${index}`, index, content, tokenEstimate: content.length })));
+      return id;
+    });
+    const project = await create("project", ["硫正极的纳米结构设计", "硫正极循环寿命测试", "硫正极界面表征"],
+      { sourceMeta: null, projectMeta: { name: "高能量锂硫电池项目", principal: "Yi Cui（崔屹）", institution: "国家实验室", keywords: [] } });
+    const body = await create("body", ["硫正极材料综述"], null);
+    const other = await create("other", ["硫正极与崔屹无关的正文"], { sourceMeta: null, projectMeta: null }, "report");
+    for (let index = 0; index < 60; index += 1) await create(`lab-${index}`, ["无关正文"], { sourceMeta: null, projectMeta: { name: `项目${index}`, principal: null, institution: "国家实验室", keywords: [] } });
+
+    const principal = await keywordSearchChunks(searchTerms("崔屹负责的项目"), 20);
+    assert.ok(principal.some((hit) => hit.documentId === project), "documents matched only by metadata are recalled");
+    assert.equal(principal.filter((hit) => hit.documentId === project).length, 1, "metadata candidates contribute one chunk per document");
+    assert.ok(principal.some((hit) => hit.documentId === other), "body matches are still recalled");
+    assert.ok(!(await keywordSearchChunks(searchTerms("崔屹"), 20, getDb(), { categories: ["report"] })).some((hit) => hit.documentId === project), "filters apply to metadata candidates");
+
+    const plain = await keywordSearchChunks(searchTerms("硫正极"), 20);
+    const boosted = await keywordSearchChunks(searchTerms("崔屹 硫正极"), 20);
+    const scoreOf = (hits: typeof plain, chunkId: string) => hits.find((hit) => hit.chunkId === chunkId)?.score ?? 0;
+    const raised = [0, 1, 2].filter((index) => scoreOf(boosted, `${project}-${index}`) > scoreOf(plain, `${project}-${index}`) + 1e-9);
+    assert.equal(raised.length, 1, "the metadata bonus is applied to a single chunk of the document");
+    assert.equal(scoreOf(boosted, `${body}-0`), scoreOf(plain, `${body}-0`), "body scores of unmatched documents are unchanged");
+    assert.deepEqual(await keywordSearchChunks(searchTerms("国家实验室"), 20), [], "terms common across metadata do not add a bonus");
+
+    await getPool().query("UPDATE documents SET metadata_search_vector = ''::tsvector");
+    assert.ok(!(await keywordSearchChunks(searchTerms("崔屹负责"), 20)).some((hit) => hit.documentId === project));
+    for (let cursor = ""; ;) {
+      const last = await reindexDocumentMetadataTerms(cursor, 25, { onlyMissing: true });
+      if (!last) break;
+      cursor = last;
+    }
+    assert.ok((await keywordSearchChunks(searchTerms("崔屹负责"), 20)).some((hit) => hit.documentId === project), "backfill restores metadata terms");
+    const { rows } = await getPool().query("SELECT metadata_search_vector::text AS terms FROM documents WHERE id = $1", [body]);
+    assert.equal(rows[0].terms, "", "documents without metadata keep empty terms");
   } finally {
     await closeDatabase();
     await admin.query(`DROP SCHEMA ${schema} CASCADE`);

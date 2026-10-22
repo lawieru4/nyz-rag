@@ -71,7 +71,7 @@
 - [x] 索引与查询统一做 NFKC 规范化（化学式上下标 `Na₀.₉` → `na0.9`），词项规则变化后运行 `pnpm db:reindex-search`
 - [ ] 摘要级向量：对文章摘要单独向量化，支持先召回文章、再召回切片
 - [x] 元数据过滤：`/api/search`、`/api/chat` 与会话 SSE 接收 `filters`，支持发布时间（`publishedFrom` / `publishedTo`，UTC 日期，含首尾整日）、分类、标签、场景及数据源；同字段多值 OR、跨字段 AND，关键词和向量召回在候选截断前统一过滤，关键词词频统计同样限定检索范围
-- [ ] 元数据加权：关键词、机构、期刊、项目负责人用于关键词加权（不属于本轮过滤实现）
+- [x] 元数据加权：关键词、项目名称、负责人、承担单位的词项写入 `documents.metadata_search_vector`（GIN）。只命中元数据的文档另行召回（最多 20 篇，每篇取一个切片），不占用正文候选；按 IDF × 字段权重（名称/负责人 1.0、单位 0.8、关键词 0.5）加分，同一词项只取最高权重；每篇文档只给最佳切片加一次，常见词项不加分。机构、期刊待解析器提取后加入 `metadataSearchFields`
 - [x] 回答引用同时标注 nyzdata 文章与原始转载源（`sources[].repostSource`，来自 `metadata.sourceMeta`）
 - [x] 文章衍生的合成检索评估集：`packages/processing/test/evaluation/retrieval-dataset.json` 含 50 条问题、稳定文章 ID、相关性等级与证据摘录；`pnpm evaluate:retrieval` 提供离线及数据库关键词基线，输出 Recall@K、MRR、nDCG@K 和语料缺失统计。不代表真实用户或人工复核标注，不用于宣称混合检索质量
 - [ ] 建立 50 条以上带标注的真实问题评估集，作为切片与检索调整的回归基线；现有合成集仍需收集真实问题、人工复核并补充多文章及分级相关性标注

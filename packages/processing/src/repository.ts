@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, getTableColumns, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { ArticleDetail } from "./article/parse.js";
 import { embeddingInput } from "./chunking.js";
 import type { ChunkHit } from "./rag.js";
-import { searchTerms, termCounts } from "./search-terms.js";
+import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
   ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
@@ -24,6 +24,7 @@ const outer = (table: string, column: string) => sql.raw(`"${table}"."${column}"
 const textArray = (values: string[]) => sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 // 检索词项直接作为 tsvector 词位写入，不经过数据库分词器。
 const searchVector = (text: string) => sql`array_to_tsvector(${textArray(searchTerms(text))})`;
+const metadataSearchVector = (metadata: SearchableMetadata | null) => sql`array_to_tsvector(${textArray(metadataSearchTerms(metadata))})`;
 
 // ---- 数据源与采集任务 ----
 
@@ -242,7 +243,7 @@ export interface DocumentContentUpdate {
 export async function replaceDocumentChunks(tx: Executor, documentId: string, update: DocumentContentUpdate, chunks: DocumentChunkRecord[]): Promise<void> {
   await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
   await tx.update(documents).set({
-    ...update, processingStatus: "chunked", processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
+    ...update, ...(update.metadata !== undefined ? { metadataSearchVector: metadataSearchVector(update.metadata) } : {}), processingStatus: "chunked", processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
     embeddingStatus: "pending", ...resetEmbedding, embeddingError: null, embeddingUpdatedAt: null, updatedAt: sql`now()`,
   }).where(eq(documents.id, documentId));
   if (!chunks.length) return;
@@ -264,6 +265,19 @@ export async function reindexChunkSearchTerms(afterId: string, batchSize: number
     await db.update(documentChunks).set({ searchVector: searchVector(embeddingInput({ ...row, index: 0, tokenEstimate: 0 })) })
       // 切片 ID 在重新切片后会复用，只在内容未变时写入，避免与并发的重新处理互相覆盖。
       .where(and(eq(documentChunks.id, row.id), eq(documentChunks.content, row.content), eq(documentChunks.context, row.context)));
+  }
+  return rows.at(-1)?.id ?? null;
+}
+
+/** 按当前规则重新生成一批文档的元数据检索词项，用法同 reindexChunkSearchTerms；没有元数据的文档（网页）跳过。 */
+export async function reindexDocumentMetadataTerms(afterId: string, batchSize: number, options: { onlyMissing?: boolean } = {}, db: Executor = getDb()): Promise<string | null> {
+  const rows = await db.select({ id: documents.id, metadata: documents.metadata }).from(documents)
+    .where(and(sql`${documents.id} > ${afterId}`, isNotNull(documents.metadata), options.onlyMissing ? sql`${documents.metadataSearchVector} = ''::tsvector` : undefined))
+    .orderBy(asc(documents.id)).limit(batchSize);
+  for (const row of rows) {
+    await db.update(documents).set({ metadataSearchVector: metadataSearchVector(row.metadata) })
+      // 只在元数据未变时写入，避免覆盖并发重新处理写入的词项。
+      .where(and(eq(documents.id, row.id), sql`${documents.metadata} = ${JSON.stringify(row.metadata)}::jsonb`));
   }
   return rows.at(-1)?.id ?? null;
 }
@@ -327,6 +341,8 @@ const COMMON_TERM_RATIO = 0.1;
 const MAX_FILTER_TERMS = 8;
 // SQL 按命中词项的 IDF 之和预选候选，再在应用层按 BM25（词频 + 切片长度归一化）重排。
 const KEYWORD_CANDIDATES = 200;
+// 只有元数据命中查询词项的文档另行召回，每篇取正文得分最高的一个切片，不占用正文候选名额。
+const METADATA_CANDIDATES = 20;
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
 // 词项只含中文、小写字母、数字和小数点，可直接作为带引号的 tsquery 词位。
@@ -344,7 +360,11 @@ function documentFilter(filters: RetrievalFilters): SQL | undefined {
   );
 }
 
-/** 关键词召回：候选为包含任一较少见词项的切片，按 BM25 打分。只检索 ready 文档。 */
+/**
+ * 关键词召回：候选为包含任一较少见词项的切片，按 BM25 打分，只检索 ready 文档。
+ * 元数据（关键词、项目名称、负责人、承担单位）命中查询词项时按 IDF × 字段权重加分；
+ * 每篇文档只给得分最高的切片加一次，常见词项不参与加分，避免同一文档或泛化词挤掉正文相关的结果。
+ */
 export async function keywordSearchChunks(terms: string[], limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
   if (!terms.length) return [];
   const eligible = documentFilter(filters);
@@ -352,36 +372,71 @@ export async function keywordSearchChunks(terms: string[], limit: number, db: Ex
   if (!total) return [];
   // Term selection must use the filtered corpus too: globally rare terms may be absent
   // from the requested category while its eligible documents match another query term.
-  const { rows } = await db.execute<{ term: string; df: number }>(sql`SELECT term, (SELECT count(*)::int FROM ${documentChunks}
+  const { rows } = await db.execute<{ term: string; df: number; metadataDf: number }>(sql`SELECT term, (SELECT count(*)::int FROM ${documentChunks}
     INNER JOIN ${documents} ON ${documents.id} = ${documentChunks.documentId}
-    WHERE ${eligible} AND ${documentChunks.searchVector} @@ quote_literal(term)::tsquery) AS df FROM unnest(${textArray(terms)}) AS term`);
-  const weighted = rows.filter((row) => row.df > 0).map((row) => ({ term: row.term, df: row.df, idf: Math.log(1 + (total - row.df + 0.5) / (row.df + 0.5)) }))
-    .sort((a, b) => a.df - b.df);
-  if (!weighted.length) return [];
-  const rare = weighted.filter((row) => row.df <= Math.max(total * COMMON_TERM_RATIO, 50));
-  const filterTerms = (rare.length ? rare : weighted).slice(0, rare.length ? MAX_FILTER_TERMS : 3).map((row) => row.term);
+    WHERE ${eligible} AND ${documentChunks.searchVector} @@ quote_literal(term)::tsquery) AS df,
+    (SELECT count(*)::int FROM ${documents} WHERE ${eligible} AND ${documents.metadataSearchVector} @@ quote_literal(term)::tsquery) AS "metadataDf"
+    FROM unnest(${textArray(terms)}) AS term`);
+  const idf = (df: number) => Math.log(1 + Math.max(0, total - df + 0.5) / (df + 0.5));
+  const commonLimit = Math.max(total * COMMON_TERM_RATIO, 50);
+  const weighted = rows.filter((row) => row.df > 0).map((row) => ({ term: row.term, df: row.df, idf: idf(row.df) })).sort((a, b) => a.df - b.df);
+  // 元数据词项的文档频率取切片与元数据文档数中的较大者：只出现在元数据中的词项（如负责人姓名）也有合理的 IDF。
+  const metadataTerms = rows.filter((row) => row.metadataDf > 0).map((row) => ({ term: row.term, df: Math.max(row.df, row.metadataDf) }))
+    .filter((row) => row.df <= commonLimit).map((row) => ({ term: row.term, idf: idf(row.df) }));
+  if (!weighted.length && !metadataTerms.length) return [];
+
+  const searchMetadata = sql<SearchableMetadata | null>`jsonb_build_object('sourceMeta', jsonb_build_object('keywords', ${documents.metadata}->'sourceMeta'->'keywords'), 'projectMeta', ${documents.metadata}->'projectMeta')`;
   const weights = sql.join(weighted.map((row) => sql.raw(row.idf.toFixed(6))), sql`, `);
   const prescore = sql<number>`(SELECT coalesce(sum(q.weight), 0) FROM unnest(${textArray(weighted.map((row) => row.term))}, ARRAY[${weights}]::float8[]) AS q(term, weight) WHERE ${documentChunks.searchVector} @@ quote_literal(q.term)::tsquery)`;
-  const candidates = (await db.select({ ...chunkHitColumns, score: prescore }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
-    .where(and(eligible, sql`${documentChunks.searchVector} @@ ${tsqueryOf(filterTerms)}::tsquery`))
-    .orderBy(desc(prescore), asc(documentChunks.documentId), asc(documentChunks.chunkIndex)).limit(KEYWORD_CANDIDATES)).map(toChunkHit);
+  const candidates: (ChunkHit & { searchMetadata: SearchableMetadata | null })[] = [];
+  if (weighted.length) {
+    const rare = weighted.filter((row) => row.df <= commonLimit);
+    const filterTerms = (rare.length ? rare : weighted).slice(0, rare.length ? MAX_FILTER_TERMS : 3).map((row) => row.term);
+    const rows = await db.select({ ...chunkHitColumns, searchMetadata, score: prescore }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
+      .where(and(eligible, sql`${documentChunks.searchVector} @@ ${tsqueryOf(filterTerms)}::tsquery`))
+      .orderBy(desc(prescore), asc(documentChunks.documentId), asc(documentChunks.chunkIndex)).limit(KEYWORD_CANDIDATES);
+    candidates.push(...rows.map(({ searchMetadata, ...row }) => ({ ...toChunkHit(row), searchMetadata })));
+  }
+  const bodyCandidates = candidates.length;
+  if (metadataTerms.length) {
+    const metadataWeights = sql.join(metadataTerms.map((row) => sql.raw(row.idf.toFixed(6))), sql`, `);
+    const metadataPrescore = sql`(SELECT coalesce(sum(q.weight), 0) FROM unnest(${textArray(metadataTerms.map((row) => row.term))}, ARRAY[${metadataWeights}]::float8[]) AS q(term, weight) WHERE ${documents.metadataSearchVector} @@ quote_literal(q.term)::tsquery)`;
+    const matched = db.select({ id: documents.id }).from(documents)
+      .where(and(eligible, sql`${documents.metadataSearchVector} @@ ${tsqueryOf(metadataTerms.map((row) => row.term))}::tsquery`))
+      .orderBy(desc(metadataPrescore), asc(documents.id)).limit(METADATA_CANDIDATES);
+    const rows = await db.selectDistinctOn([documentChunks.documentId], { ...chunkHitColumns, searchMetadata, score: prescore })
+      .from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
+      .where(inArray(documentChunks.documentId, matched))
+      .orderBy(documentChunks.documentId, desc(prescore), asc(documentChunks.chunkIndex));
+    const seen = new Set(candidates.map((hit) => hit.chunkId));
+    for (const { searchMetadata, ...row } of rows) if (!seen.has(row.chunkId)) candidates.push({ ...toChunkHit(row), searchMetadata });
+  }
   if (!candidates.length) return [];
 
-  const counted = candidates.map((hit) => {
+  const counted = candidates.map(({ searchMetadata, ...hit }) => {
     const counts = termCounts(embeddingInput({ ...hit, id: hit.chunkId, index: 0, tokenEstimate: 0 }));
     let length = 0;
     for (const value of counts.values()) length += value;
-    return { hit, counts, length };
+    return { hit, counts, length, searchMetadata };
   });
-  const averageLength = counted.reduce((sum, item) => sum + item.length, 0) / counted.length || 1;
-  return counted.map(({ hit, counts, length }) => {
+  // 长度归一化只按正文候选计算，元数据候选不改变正文结果之间的相对得分。
+  const lengthBase = bodyCandidates ? counted.slice(0, bodyCandidates) : counted;
+  const averageLength = lengthBase.reduce((sum, item) => sum + item.length, 0) / lengthBase.length || 1;
+  const scored = counted.map(({ hit, counts, length, searchMetadata }) => {
     let score = 0;
     for (const { term, idf } of weighted) {
       const frequency = counts.get(term) ?? 0;
       if (frequency) score += idf * frequency * (BM25_K1 + 1) / (frequency + BM25_K1 * (1 - BM25_B + BM25_B * length / averageLength));
     }
-    return { ...hit, score };
-  }).sort((a, b) => b.score - a.score).slice(0, limit);
+    return { hit: { ...hit, score }, searchMetadata };
+  });
+  const best = new Map<string, (typeof scored)[number]>();
+  for (const item of scored) {
+    const current = best.get(item.hit.documentId);
+    if (!current || item.hit.score > current.hit.score) best.set(item.hit.documentId, item);
+  }
+  for (const item of best.values()) item.hit.score += metadataScore(item.searchMetadata, metadataTerms);
+  return scored.map((item) => item.hit).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 /** 向量召回：同模型/维度的 ready 文档，常用维度走 HNSW，过滤后不足时精确回退。得分为余弦相似度。 */

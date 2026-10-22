@@ -18,7 +18,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|bu
 - 测试均使用 Node 内置 test runner + tsx：`pnpm --filter @nyz-rag/processing test`、`pnpm --filter @nyz-rag/api test`（契约测试，用 Fastify inject 和注入的假队列，不需要数据库/Redis）、`pnpm --filter @nyz-rag/api-client test`。
 - 单个测试文件：`pnpm --filter @nyz-rag/processing exec tsx --test test/article.test.ts`（解析、切片、文章接口与增量同步）、`test/retrieval.test.ts`（检索词项、RRF/Rerank、Prompt 组装、Chat 流解析）或 `test/embedding.test.ts`；按名称过滤加 `--test-name-pattern "<名称>"`。
 - 集成测试 `test/pipeline.test.ts` 默认跳过；设置 `NYZ_INTEGRATION_TEST=1` 并提供 `DATABASE_URL`、`REDIS_URL` 启用。它用 tsx 直接拉起 API 和 Worker 源码，使用临时 PostgreSQL schema（连接串 `options=-c search_path=<schema>,public`，结束后删除）、唯一队列名和本地模拟 Embedding 服务。
-- 数据库（Drizzle）：修改 `packages/processing/src/schema.ts` 后运行 `pnpm db:generate` 生成迁移（会去掉外键里写死的 `"public".`，使表可建在任意 schema）；`pnpm db:migrate` 手动执行迁移（API/Worker 启动时也会自动执行）；`pnpm db:import-snapshot [路径]` 把旧 JSON 快照和 `document_vectors` 导入新表，可重复执行；`pnpm db:reindex-search` 按当前词项规则重建全部切片的关键词检索词项（修改 `search-terms.ts` 后执行）。
+- 数据库（Drizzle）：修改 `packages/processing/src/schema.ts` 后运行 `pnpm db:generate` 生成迁移（会去掉外键里写死的 `"public".`，使表可建在任意 schema）；`pnpm db:migrate` 手动执行迁移（API/Worker 启动时也会自动执行）；`pnpm db:import-snapshot [路径]` 把旧 JSON 快照和 `document_vectors` 导入新表，可重复执行；`pnpm db:reindex-search` 按当前词项规则重建全部切片与文档元数据的关键词检索词项（修改 `search-terms.ts` 后执行）。
 - 没有配置 lint。`turbo.json` 存在但根脚本未使用 Turborepo。
 - `@nyz-rag/processing` 通过 `dist/` 导出：单独启动/类型检查 API 或 Worker 前须先 `pnpm --filter @nyz-rag/processing build`，修改 processing 后也要重新构建。`@nyz-rag/types` 直接导出 `src/index.ts`，无需构建。
 - 容器方式：`docker compose up -d --build --wait`（只启动 api/worker/web/admin）。不要同时运行本机 Worker 和容器 Worker。
@@ -47,7 +47,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|bu
     - 结构化切片：同章节累积约 800 字，过短章节并入下一节，表格整块保留，超长段按句切分。
     - 文章只切正文章节；元信息、相关阅读、本文链接、延伸思考不进入 `content` 与切片，提取到 `documents.metadata`。
     - 每个切片的上下文前缀（标题/章节/关键词）存于 `document_chunks.context`，向量化输入为 `embeddingInput(chunk)`（前缀 + 正文）。
-  - `search-terms.ts`：关键词检索词项（NFKC 规范化、中文重叠二元组、英文/数字词），写入与查询共用。词项经 `array_to_tsvector` 存入 `document_chunks.search_vector`，不经过数据库分词器；`replaceDocumentChunks` 自动生成，升级前的切片由 Worker 启动时补齐。
+  - `search-terms.ts`：关键词检索词项（NFKC 规范化、中文重叠二元组、英文/数字词），写入与查询共用。词项经 `array_to_tsvector` 存入 `document_chunks.search_vector`，不经过数据库分词器；`replaceDocumentChunks` 自动生成，升级前的切片由 Worker 启动时补齐。文档元数据（关键词、项目名称、负责人、承担单位，见 `metadataSearchFields`）的词项存于 `documents.metadata_search_vector`，用于关键词检索加权：元数据命中的文档另行召回，每篇只给最佳切片加一次分（IDF × 字段权重），常见词项不加分。
   - `rag.ts`：混合检索与回答组装的纯逻辑（数据访问和模型调用由参数注入）；`repository.ts` 的 `keywordSearchChunks`（tsvector 预选 + 应用层 BM25）与 `vectorSearchChunks`（只比较同一模型与维度）提供两路召回。
   - `models.ts` / `provider.ts`：统一模型接口 `EmbeddingModel` / `ChatModel`（`streamChat`，SSE）/ `RerankModel`，基础地址追加 `/embeddings`、`/chat/completions`、`/rerank`；错误信息不含地址、密钥和响应正文。
   - `embedding.ts`：OpenAI 兼容 `/embeddings`，32 条一批。`selectEmbeddingProvider` 选唯一“启用 + 默认 + 有 embeddingModel”的 provider（数据库唯一索引保证最多一个默认）；provider 记录只保存密钥的**环境变量名**，运行时从 `process.env` 读取，密钥值不入库。

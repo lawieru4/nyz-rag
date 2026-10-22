@@ -43,6 +43,13 @@
       "when": 1792594068542,
       "tag": "0005_polite_azazel",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792658264685,
+      "tag": "0006_metadata_search_vector",
+      "breakpoints": true
     }
   ]
 }

@@ -68,6 +68,8 @@ export const documents = pgTable("documents", {
   contentHash: text(),
   parserVersion: integer(),
   metadata: jsonb().$type<ArticleMetadata>(),
+  // 元数据检索词项（关键词、项目名称、负责人、承担单位），规则与切片词项相同，用于关键词检索加权。
+  metadataSearchVector: tsvector().notNull().default(sql`''::tsvector`),
   status: text().$type<DocumentStatus>().notNull(),
   processingStatus: text().$type<DocumentProcessingStatus>().notNull().default("pending"),
   processingError: text(),
@@ -89,6 +91,7 @@ export const documents = pgTable("documents", {
   index("documents_category_idx").on(table.category),
   index("documents_tags_idx").using("gin", table.tags),
   index("documents_scenarios_idx").using("gin", sql`(${table.metadata}->'sourceMeta'->'scenarios')`),
+  index("documents_metadata_search_vector_idx").using("gin", table.metadataSearchVector),
   index("documents_status_idx").on(table.status),
   index("documents_updated_at_idx").on(table.updatedAt.desc()),
   check("documents_status_check", sql`${table.status} IN ('pending', 'processing', 'ready', 'failed')`),

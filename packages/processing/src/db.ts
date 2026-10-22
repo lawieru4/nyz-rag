@@ -6,7 +6,7 @@ import * as schema from "./schema.js";
 
 export type Database = NodePgDatabase<typeof schema>;
 /** 数据库或事务对象；需要多步一致性的 repository 函数接收事务内的执行器。 */
-export type Executor = Pick<Database, "select" | "insert" | "update" | "delete" | "execute">;
+export type Executor = Pick<Database, "select" | "selectDistinctOn" | "insert" | "update" | "delete" | "execute">;
 export type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 let pool: Pool | undefined;

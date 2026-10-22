@@ -1,0 +1,2 @@
+ALTER TABLE "documents" ADD COLUMN "metadata_search_vector" "tsvector" DEFAULT ''::tsvector NOT NULL;--> statement-breakpoint
+CREATE INDEX "documents_metadata_search_vector_idx" ON "documents" USING gin ("metadata_search_vector");
