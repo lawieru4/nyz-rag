@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import type {
-  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamEvent, ChatStreamRequest,
+  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamEvent, ChatStreamRequest, DocumentDetail, RetrievalFilters,
 } from "@nyz-rag/types";
 
 interface Turn {
@@ -30,7 +30,142 @@ const sessionId = ref<string | null>(null);
 const turns = ref<Turn[]>([]);
 const sessionError = ref("");
 const thread = ref<HTMLElement | null>(null);
+const article = ref<DocumentDetail | null>(null);
+const articleError = ref("");
+const articleLoading = ref(false);
+const articleId = ref<string | null>(null);
+const dateFrom = ref("");
+const dateTo = ref("");
+const categoriesText = ref("");
+const tagsText = ref("");
+const scenariosText = ref("");
 let controller: AbortController | null = null;
+let articleRequest = 0;
+
+const onArticlePage = computed(() => articleId.value !== null);
+const activeFilterCount = computed(() => [dateFrom.value, dateTo.value, categoriesText.value, tagsText.value, scenariosText.value].filter(Boolean).length);
+
+interface MarkdownBlock {
+  kind: "heading" | "paragraph" | "list" | "code" | "table";
+  level?: number;
+  rows?: string[][];
+  ordered?: boolean;
+  text?: string;
+  items?: string[];
+}
+
+function parseMarkdown(source: string): MarkdownBlock[] {
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const blocks: MarkdownBlock[] = [];
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (/^```/.test(line)) {
+      const code: string[] = [];
+      for (i++; i < lines.length && !/^```/.test(lines[i]); i++) code.push(lines[i]);
+      i++;
+      blocks.push({ kind: "code", text: code.join("\n") });
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+    if (heading) { blocks.push({ kind: "heading", level: heading[1].length, text: heading[2] }); i++; continue; }
+    if (line.includes("|") && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
+      const rows = [splitTableRow(line)];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|")) rows.push(splitTableRow(lines[i++]));
+      blocks.push({ kind: "table", rows });
+      continue;
+    }
+    const listMatch = line.match(/^\s*(?:([-*+])|(\d+)\.)\s+(.+)$/);
+    if (listMatch) {
+      const ordered = !!listMatch[2];
+      const items: string[] = [];
+      while (i < lines.length) {
+        const item = lines[i].match(/^\s*(?:([-*+])|(\d+)\.)\s+(.+)$/);
+        if (!item || !!item[2] !== ordered) break;
+        items.push(item[3]); i++;
+      }
+      blocks.push({ kind: "list", ordered, items });
+      continue;
+    }
+    const paragraph = [line.trim()]; i++;
+    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*(?:[-*+]\s|\d+\.\s))/.test(lines[i])) paragraph.push(lines[i++].trim());
+    blocks.push({ kind: "paragraph", text: paragraph.join(" ") });
+  }
+  return blocks;
+}
+
+function splitTableRow(line: string) { return line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim()); }
+
+function safeLink(value: string, allowMail = false): string | undefined {
+  try {
+    const url = new URL(value, location.href);
+    if (["http:", "https:", ...(allowMail ? ["mailto:"] : [])].includes(url.protocol)) return url.href;
+  } catch { /* Invalid links remain plain text. */ }
+}
+
+function inlineTokens(text: string) {
+  const tokens: Array<{ text: string; href?: string; strong?: boolean; code?: boolean }> = [];
+  const pattern = /\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)|\*\*(.+?)\*\*|`([^`]+)`/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index!;
+    if (index > cursor) tokens.push({ text: text.slice(cursor, index) });
+    if (match[1] !== undefined) {
+      const href = safeLink(match[2], true);
+      tokens.push(href ? { text: match[1], href } : { text: match[0] });
+    } else if (match[3] !== undefined) tokens.push({ text: match[3], strong: true });
+    else tokens.push({ text: match[4], code: true });
+    cursor = index + match[0].length;
+  }
+  if (cursor < text.length) tokens.push({ text: text.slice(cursor) });
+  return tokens;
+}
+
+const articleBlocks = computed(() => article.value ? parseMarkdown(article.value.markdown || article.value.content) : []);
+function documentHref(id: string) { return `#/documents/${encodeURIComponent(id)}`; }
+function listValues(text: string) { return [...new Set(text.split(",").map((value) => value.trim()).filter(Boolean))]; }
+function currentFilters(): RetrievalFilters | undefined {
+  const filters: RetrievalFilters = {};
+  if (dateFrom.value) filters.publishedFrom = dateFrom.value;
+  if (dateTo.value) filters.publishedTo = dateTo.value;
+  const categories = listValues(categoriesText.value); if (categories.length) filters.categories = categories;
+  const tags = listValues(tagsText.value); if (tags.length) filters.tags = tags;
+  const scenarios = listValues(scenariosText.value); if (scenarios.length) filters.scenarios = scenarios;
+  return Object.keys(filters).length ? filters : undefined;
+}
+
+function syncArticleRoute() {
+  const match = location.hash.match(/^#\/documents\/(.*)$/);
+  let id: string | null = null;
+  let invalid = false;
+  if (match) {
+    try { id = decodeURIComponent(match[1]); invalid = !id; } catch { id = ""; invalid = true; }
+  }
+  if (id === articleId.value) return;
+  articleRequest++;
+  articleLoading.value = false;
+  articleId.value = id;
+  article.value = null;
+  articleError.value = invalid ? "文章地址无效" : "";
+  if (id) void loadArticle(id);
+}
+
+async function loadArticle(id: string) {
+  const request = ++articleRequest;
+  articleLoading.value = true;
+  articleError.value = "";
+  try {
+    const data = await api<DocumentDetail>(`/api/documents/${encodeURIComponent(id)}`);
+    if (request === articleRequest && articleId.value === id) article.value = data;
+  } catch (error) {
+    if (request === articleRequest) articleError.value = error instanceof Error ? error.message : "文章加载失败";
+  } finally {
+    if (request === articleRequest) articleLoading.value = false;
+  }
+}
+
+function clearFilters() { dateFrom.value = ""; dateTo.value = ""; categoriesText.value = ""; tagsText.value = ""; scenariosText.value = ""; }
 
 const lastTurn = computed(() => turns.value.at(-1));
 
@@ -44,6 +179,8 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 onMounted(async () => {
+  window.addEventListener("hashchange", syncArticleRoute);
+  syncArticleRoute();
   void loadSessions();
   const saved = localStorage.getItem(SESSION_KEY);
   if (saved) void openSession(saved);
@@ -54,6 +191,8 @@ onMounted(async () => {
     lastUpdated.value = data.stats.lastUpdated;
   } catch { /* 状态面板保持默认值 */ }
 });
+
+onUnmounted(() => window.removeEventListener("hashchange", syncArticleRoute));
 
 async function loadSessions() {
   try {
@@ -137,7 +276,7 @@ async function stream(turn: Turn, request: ChatStreamRequest): Promise<boolean> 
       localStorage.setItem(SESSION_KEY, session.id);
     }
     const response = await fetch(`${apiBase}/api/chat/sessions/${sessionId.value}/stream`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal: controller.signal,
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...request, filters: currentFilters() }), signal: controller.signal,
     });
     if (!response.ok || !response.body) {
       const data = await response.json().catch(() => ({}));
@@ -172,14 +311,14 @@ async function ask() {
   question.value = "";
   turns.value.push({ question: value, answer: "", sources: [], rating: null });
   await scrollToEnd();
-  await stream(turns.value.at(-1)!, { question: value });
+  await stream(turns.value.at(-1)!, { question: value, filters: currentFilters() });
 }
 
 async function regenerate() {
   const turn = lastTurn.value;
   if (!turn || busy.value) return;
   const previous = { ...turn, sources: [...turn.sources] };
-  const request: ChatStreamRequest = turn.id ? { regenerate: turn.id } : { question: turn.question };
+  const request: ChatStreamRequest = turn.id ? { regenerate: turn.id, filters: currentFilters() } : { question: turn.question, filters: currentFilters() };
   Object.assign(turn, { answer: "", sources: [], rating: null, notice: undefined, copied: false, answerMode: undefined });
   // 重新生成失败时原回答仍在会话中，恢复显示。
   if (!await stream(turn, request) && previous.id) Object.assign(turn, previous, { notice: "重新生成未完成，已保留原回答。" });
@@ -226,11 +365,52 @@ function useSuggestion(text: string) {
 <template>
   <main class="shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="NYZ RAG 首页"><span class="brand-mark">N</span><span>NYZ <b>知识问答</b></span></a>
+      <a class="brand" href="#/" aria-label="NYZ RAG 首页"><span class="brand-mark">N</span><span>NYZ <b>知识问答</b></span></a>
       <div class="status"><span></span>文章知识库</div>
     </header>
 
-    <section class="workspace">
+    <section v-show="onArticlePage" class="public-article" aria-live="polite">
+      <a class="article-back" href="#/">← 返回知识问答</a>
+      <div v-if="articleLoading" class="article-state" role="status">正在加载文章…</div>
+      <div v-else-if="articleError" class="article-state article-error" role="alert">
+        <p>{{ articleError }}</p><button v-if="articleId" @click="loadArticle(articleId)">重试</button>
+      </div>
+      <article v-else-if="article" class="article-document">
+        <header class="article-header">
+          <p class="eyebrow">知识库文章</p>
+          <h1>{{ article.title }}</h1>
+          <p v-if="article.summary" class="article-summary">{{ article.summary }}</p>
+          <div class="article-meta">
+            <span v-if="article.author">{{ article.author }}</span>
+            <span v-if="article.category">{{ article.category }}</span>
+            <time v-if="article.publishedAt" :datetime="article.publishedAt">{{ new Date(article.publishedAt).toLocaleDateString() }}</time>
+            <span>更新于 {{ new Date(article.updatedAt).toLocaleDateString() }}</span>
+          </div>
+          <div v-if="article.tags.length || article.keywords.length || article.scenarios.length" class="article-taxonomy">
+            <div v-if="article.tags.length"><strong>标签</strong><span v-for="tag in article.tags" :key="`tag-${tag}`">{{ tag }}</span></div>
+            <div v-if="article.keywords.length"><strong>关键词</strong><span v-for="keyword in article.keywords" :key="`keyword-${keyword}`">{{ keyword }}</span></div>
+            <div v-if="article.scenarios.length"><strong>适用场景</strong><span v-for="scenario in article.scenarios" :key="`scenario-${scenario}`">{{ scenario }}</span></div>
+          </div>
+          <p v-if="article.repostSource" class="article-repost">转载自 {{ article.repostSource }}</p>
+        </header>
+        <div class="article-body">
+          <template v-for="(block, index) in articleBlocks" :key="index">
+            <component :is="`h${block.level}`" v-if="block.kind === 'heading'" class="markdown-heading">
+              <template v-for="(token, tokenIndex) in inlineTokens(block.text || '')" :key="tokenIndex"><a v-if="token.href" :href="token.href" target="_blank" rel="noopener noreferrer">{{ token.text }}</a><strong v-else-if="token.strong">{{ token.text }}</strong><code v-else-if="token.code">{{ token.text }}</code><template v-else>{{ token.text }}</template></template>
+            </component>
+            <p v-else-if="block.kind === 'paragraph'" class="markdown-paragraph">
+              <template v-for="(token, tokenIndex) in inlineTokens(block.text || '')" :key="tokenIndex"><a v-if="token.href" :href="token.href" target="_blank" rel="noopener noreferrer">{{ token.text }}</a><strong v-else-if="token.strong">{{ token.text }}</strong><code v-else-if="token.code">{{ token.text }}</code><template v-else>{{ token.text }}</template></template>
+            </p>
+            <component :is="block.ordered ? 'ol' : 'ul'" v-else-if="block.kind === 'list'" class="markdown-list"><li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li></component>
+            <pre v-else-if="block.kind === 'code'" class="markdown-code"><code>{{ block.text }}</code></pre>
+            <div v-else-if="block.kind === 'table'" class="markdown-table-wrap"><table><tbody><tr v-for="(row, rowIndex) in block.rows" :key="rowIndex"><template v-if="rowIndex === 0"><th v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</th></template><template v-else><td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td></template></tr></tbody></table></div>
+          </template>
+        </div>
+        <a v-if="safeLink(article.url)" class="original-article" :href="safeLink(article.url)" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>
+      </article>
+    </section>
+
+    <section v-show="!onArticlePage" class="workspace">
       <aside class="rail" aria-label="主导航">
         <button class="rail-button active" aria-label="问答" title="问答">✳</button>
         <button class="rail-button" aria-label="新会话" title="新会话" :disabled="busy" @click="newSession">＋</button>
@@ -255,7 +435,7 @@ function useSuggestion(text: string) {
               <div class="answer-heading"><span class="answer-icon">✳</span><div><strong>回答</strong><small>{{ turn.streaming ? (turn.answer ? '正在生成…' : '正在检索知识库…') : turn.answerMode === 'generated' ? '由模型依据知识库生成，[n] 对应引用来源' : turn.answerMode === 'extractive' ? '知识库原文摘录' : '' }}</small></div></div>
               <p v-if="turn.answer || turn.streaming" class="answer-text" :class="{ streaming: turn.streaming }">{{ turn.answer }}</p>
               <p v-if="turn.notice" class="answer-notice">{{ turn.notice }}</p>
-              <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="sources"><span>引用来源</span><a v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" :href="source.url" target="_blank" rel="noreferrer">[{{ sourceIndex + 1 }}] {{ source.title }}{{ source.repostSource ? `（转载自 ${source.repostSource}）` : '' }} ↗</a><span v-if="!turn.sources.length" class="empty-source">暂无匹配文章</span></div>
+              <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="sources"><span>引用来源</span><a v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" :href="documentHref(source.documentId)">[{{ sourceIndex + 1 }}] {{ source.title }}{{ source.repostSource ? `（转载自 ${source.repostSource}）` : '' }} ↗</a><span v-if="!turn.sources.length" class="empty-source">暂无匹配文章</span></div>
               <div v-if="!turn.streaming" class="answer-actions">
                 <button v-if="turn.answer" @click="copy(turn)">{{ turn.copied ? '已复制' : '复制' }}</button>
                 <button v-if="index === turns.length - 1" :disabled="busy" @click="regenerate">重新生成</button>
@@ -278,6 +458,19 @@ function useSuggestion(text: string) {
             <button v-else type="submit" :disabled="!question.trim()"><span>提问</span><b aria-hidden="true">↗</b></button>
           </div>
         </form>
+
+        <details class="retrieval-filters">
+          <summary>检索范围 <span v-if="activeFilterCount">{{ activeFilterCount }} 项已设置</span></summary>
+          <div class="filter-fields">
+            <label>发布日期自 <input v-model="dateFrom" type="date" aria-label="发布日期起始日期"></label>
+            <label>至 <input v-model="dateTo" type="date" aria-label="发布日期结束日期"></label>
+            <label>分类 <input v-model="categoriesText" type="text" placeholder="逗号分隔的精确值" aria-label="分类筛选"></label>
+            <label>标签 <input v-model="tagsText" type="text" placeholder="逗号分隔的精确值" aria-label="标签筛选"></label>
+            <label>场景 <input v-model="scenariosText" type="text" placeholder="逗号分隔的精确值" aria-label="场景筛选"></label>
+          </div>
+          <button v-if="activeFilterCount" type="button" class="clear-filters" @click="clearFilters">清除筛选</button>
+        </details>
+        <p v-if="activeFilterCount" class="filter-scope">本次提问及重新生成将按当前检索范围筛选。</p>
 
         <div v-if="!turns.length" class="suggestions">
           <p>试试这样提问</p>

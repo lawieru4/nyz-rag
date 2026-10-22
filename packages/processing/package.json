@@ -17,6 +17,7 @@
     "db:migrate": "tsx --env-file-if-exists=../../.env src/cli/migrate.ts",
     "db:import-snapshot": "tsx --env-file-if-exists=../../.env src/cli/import-snapshot.ts",
     "db:reindex-search": "tsx --env-file-if-exists=../../.env src/cli/reindex-search.ts",
+    "evaluate:retrieval": "tsx --env-file-if-exists=../../.env src/cli/evaluate-retrieval.ts",
     "db:generate": "drizzle-kit generate && node scripts/unqualify-migrations.mjs"
   },
   "dependencies": {

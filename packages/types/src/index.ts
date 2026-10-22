@@ -6,6 +6,7 @@ export interface ApiHealth {
 
 export interface ChatRequest {
   question: string;
+  filters?: RetrievalFilters;
   /** 使用的知识库配置；省略时使用最近创建的知识库，没有知识库时使用默认参数。 */
   knowledgeBaseId?: string;
 }
@@ -76,6 +77,22 @@ export interface ChatSessionMessagesResponse {
 export interface ChatStreamRequest {
   question?: string;
   regenerate?: string;
+  filters?: RetrievalFilters;
+}
+
+/** Exact OR within each list, AND across fields. Dates are inclusive UTC calendar days. */
+export interface RetrievalFilters {
+  publishedFrom?: string;
+  publishedTo?: string;
+  categories?: string[];
+  tags?: string[];
+  scenarios?: string[];
+  sourceId?: string;
+}
+
+export interface SearchRequest {
+  query: string;
+  filters?: RetrievalFilters;
 }
 
 /**
@@ -133,6 +150,24 @@ export interface DocumentRecord extends DocumentSummary {
   rawHtml?: string;
   metadata?: ArticleMetadata;
   chunks: DocumentChunkRecord[];
+}
+
+/** Public article view: no raw input, internal processing errors or model configuration. */
+export interface DocumentDetail {
+  id: string;
+  title: string;
+  url: string;
+  content: string;
+  markdown?: string;
+  author?: string;
+  category?: string;
+  tags: string[];
+  publishedAt?: string;
+  updatedAt: string;
+  summary?: string;
+  repostSource?: string;
+  keywords: string[];
+  scenarios: string[];
 }
 
 export interface DocumentChunkRecord {

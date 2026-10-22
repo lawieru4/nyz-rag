@@ -3,6 +3,7 @@ export { embedChunks, selectEmbeddingProvider } from "./embedding.js";
 export { hasProviderCredential } from "./provider.js";
 export * from "./models.js";
 export * from "./rag.js";
+export { parseRetrievalFilters } from "./retrieval-filters.js";
 export { normalizeSearchText, searchTerms } from "./search-terms.js";
 export * from "./chunking.js";
 export { articleDocumentUpdate, prepareDocument } from "./prepare.js";

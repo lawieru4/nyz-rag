@@ -62,6 +62,8 @@ pnpm dev
 - 管理后台：http://localhost:5176（另行运行 `pnpm --filter @nyz-rag/admin dev`）
 - API 健康检查：http://localhost:3001/health
 - API 问答入口：单次问答 `POST http://localhost:3001/api/chat`，JSON body 为 `{ "question": "..." }`；会话问答先 `POST /api/chat/sessions` 创建会话，再 `POST /api/chat/sessions/:id/stream` 以 SSE 流式返回（body 为 `{ "question": "..." }` 或 `{ "regenerate": "<messageId>" }`）
+- 文章详情：`GET /api/documents/:id` 仅返回已就绪文档的公开字段；用户端引用可打开 `/#/documents/:id`，保留问答页面状态。
+- 检索范围：搜索、单次问答与 SSE 请求均可附带 `filters`，例如 `{ "publishedFrom": "2026-01-01", "publishedTo": "2026-10-21", "categories": ["科研"], "tags": ["钠电"], "scenarios": ["储能"], "sourceId": "..." }`。日期按 UTC 整日包含首尾；各列表精确匹配、列表内 OR、字段间 AND，空列表不限制。筛选用于当前请求（重新生成亦使用当前筛选），不绑定或持久化到会话。
 
 网页采集、nyzdata 文章 API 增量同步、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通，用户端支持多轮会话、流式输出、停止生成、重新生成与复制回答；模块进度见 [模块清单](docs/module-status.md)。
 
@@ -70,6 +72,21 @@ API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器�
 接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 写在 `.env` 的 `NYZ_ARTICLE_TOKEN`，只有 Worker 读取。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200）。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
 
 元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。关键词检索的词项随切片生成；从旧版本升级时，Worker 启动会自动为已有切片补齐，修改词项规则后运行 `pnpm db:reindex-search` 全量重建。从旧版 JSON 快照升级时执行一次 `pnpm db:import-snapshot [快照绝对路径]`（默认读取 `NYZ_STORE_PATH` 或 `.nyz-data/knowledge.json`），会同时迁移旧 `document_vectors` 表中的向量；可重复执行，已存在的记录会跳过。确认无误后可由管理员删除 `document_vectors` 表。
+
+迁移 `0005` 为 384、512、768、1024、1536、2000 维向量建立 HNSW 部分表达式索引，其他维度继续精确检索（`vector` HNSW 上限为 2000 维）。HNSW 为近似召回，过滤后候选不足时自动精确回退。已有较大语料首次建索引会延长启动并阻塞切片写入，宜在维护窗口先运行 `pnpm db:migrate`；迁移连接不受普通查询的 10 秒超时限制。本轮只验证了索引执行路径和正确性，未作全量速度或召回率承诺。
+
+检索验证使用 `pnpm --filter @nyz-rag/processing test`。要运行数据库与 API/队列集成验证，在 PowerShell 中执行 `$env:NYZ_INTEGRATION_TEST='1'; pnpm --filter @nyz-rag/processing exec tsx --env-file-if-exists=../../.env --test test/*.test.ts`，测试使用临时 schema 和唯一队列，不消费业务队列，也不填充业务数据库。
+
+检索评估命令（仓库根目录执行）：
+
+```sh
+# 本地清洗样本上的词项重叠基线，逐条校验标注证据
+pnpm evaluate:retrieval --mode=offline
+# 已入库文章上的关键词检索基线，只读，不迁移或填充数据库
+pnpm evaluate:retrieval --mode=db
+```
+
+默认评估集为 `packages/processing/test/evaluation/retrieval-dataset.json`，包含 50 条文章衍生合成问题，不是真实用户问题，也未经过人工标注复核。离线模式默认读取 `.nyz-data/nyz-articles/clean`（样本未随仓库提交），可用 `--corpus=<清洗目录绝对路径>` 覆盖；数据库模式不依赖本地样本。支持 `--dataset=<JSON绝对路径>` 和 `--k=1,3,5,10`。结果为文章去重后的 Recall@K、MRR、线性增益 nDCG@K；数据库模式按就绪文档实际覆盖范围报告缺失标注数量，有缺失时返回非零退出码，不能将部分语料指标当完整基线。数据库候选为前 `max(20,K)` 个切片，再按文章去重，不代表全库文章级排序。这两种基线均不评估向量、Rerank 或回答质量，真实问题人工标注与混合检索评估仍待补充。
 
 ### 共享 Docker 服务（默认）
 

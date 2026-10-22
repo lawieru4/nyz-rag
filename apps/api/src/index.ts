@@ -4,14 +4,15 @@ import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import {
   closeDatabase, createKnowledgeBase, createModelProvider, createSource, createTask, deleteDocument, deleteModelProvider, getDocument, getDocumentSummary, getSource,
-  getStats, keywordSearchChunks, listChatMessages, listDocuments, listKnowledgeBases, listModelProviders, listSources, listTasks, migrate, searchTerms,
+  getStats, keywordSearchChunks, listChatMessages, listDocuments, listKnowledgeBases, listModelProviders, listSources, listTasks, migrate, parseRetrievalFilters, searchTerms,
   selectEmbeddingProvider, setEmbeddingState, setProcessingState, updateKnowledgeBase, updateModelProvider, updateSourceStatus,
 } from "@nyz-rag/processing";
 import type {
   ApiHealth, ChatLogListResponse, CreateSourceRequest, DocumentListResponse, DocumentSummary, KnowledgeOverview, SearchResult, SaveKnowledgeBaseRequest,
-  SaveModelProviderRequest, UpdateSourceStatusRequest,
+  RetrievalFilters, SaveModelProviderRequest, SearchRequest, UpdateSourceStatusRequest,
 } from "@nyz-rag/types";
 import { chatRoutes } from "./chat.js";
+import { documentRoutes } from "./documents.js";
 import { MAX_QUESTION_LENGTH, pageParams } from "./common.js";
 
 const app = Fastify({ logger: true });
@@ -50,6 +51,7 @@ function modelProviderError(input: SaveModelProviderRequest | undefined) {
 
 await app.register(cors, { origin: true });
 await app.register(chatRoutes);
+await app.register(documentRoutes);
 
 app.get<{ Reply: ApiHealth }>("/health", async () => ({
   status: "ok",
@@ -192,10 +194,14 @@ app.patch<{ Params: { id: string }; Body: UpdateSourceStatusRequest }>("/api/adm
 });
 
 // 只做关键词检索，不调用模型；每篇文章取得分最高的切片作为摘录。
-app.post<{ Body: { query?: string } }>("/api/search", async (request) => {
-  const query = request.body?.query?.trim().slice(0, MAX_QUESTION_LENGTH) ?? "";
+app.post<{ Body: SearchRequest }>("/api/search", async (request, reply) => {
+  if (typeof request.body?.query !== "string" || request.body.query.length > MAX_QUESTION_LENGTH) return reply.code(400).send({ error: "query must be a string of at most 2000 characters" });
+  const query = request.body.query.trim();
+  let filters: RetrievalFilters;
+  try { filters = parseRetrievalFilters(request.body.filters); }
+  catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
   const results: SearchResult[] = [];
-  for (const hit of await keywordSearchChunks(searchTerms(query).slice(0, 64), 100)) {
+  for (const hit of await keywordSearchChunks(searchTerms(query).slice(0, 64), 100, undefined, filters)) {
     if (results.length >= 20) break;
     if (results.some((result) => result.documentId === hit.documentId)) continue;
     results.push({ documentId: hit.documentId, title: hit.title, url: hit.url, excerpt: hit.content.slice(0, 160), score: hit.score });

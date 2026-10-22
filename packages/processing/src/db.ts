@@ -38,12 +38,15 @@ const MIGRATION_LOCK = 4_637_201;
 export async function migrate(): Promise<void> {
   const client = await getPool().connect();
   try {
+    // HNSW builds can exceed the normal 10s query budget on an existing corpus.
+    await client.query("SET statement_timeout = 0");
     await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK]);
     // 迁移记录表放在当前 schema，使临时 schema（集成测试）拥有独立的迁移历史。
     const { rows: [{ current }] } = await client.query<{ current: string }>("SELECT current_schema() AS current");
     await runMigrations(drizzle(client, { casing: "snake_case" }), { migrationsFolder, migrationsSchema: current, migrationsTable: "__drizzle_migrations" });
   } finally {
     await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK]).catch(() => undefined);
+    await client.query("RESET statement_timeout").catch(() => undefined);
     client.release();
   }
 }

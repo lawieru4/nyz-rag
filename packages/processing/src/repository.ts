@@ -7,11 +7,11 @@ import { searchTerms, termCounts } from "./search-terms.js";
 import type {
   ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
-  DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
-  KnowledgeStats, ModelProviderRecord, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
+  DocumentDetail, DocumentEmbeddingRecord, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
+  KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, withTransaction, type Executor } from "./db.js";
-import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, knowledgeBases, messageChunks, messageSources, modelProviders } from "./schema.js";
+import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -164,6 +164,18 @@ export async function getDocument(id: string, db: Executor = getDb()): Promise<D
   return compact<DocumentRecord>({
     ...toSummary(row), content: row.content, markdown: row.markdown, rawHtml: row.rawHtml, metadata: row.metadata, chunks: await listDocumentChunks(id, db),
   });
+}
+
+export async function getDocumentDetail(id: string, db: Executor = getDb()): Promise<DocumentDetail | null> {
+  const [row] = await db.select({
+    id: documents.id, title: documents.title, url: documents.url, content: documents.content, markdown: documents.markdown,
+    author: documents.author, category: documents.category, tags: documents.tags, publishedAt: documents.publishedAt,
+    updatedAt: documents.updatedAt, summary: sql<string | null>`${documents.metadata}->>'summary'`,
+    repostSource: sql<string | null>`${documents.metadata}->'sourceMeta'->>'repostSource'`,
+    keywords: sql<string[] | null>`${documents.metadata}->'sourceMeta'->'keywords'`,
+    scenarios: sql<string[] | null>`${documents.metadata}->'sourceMeta'->'scenarios'`,
+  }).from(documents).where(and(eq(documents.id, id), eq(documents.status, "ready")));
+  return row ? compact<DocumentDetail>({ ...row, publishedAt: iso(row.publishedAt), updatedAt: iso(row.updatedAt)!, keywords: row.keywords ?? [], scenarios: row.scenarios ?? [] }) : null;
 }
 
 /** 在事务内锁定文档行，用于切片和向量化回写前的一致性校验。 */
@@ -320,12 +332,29 @@ const BM25_B = 0.75;
 // 词项只含中文、小写字母、数字和小数点，可直接作为带引号的 tsquery 词位。
 const tsqueryOf = (terms: string[]) => terms.map((term) => `'${term}'`).join(" | ");
 
+function documentFilter(filters: RetrievalFilters): SQL | undefined {
+  return and(
+    eq(documents.status, "ready"),
+    filters.sourceId ? eq(documents.sourceId, filters.sourceId) : undefined,
+    filters.publishedFrom ? sql`${documents.publishedAt} >= ${`${filters.publishedFrom}T00:00:00Z`}::timestamptz` : undefined,
+    filters.publishedTo ? sql`${documents.publishedAt} < (${`${filters.publishedTo}T00:00:00Z`}::timestamptz + interval '24 hours')` : undefined,
+    filters.categories?.length ? sql`${documents.category} = ANY(${textArray(filters.categories)})` : undefined,
+    filters.tags?.length ? sql`${documents.tags} && ${textArray(filters.tags)}` : undefined,
+    filters.scenarios?.length ? sql`(${documents.metadata}->'sourceMeta'->'scenarios') ?| ${textArray(filters.scenarios)}` : undefined,
+  );
+}
+
 /** 关键词召回：候选为包含任一较少见词项的切片，按 BM25 打分。只检索 ready 文档。 */
-export async function keywordSearchChunks(terms: string[], limit: number, db: Executor = getDb()): Promise<ChunkHit[]> {
+export async function keywordSearchChunks(terms: string[], limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
   if (!terms.length) return [];
-  const [{ total }] = await db.select({ total: count() }).from(documentChunks);
+  const eligible = documentFilter(filters);
+  const [{ total }] = await db.select({ total: count() }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId)).where(eligible);
   if (!total) return [];
-  const { rows } = await db.execute<{ term: string; df: number }>(sql`SELECT term, (SELECT count(*)::int FROM ${documentChunks} WHERE ${documentChunks.searchVector} @@ quote_literal(term)::tsquery) AS df FROM unnest(${textArray(terms)}) AS term`);
+  // Term selection must use the filtered corpus too: globally rare terms may be absent
+  // from the requested category while its eligible documents match another query term.
+  const { rows } = await db.execute<{ term: string; df: number }>(sql`SELECT term, (SELECT count(*)::int FROM ${documentChunks}
+    INNER JOIN ${documents} ON ${documents.id} = ${documentChunks.documentId}
+    WHERE ${eligible} AND ${documentChunks.searchVector} @@ quote_literal(term)::tsquery) AS df FROM unnest(${textArray(terms)}) AS term`);
   const weighted = rows.filter((row) => row.df > 0).map((row) => ({ term: row.term, df: row.df, idf: Math.log(1 + (total - row.df + 0.5) / (row.df + 0.5)) }))
     .sort((a, b) => a.df - b.df);
   if (!weighted.length) return [];
@@ -334,7 +363,7 @@ export async function keywordSearchChunks(terms: string[], limit: number, db: Ex
   const weights = sql.join(weighted.map((row) => sql.raw(row.idf.toFixed(6))), sql`, `);
   const prescore = sql<number>`(SELECT coalesce(sum(q.weight), 0) FROM unnest(${textArray(weighted.map((row) => row.term))}, ARRAY[${weights}]::float8[]) AS q(term, weight) WHERE ${documentChunks.searchVector} @@ quote_literal(q.term)::tsquery)`;
   const candidates = (await db.select({ ...chunkHitColumns, score: prescore }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
-    .where(and(eq(documents.status, "ready"), sql`${documentChunks.searchVector} @@ ${tsqueryOf(filterTerms)}::tsquery`))
+    .where(and(eligible, sql`${documentChunks.searchVector} @@ ${tsqueryOf(filterTerms)}::tsquery`))
     .orderBy(desc(prescore), asc(documentChunks.documentId), asc(documentChunks.chunkIndex)).limit(KEYWORD_CANDIDATES)).map(toChunkHit);
   if (!candidates.length) return [];
 
@@ -355,12 +384,34 @@ export async function keywordSearchChunks(terms: string[], limit: number, db: Ex
   }).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-/** 向量召回：只比较同一 Embedding 模型与维度的切片，得分为余弦相似度。只检索 ready 文档。 */
-export async function vectorSearchChunks(vector: number[], model: string, limit: number, db: Executor = getDb()): Promise<ChunkHit[]> {
-  const distance = sql`${documentChunks.embedding} <=> ${`[${vector.join(",")}]`}::vector`;
+/** 向量召回：同模型/维度的 ready 文档，常用维度走 HNSW，过滤后不足时精确回退。得分为余弦相似度。 */
+export async function vectorSearchChunks(vector: number[], model: string, limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
+  if (!vector.length || vector.length > 16000 || vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0)) throw new Error("Invalid query vector");
+  const dimensions = vector.length;
+  const indexed = HNSW_DIMENSIONS.some((size) => size === dimensions);
+  const expression = indexed ? sql`${documentChunks.embedding}::vector(${sql.raw(String(dimensions))})` : sql`${documentChunks.embedding}`;
+  const queryVector = `[${vector.join(",")}]`;
+  const distance = sql`${expression} <=> ${queryVector}::vector`;
+  // Literal dimension matches the partial-index predicate, including generic prepared plans.
+  const where = and(documentFilter(filters), eq(documentChunks.model, model), sql`${documentChunks.dimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documentChunks.embedding));
   const hits = await db.select({ ...chunkHitColumns, score: sql<number>`1 - (${distance})` }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
-    .where(and(eq(documents.status, "ready"), eq(documentChunks.model, model), eq(documentChunks.dimensions, vector.length), isNotNull(documentChunks.embedding)))
+    .where(where)
     .orderBy(distance).limit(limit);
+  // ANN post-filtering (including model/status) can underfill. An exact filtered fallback
+  // preserves eligible results without requiring pgvector 0.8 iterative-scan settings.
+  if (indexed && hits.length < limit) {
+    const { rows } = await db.execute<Omit<ChunkHit, "repostSource"> & { repostSource: string | null } & Record<string, unknown>>(sql`
+      WITH eligible AS MATERIALIZED (
+        SELECT ${documentChunks.id} AS "chunkId", ${documentChunks.documentId} AS "documentId", ${documents.title} AS title,
+          ${documents.url} AS url, ${documents.metadata}->'sourceMeta'->>'repostSource' AS "repostSource",
+          ${documentChunks.content} AS content, ${documentChunks.context} AS context, ${documentChunks.sectionPath} AS "sectionPath",
+          ${documentChunks.contentType} AS "contentType", ${documentChunks.embedding} AS embedding
+        FROM ${documentChunks} INNER JOIN ${documents} ON ${documents.id} = ${documentChunks.documentId} WHERE ${where}
+      ) SELECT "chunkId", "documentId", title, url, "repostSource", content, context, "sectionPath", "contentType",
+        1 - (embedding <=> ${queryVector}::vector) AS score FROM eligible
+      ORDER BY embedding <=> ${queryVector}::vector, "chunkId" LIMIT ${limit}`);
+    return rows.map(toChunkHit);
+  }
   return hits.map(toChunkHit);
 }
 

@@ -17,6 +17,9 @@ const tsvector = customType<{ data: string; driverData: string }>({ dataType: ()
 
 const timestamptz = () => timestamp({ withTimezone: true });
 
+// vector HNSW supports at most 2000 dimensions; other sizes retain exact search.
+export const HNSW_DIMENSIONS = [384, 512, 768, 1024, 1536, 2000] as const;
+
 export const dataSources = pgTable("data_sources", {
   id: text().primaryKey(),
   name: text().notNull(),
@@ -83,6 +86,9 @@ export const documents = pgTable("documents", {
   unique("documents_source_id_url_key").on(table.sourceId, table.url),
   unique("documents_source_id_external_id_key").on(table.sourceId, table.externalId),
   index("documents_published_at_idx").on(table.publishedAt.desc()),
+  index("documents_category_idx").on(table.category),
+  index("documents_tags_idx").using("gin", table.tags),
+  index("documents_scenarios_idx").using("gin", sql`(${table.metadata}->'sourceMeta'->'scenarios')`),
   index("documents_status_idx").on(table.status),
   index("documents_updated_at_idx").on(table.updatedAt.desc()),
   check("documents_status_check", sql`${table.status} IN ('pending', 'processing', 'ready', 'failed')`),
@@ -111,6 +117,9 @@ export const documentChunks = pgTable("document_chunks", {
 }, (table) => [
   unique("document_chunks_document_id_chunk_index_key").on(table.documentId, table.chunkIndex),
   index("document_chunks_search_vector_idx").using("gin", table.searchVector),
+  ...HNSW_DIMENSIONS.map((dimensions) => index(`document_chunks_embedding_${dimensions}_hnsw_idx`)
+    .using("hnsw", sql`(${table.embedding}::vector(${sql.raw(String(dimensions))})) vector_cosine_ops`)
+    .where(sql`${table.dimensions} = ${sql.raw(String(dimensions))}`)),
   check("document_chunks_chunk_index_check", sql`${table.chunkIndex} >= 0`),
   check("document_chunks_content_type_check", sql`${table.contentType} IN ('text', 'table')`),
   check("document_chunks_embedding_check", sql`(${table.embedding} IS NULL) = (${table.dimensions} IS NULL)`),

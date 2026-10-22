@@ -271,6 +271,33 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.deepEqual(detail.tags, ["钠电"]);
     assert.equal(detail.chunks[0].sectionPath[0], "【结论】");
 
+    const publicDetail = await (await fetch(`${apiBase}/api/documents/${synced[0].id}`)).json();
+    assert.equal(publicDetail.title, "文章一");
+    assert.equal(publicDetail.repostSource, "测试公众号");
+    assert.deepEqual(publicDetail.tags, ["钠电"]);
+    assert.equal(publicDetail.rawHtml, undefined);
+    assert.equal(publicDetail.chunks, undefined);
+    assert.equal((await fetch(`${apiBase}/api/documents/not-found`)).status, 404);
+    await getPool().query("UPDATE documents SET status = 'failed' WHERE id = $1", [synced[0].id]);
+    assert.equal((await fetch(`${apiBase}/api/documents/${synced[0].id}`)).status, 404, "non-ready documents are not publicly readable");
+    await getPool().query("UPDATE documents SET status = 'ready' WHERE id = $1", [synced[0].id]);
+    for (const path of ["/api/search", "/api/chat"]) {
+      const invalid = await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: JSON.stringify({ query: "文章", question: "文章", filters: { publishedFrom: "2026-02-30" } }) });
+      assert.equal(invalid.status, 400);
+      const filtered = await (await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: JSON.stringify({ query: "文章", question: "文章", filters: { categories: ["not-present"] } }) })).json();
+      assert.deepEqual(path === "/api/search" ? filtered.results : filtered.sources, []);
+      const included = await (await fetch(`${apiBase}${path}`, { method: "POST", headers: json, body: JSON.stringify({ query: "文章一", question: "文章一", filters: { categories: ["科研"], tags: ["钠电"], sourceId: articleSource.id } }) })).json();
+      assert.ok((path === "/api/search" ? included.results : included.sources).some((hit: { documentId: string }) => hit.documentId === synced[0].id));
+    }
+    const filterSession = await (await fetch(`${apiBase}/api/chat/sessions`, { method: "POST", headers: json, body: "{}" })).json();
+    const filteredStream = await stream(filterSession.id, { question: "文章", filters: { tags: ["not-present"] } });
+    assert.deepEqual(filteredStream.map((item) => item.event), ["done"]);
+    const filteredRegenerate = await stream(filterSession.id, { regenerate: filteredStream[0].data.id, filters: { tags: ["not-present"] } });
+    assert.deepEqual(filteredRegenerate[0].data.sources, []);
+    assert.equal((await fetch(`${apiBase}/api/chat/sessions/${filterSession.id}/stream`, { method: "POST", headers: json, body: JSON.stringify({ question: "文章", filters: { tags: "invalid" } }) })).status, 400);
+    const includedStream = await stream(filterSession.id, { question: "文章一", filters: { tags: ["钠电"], sourceId: articleSource.id } });
+    assert.ok(includedStream.some((item) => item.event === "source" && item.data.documentId === synced[0].id));
+
     const articleChat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ question: "文章一的正文结论" }) })).json();
     assert.deepEqual(articleChat.sources.find((source: { title: string }) => source.title === "文章一"), { documentId: synced[0].id, title: "文章一", url: detail.url, repostSource: "测试公众号" });
 

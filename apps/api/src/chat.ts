@@ -3,12 +3,12 @@ import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import {
   buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, hasProviderCredential, HISTORY_TURNS, keywordSearchChunks,
-  listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
+  listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
   vectorSearchChunks, type AnswerContext, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
   ChatAnswerMode, ChatFeedbackRequest, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
-  ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord,
+  ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord, RetrievalFilters,
 } from "@nyz-rag/types";
 import { elapsed, MAX_QUESTION_LENGTH, pageParams } from "./common.js";
 
@@ -17,6 +17,7 @@ const HEARTBEAT_MS = 15_000;
 
 interface AnswerOptions {
   question: string;
+  filters?: RetrievalFilters;
   knowledgeBase: KnowledgeBaseRecord | null;
   history?: ChatTurn[];
   signal?: AbortSignal;
@@ -57,8 +58,8 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   const reranker = provider?.rerankModel.trim() ? createRerankModel(provider) : null;
 
   const { chunks, warnings } = await retrieve(question, settings, {
-    keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit),
-    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedding.embedQuery(text), embedding.model, limit) : undefined,
+    keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit, undefined, options.filters),
+    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedding.embedQuery(text), embedding.model, limit, undefined, options.filters) : undefined,
     rerank: reranker ? (query, documents, topN) => reranker.rerank(query, documents, topN) : undefined,
   });
   for (const warning of warnings) log.warn(warning);
@@ -111,14 +112,17 @@ async function saveAnswer(result: AnswerResult, input: { question: string; knowl
 export const chatRoutes: FastifyPluginAsync = async (app) => {
   // 单次问答：不属于会话，完整回答一次返回。
   app.post<{ Body: ChatRequest; Reply: ChatResponse }>("/api/chat", async (request, reply) => {
-    const question = request.body?.question?.trim();
+    const question = typeof request.body?.question === "string" ? request.body.question.trim() : undefined;
     const error = questionError(question);
     if (error) return reply.code(400).send({ error });
+    let filters: RetrievalFilters;
+    try { filters = parseRetrievalFilters(request.body.filters); }
+    catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
     const knowledgeBaseId = request.body.knowledgeBaseId;
     const knowledgeBase = await resolveKnowledgeBase(knowledgeBaseId);
     if (knowledgeBaseId && knowledgeBase?.id !== knowledgeBaseId) return reply.code(404).send({ error: "knowledge base not found" });
 
-    const result = await answerQuestion({ question: question!, knowledgeBase, log: request.log });
+    const result = await answerQuestion({ question: question!, knowledgeBase, filters, log: request.log });
     const { id: messageId } = await saveAnswer(result, { question: question!, knowledgeBase });
     return { messageId, answer: result.answer, answerMode: result.answerMode, sources: result.context.sources };
   });
@@ -150,6 +154,9 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
   // 流式问答（SSE）。问题可能较长，因此用 POST 而非 GET，客户端以 fetch 读取响应流。
   // 客户端断开时中止模型调用，不保存本轮问答。
   app.post<{ Params: { id: string }; Body: ChatStreamRequest }>("/api/chat/sessions/:id/stream", async (request, reply) => {
+    let filters: RetrievalFilters;
+    try { filters = parseRetrievalFilters(request.body?.filters); }
+    catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
     const session = await getChatSession(request.params.id);
     if (!session) return reply.code(404).send({ error: "session not found" });
     const { regenerate } = request.body ?? {};
@@ -163,7 +170,7 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
       question = last.question;
       history = messages.slice(0, -1);
     } else {
-      question = request.body?.question?.trim() ?? "";
+      question = typeof request.body?.question === "string" ? request.body.question.trim() : "";
       const error = questionError(question);
       if (error) return reply.code(400).send({ error });
       history = messages;
@@ -188,7 +195,7 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
 
     try {
       const result = await answerQuestion({
-        question, knowledgeBase, log: request.log, signal: controller.signal,
+        question, knowledgeBase, filters, log: request.log, signal: controller.signal,
         history: history.slice(-HISTORY_TURNS).map(({ question, answer }) => ({ question, answer })),
         onSources: (sources) => sources.forEach((source, index) => send({ event: "source", data: { ...source, citation: index + 1 } })),
         onToken: (content) => send({ event: "token", data: { content } }),

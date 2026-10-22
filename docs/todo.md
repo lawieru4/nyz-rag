@@ -66,20 +66,22 @@
 
 - [x] 在 `packages/processing` 定义统一 Provider 接口（`models.ts`）：`EmbeddingModel`（`embedDocuments` / `embedQuery`）、`ChatModel`（`streamChat`，解析 SSE 与 usage）、`RerankModel`（`rerank`，兼容 `results` / `output.results`）
 - [x] 模型配置补充温度、最大 Token；Chat / Rerank 模型接入运行时（均使用默认供应商）
-- [ ] 向量检索：已实现（`vectorSearchChunks`，按 Embedding 模型与维度过滤，余弦相似度，知识库阈值过滤）；按维度建立 HNSW 部分表达式索引（如 `((embedding::vector(1024))) WHERE dimensions = 1024`）或由知识库固定维度尚未做，当前为精确扫描
+- [x] 向量检索：`vectorSearchChunks` 按模型与维度过滤、余弦相似度与知识库阈值过滤；迁移 `0005` 为 384/512/768/1024/1536/2000 维建立 HNSW 部分表达式索引，查询使用匹配的定维转换。其他维度保留精确扫描；ANN 经模型/元数据过滤后不足候选数时回退到过滤后的精确检索。已用临时 schema 的 `EXPLAIN ANALYZE` 验证索引可用，尚未做全量性能基准
 - [x] 关键词检索：应用层生成重叠二元组，经 `array_to_tsvector` 写入 `document_chunks.search_vector`（GIN），不经过数据库分词器；按最少见的 8 个词项筛选候选、BM25 重排。实测 `text[]` + GIN 慢约 40 倍，未采用。`pg_trgm`、中文分词插件后续按评估集再评估
 - [x] 索引与查询统一做 NFKC 规范化（化学式上下标 `Na₀.₉` → `na0.9`），词项规则变化后运行 `pnpm db:reindex-search`
 - [ ] 摘要级向量：对文章摘要单独向量化，支持先召回文章、再召回切片
-- [ ] 元数据过滤：发布时间、分类、标签、场景（固定词表）参与过滤；关键词、机构、期刊、项目负责人用于关键词加权
+- [x] 元数据过滤：`/api/search`、`/api/chat` 与会话 SSE 接收 `filters`，支持发布时间（`publishedFrom` / `publishedTo`，UTC 日期，含首尾整日）、分类、标签、场景及数据源；同字段多值 OR、跨字段 AND，关键词和向量召回在候选截断前统一过滤，关键词词频统计同样限定检索范围
+- [ ] 元数据加权：关键词、机构、期刊、项目负责人用于关键词加权（不属于本轮过滤实现）
 - [x] 回答引用同时标注 nyzdata 文章与原始转载源（`sources[].repostSource`，来自 `metadata.sourceMeta`）
-- [ ] 建立 50 条以上带标注的真实问题评估集，作为切片与检索调整的回归基线
+- [x] 文章衍生的合成检索评估集：`packages/processing/test/evaluation/retrieval-dataset.json` 含 50 条问题、稳定文章 ID、相关性等级与证据摘录；`pnpm evaluate:retrieval` 提供离线及数据库关键词基线，输出 Recall@K、MRR、nDCG@K 和语料缺失统计。不代表真实用户或人工复核标注，不用于宣称混合检索质量
+- [ ] 建立 50 条以上带标注的真实问题评估集，作为切片与检索调整的回归基线；现有合成集仍需收集真实问题、人工复核并补充多文章及分级相关性标注
 - [x] 混合召回（向量/关键词各 20 条）、RRF 合并去重（前 30 条）、可选 Rerank，取知识库 `topK` 条送入模型；向量检索或 Rerank 失败时降级。问题改写未做
 - [x] Prompt 组装：知识库回答提示词 + 引用规则，参考资料按文章编号分组，按上下文最大长度截取
 - [x] 会话接口：`POST /api/chat/sessions`、`GET /api/chat/sessions`、`GET /api/chat/sessions/:id/messages`，另有 `DELETE /api/chat/sessions/:id`。会话尚无用户归属（随第五阶段用户登录处理）
 - [x] SSE 流式问答，事件 `source` / `token` / `done` / `error`。改为 `POST /api/chat/sessions/:id/stream`（问题最长 2000 字，放在 URL 中会超出 Nginx 默认请求头长度），支持 `regenerate` 重新生成最后一轮；追问带最近 3 轮历史，问题改写未做
 - [x] 记录引用来源（`message_sources`，含转载源）与召回片段（`message_chunks`：chunk、引用编号、RRF/向量/关键词/Rerank 得分、摘录），以及检索耗时、首 Token 耗时、总耗时与 Token 用量
 - [x] 用户端：流式输出、引用展示、重新生成、复制回答、停止生成、历史会话；管理端问答详情展示召回片段、耗时、所属会话与替换状态
-- [ ] `GET /api/documents/:id` 文章详情接口与用户端文章页
+- [x] `GET /api/documents/:id` 文章详情接口与用户端 `/#/documents/:id` 文章页：仅公开已就绪文档的正文和元数据，不返回原始输入、切片或内部错误；问答引用跳转、基础 Markdown 展示、转载来源、返回问答、加载/错误/重试状态及移动端布局。HTML 作为文本展示，链接限制安全协议
 
 ## 四、采集、清洗与切片
 
