@@ -1,12 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { Redis } from "ioredis";
 import type { AdminLoginRequest, AdminSession } from "@nyz-rag/types";
+import { cookieToken, createAuthStore, digest, type AuthStore } from "./auth-store.js";
 
 const COOKIE = "nyz_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_SECONDS = 15 * 60;
-const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
 export interface AdminAuthConfig {
   username: string;
@@ -15,13 +14,7 @@ export interface AdminAuthConfig {
   secureCookie: boolean;
 }
 
-export interface AdminAuthStore {
-  get(key: string): Promise<string | null>;
-  set(key: string, value: string, ttlSeconds: number): Promise<void>;
-  delete(key: string): Promise<void>;
-  increment(key: string, ttlSeconds: number): Promise<number>;
-  close(): Promise<void>;
-}
+export type AdminAuthStore = AuthStore;
 
 export function adminAuthConfig(): AdminAuthConfig {
   const origins = (process.env.ADMIN_ORIGINS ?? `http://localhost:${process.env.ADMIN_PORT ?? "5176"},http://127.0.0.1:${process.env.ADMIN_PORT ?? "5176"}`)
@@ -52,35 +45,9 @@ export function adminAuthConfig(): AdminAuthConfig {
   };
 }
 
-export function createAdminAuthStore(): AdminAuthStore {
-  const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", {
-    lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 3000, commandTimeout: 3000,
-  });
-  // Requests receive a sanitized 503; never print connection URLs or credentials.
-  redis.on("error", () => {});
-  const prefix = `${process.env.DOCUMENT_QUEUE_NAME ?? "nyz-rag-document-processing"}:admin-auth:`;
-  return {
-    get: (key) => redis.get(prefix + key),
-    async set(key, value, ttl) { await redis.set(prefix + key, value, "EX", ttl); },
-    async delete(key) { await redis.del(prefix + key); },
-    async increment(key, ttl) {
-      // INCR + expiry must be atomic across API replicas, including their first request.
-      return Number(await redis.eval(
-        "local n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]); end; return n",
-        1, prefix + key, ttl,
-      ));
-    },
-    async close() { redis.disconnect(); },
-  };
-}
+export const createAdminAuthStore = (): AuthStore => createAuthStore("admin-auth");
 
-function sessionToken(request: FastifyRequest): string | undefined {
-  const values = (request.headers.cookie ?? "").split(";").map((part) => part.trim())
-    .filter((part) => part.startsWith(`${COOKIE}=`));
-  if (values.length !== 1) return undefined;
-  const token = values[0]!.slice(COOKIE.length + 1);
-  return /^[a-f0-9]{64}$/.test(token) ? token : undefined;
-}
+const sessionToken = (request: FastifyRequest) => cookieToken(request, COOKIE);
 
 export function configureAdminAuth(app: FastifyInstance, config: AdminAuthConfig, store: AdminAuthStore, now = Date.now): void {
   const credentialVersion = digest(JSON.stringify([config.username, config.password]));

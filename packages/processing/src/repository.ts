@@ -6,13 +6,13 @@ import { contentFingerprint } from "./dedup.js";
 import type { ChunkHit } from "./rag.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
+  AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, withTransaction, type Executor } from "./db.js";
-import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders } from "./schema.js";
+import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -694,6 +694,100 @@ export async function deleteModelProvider(id: string, db: Executor = getDb()): P
   return (await db.delete(modelProviders).where(eq(modelProviders.id, id)).returning({ id: modelProviders.id })).length > 0;
 }
 
+// ---- 用户 ----
+
+/** 会话与问答的归属：已登录用户，或匿名访客（访客 Cookie 的 SHA-256）。 */
+export type ChatOwner = { userId: string; visitorHash?: undefined } | { visitorHash: string; userId?: undefined };
+
+const ownedBy = (table: typeof chatSessions | typeof chatMessages, owner: ChatOwner) =>
+  owner.userId !== undefined ? eq(table.userId, owner.userId) : eq(table.visitorHash, owner.visitorHash);
+const ownerValues = (owner: ChatOwner | undefined) => ({ userId: owner?.userId ?? null, visitorHash: owner?.visitorHash ?? null });
+
+/** 登录校验用的账号字段，含密码哈希，只在 API 内使用。 */
+export interface UserCredentials {
+  id: string;
+  email: string;
+  passwordHash: string;
+  sessionVersion: number;
+  disabled: boolean;
+  createdAt: string;
+}
+
+const credentialColumns = {
+  id: users.id, email: users.email, passwordHash: users.passwordHash, sessionVersion: users.sessionVersion, disabledAt: users.disabledAt, createdAt: users.createdAt,
+};
+type CredentialRow = { id: string; email: string; passwordHash: string; sessionVersion: number; disabledAt: Date | null; createdAt: Date };
+const toCredentials = ({ disabledAt, createdAt, ...row }: CredentialRow): UserCredentials => ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)! });
+
+/** email 须为小写规范形式。 */
+export async function getUserCredentials(by: { id: string } | { email: string }, db: Executor = getDb()): Promise<UserCredentials | null> {
+  const [row] = await db.select(credentialColumns).from(users).where("id" in by ? eq(users.id, by.id) : eq(users.email, by.email));
+  return row ? toCredentials(row) : null;
+}
+
+/** 创建账号；邮箱已注册时返回 null。 */
+export async function createUser(input: { email: string; passwordHash: string }, db: Executor = getDb()): Promise<UserCredentials | null> {
+  const [row] = await db.insert(users).values({ id: randomUUID(), email: input.email, passwordHash: input.passwordHash })
+    .onConflictDoNothing({ target: users.email }).returning(credentialColumns);
+  return row ? toCredentials(row) : null;
+}
+
+/** 修改密码并使该账号已签发的登录会话全部失效，返回新的会话版本；账号不存在时返回 null。 */
+export async function updateUserPassword(id: string, passwordHash: string, db: Executor = getDb()): Promise<number | null> {
+  const [row] = await db.update(users).set({ passwordHash, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: sql`now()` })
+    .where(eq(users.id, id)).returning({ sessionVersion: users.sessionVersion });
+  return row?.sessionVersion ?? null;
+}
+
+export async function recordUserLogin(id: string, db: Executor = getDb()): Promise<void> {
+  await db.update(users).set({ lastLoginAt: sql`now()` }).where(eq(users.id, id));
+}
+
+/**
+ * 把访客在本浏览器中的会话与问答归入账号（登录或注册时调用）。
+ * 与 createChatMessage 并发时，两者都先更新会话行：行锁保证新问答要么随后被一并认领，要么写入时已读到新的归属。
+ */
+export async function claimVisitorData(visitorHash: string, userId: string, db?: Executor): Promise<void> {
+  const claim = async (tx: Executor) => {
+    await tx.update(chatSessions).set({ userId, visitorHash: null }).where(eq(chatSessions.visitorHash, visitorHash));
+    await tx.update(chatMessages).set({ userId, visitorHash: null }).where(eq(chatMessages.visitorHash, visitorHash));
+  };
+  if (db) await claim(db);
+  else await withTransaction(claim);
+}
+
+const adminUserColumns = {
+  id: users.id, email: users.email, disabledAt: users.disabledAt, createdAt: users.createdAt, lastLoginAt: users.lastLoginAt,
+  sessionCount: sql<number>`(SELECT count(*)::int FROM ${chatSessions} WHERE ${chatSessions.userId} = ${outer("users", "id")})`,
+  messageCount: sql<number>`(SELECT count(*)::int FROM ${chatMessages} WHERE ${chatMessages.userId} = ${outer("users", "id")})`,
+};
+
+type AdminUserRow = { id: string; email: string; disabledAt: Date | null; createdAt: Date; lastLoginAt: Date | null; sessionCount: number; messageCount: number };
+const toAdminUser = ({ disabledAt, createdAt, lastLoginAt, ...row }: AdminUserRow): AdminUserRecord => compact<AdminUserRecord>({
+  ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, lastLoginAt: iso(lastLoginAt) ?? null,
+});
+
+export async function listUsers(filter: { query?: string; page: number; pageSize: number }, db: Executor = getDb()): Promise<AdminUserListResponse> {
+  const query = filter.query?.trim().toLocaleLowerCase();
+  const where = query ? contains(sql`${users.email}`, query) : undefined;
+  const { limit, offset } = paging(filter.page, filter.pageSize);
+  const [rows, [{ total }]] = await Promise.all([
+    db.select(adminUserColumns).from(users).where(where).orderBy(desc(users.createdAt), asc(users.id)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(users).where(where),
+  ]);
+  return { users: rows.map(toAdminUser), total };
+}
+
+/** 停用账号会使其登录会话立即失效；账号不存在时返回 null。 */
+export async function setUserDisabled(id: string, disabled: boolean, db: Executor = getDb()): Promise<AdminUserRecord | null> {
+  const updated = await db.update(users).set(disabled
+    ? { disabledAt: sql`COALESCE(${users.disabledAt}, now())`, sessionVersion: sql`${users.sessionVersion} + 1`, updatedAt: sql`now()` }
+    : { disabledAt: null, updatedAt: sql`now()` }).where(eq(users.id, id)).returning({ id: users.id });
+  if (!updated.length) return null;
+  const [row] = await db.select(adminUserColumns).from(users).where(eq(users.id, id));
+  return toAdminUser(row!);
+}
+
 // ---- 问答会话 ----
 
 const SESSION_TITLE_LENGTH = 40;
@@ -707,32 +801,35 @@ const sessionColumns = {
   messageCount: sql<number>`(SELECT count(*)::int FROM ${chatMessages} WHERE ${chatMessages.sessionId} = ${outer("chat_sessions", "id")} AND ${chatMessages.supersededAt} IS NULL)`,
 };
 
-const toChatSession = (row: typeof chatSessions.$inferSelect & { messageCount: number }): ChatSessionRecord => compact<ChatSessionRecord>({
+type SessionRow = typeof chatSessions.$inferSelect & { messageCount: number };
+const toChatSession = ({ userId: _userId, visitorHash: _visitorHash, ...row }: SessionRow): ChatSessionRecord => compact<ChatSessionRecord>({
   ...row, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!,
 });
 
-export async function createChatSession(input: { title?: string; knowledgeBaseId?: string }, db: Executor = getDb()): Promise<ChatSessionRecord> {
+export async function createChatSession(input: { title?: string; knowledgeBaseId?: string; owner: ChatOwner }, db: Executor = getDb()): Promise<ChatSessionRecord> {
   const id = randomUUID();
-  await db.insert(chatSessions).values({ id, title: sessionTitle(input.title ?? ""), knowledgeBaseId: input.knowledgeBaseId ?? null });
-  return (await getChatSession(id, db))!;
+  await db.insert(chatSessions).values({ id, title: sessionTitle(input.title ?? ""), knowledgeBaseId: input.knowledgeBaseId ?? null, ...ownerValues(input.owner) });
+  return (await getChatSession(id, input.owner, db))!;
 }
 
-export async function getChatSession(id: string, db: Executor = getDb()): Promise<ChatSessionRecord | null> {
-  const [row] = await db.select(sessionColumns).from(chatSessions).where(eq(chatSessions.id, id));
+/** 只返回属于 owner 的会话；他人的会话与不存在的会话一样返回 null。 */
+export async function getChatSession(id: string, owner: ChatOwner, db: Executor = getDb()): Promise<ChatSessionRecord | null> {
+  const [row] = await db.select(sessionColumns).from(chatSessions).where(and(eq(chatSessions.id, id), ownedBy(chatSessions, owner)));
   return row ? toChatSession(row) : null;
 }
 
-export async function listChatSessions(filter: { page: number; pageSize: number }, db: Executor = getDb()): Promise<ChatSessionListResponse> {
+export async function listChatSessions(filter: { page: number; pageSize: number }, owner: ChatOwner, db: Executor = getDb()): Promise<ChatSessionListResponse> {
   const { limit, offset } = paging(filter.page, filter.pageSize);
+  const where = ownedBy(chatSessions, owner);
   const [rows, [{ total }]] = await Promise.all([
-    db.select(sessionColumns).from(chatSessions).orderBy(desc(chatSessions.updatedAt), asc(chatSessions.id)).limit(limit).offset(offset),
-    db.select({ total: count() }).from(chatSessions),
+    db.select(sessionColumns).from(chatSessions).where(where).orderBy(desc(chatSessions.updatedAt), asc(chatSessions.id)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(chatSessions).where(where),
   ]);
   return { sessions: rows.map(toChatSession), total };
 }
 
-export async function deleteChatSession(id: string, db: Executor = getDb()): Promise<boolean> {
-  return (await db.delete(chatSessions).where(eq(chatSessions.id, id)).returning({ id: chatSessions.id })).length > 0;
+export async function deleteChatSession(id: string, owner: ChatOwner, db: Executor = getDb()): Promise<boolean> {
+  return (await db.delete(chatSessions).where(and(eq(chatSessions.id, id), ownedBy(chatSessions, owner))).returning({ id: chatSessions.id })).length > 0;
 }
 
 // ---- 问答记录 ----
@@ -752,17 +849,22 @@ const messageColumns = {
       'vectorScore', ${messageChunks.vectorScore}, 'keywordScore', ${messageChunks.keywordScore}, 'summaryScore', ${messageChunks.summaryScore},
       'rerankScore', ${messageChunks.rerankScore})) ORDER BY ${messageChunks.position})
     FROM ${messageChunks} WHERE ${messageChunks.messageId} = ${outer("chat_messages", "id")}), '[]')`,
+  userEmail: sql<string | null>`(SELECT ${users.email} FROM ${users} WHERE ${users.id} = ${outer("chat_messages", "user_id")})`,
 };
 
-type ChatLogRow = typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"]; chunks: ChatLogRecord["chunks"] };
-const toChatLog = ({ rating, ...row }: ChatLogRow): ChatLogRecord => ({
-  ...compact<Omit<ChatLogRecord, "rating">>({ ...row, supersededAt: iso(row.supersededAt), createdAt: iso(row.createdAt)! }), rating,
+type ChatLogRow = typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"]; chunks: ChatLogRecord["chunks"]; userEmail: string | null };
+const toChatLog = ({ rating, userId, visitorHash, ...row }: ChatLogRow): ChatLogRecord => ({
+  ...compact<Omit<ChatLogRecord, "rating" | "ownerType">>({ ...row, supersededAt: iso(row.supersededAt), createdAt: iso(row.createdAt)! }),
+  ownerType: userId ? "user" : visitorHash ? "visitor" : "none",
+  rating,
 });
 
-type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating" | "answerMode" | "chunks" | "supersededAt"> & {
+type NewChatMessage = Omit<ChatLogRecord, "createdAt" | "rating" | "answerMode" | "chunks" | "supersededAt" | "ownerType" | "userEmail"> & {
   answerMode?: ChatLogRecord["answerMode"]; chunks?: ChatRetrievedChunk[]; createdAt?: string; rating?: ChatFeedbackRating | null;
   /** 重新生成时被替换的消息；必须是同一会话中仍有效的消息。 */
   supersedes?: string;
+  /** 单次问答的提问者；会话中的问答始终跟随会话归属。省略时为无归属（旧快照导入）。 */
+  owner?: ChatOwner;
 };
 
 export class ChatConflictError extends Error {}
@@ -777,14 +879,17 @@ export async function createChatMessage(log: NewChatMessage, db?: Executor): Pro
         .returning({ id: chatMessages.id });
       if (!replaced.length) throw new ChatConflictError("The message has already been regenerated or removed.");
     }
+    let owner = ownerValues(log.owner);
     if (log.sessionId) {
-      const updated = await tx.update(chatSessions)
+      // 生成期间访客可能已登录、会话已归入账号，因此以会话当前的归属为准。
+      const [updated] = await tx.update(chatSessions)
         .set({ updatedAt: sql`now()`, title: sql`CASE WHEN ${chatSessions.title} = '' THEN ${sessionTitle(log.question)} ELSE ${chatSessions.title} END` })
-        .where(eq(chatSessions.id, log.sessionId)).returning({ id: chatSessions.id });
-      if (!updated.length) throw new ChatConflictError("The chat session has been deleted.");
+        .where(eq(chatSessions.id, log.sessionId)).returning({ userId: chatSessions.userId, visitorHash: chatSessions.visitorHash });
+      if (!updated) throw new ChatConflictError("The chat session has been deleted.");
+      owner = updated;
     }
     await tx.insert(chatMessages).values({
-      id: log.id, sessionId: log.sessionId ?? null, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
+      id: log.id, sessionId: log.sessionId ?? null, ...owner, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
       retrievalMs: log.retrievalMs ?? null, firstTokenMs: log.firstTokenMs ?? null, totalMs: log.totalMs ?? null, promptTokens: log.promptTokens ?? null,
       completionTokens: log.completionTokens ?? null, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined,
     });
@@ -811,6 +916,7 @@ export async function listChatMessages(filter: { query?: string; rating?: string
     query ? or(
       contains(sql`${chatMessages.question} || ' ' || ${chatMessages.answer}`, query),
       sql`EXISTS (SELECT 1 FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")} AND ${contains(sql`${messageSources.title}`, query)})`,
+      sql`EXISTS (SELECT 1 FROM ${users} WHERE ${users.id} = ${outer("chat_messages", "user_id")} AND ${contains(sql`${users.email}`, query)})`,
     ) : undefined,
     filter.rating === "rated" ? isNotNull(chatMessages.rating) : filter.rating === "unrated" ? isNull(chatMessages.rating) : undefined,
   );
@@ -831,6 +937,7 @@ export async function listSessionMessages(sessionId: string, db: Executor = getD
   return rows.map((row) => ({ ...row, createdAt: iso(row.createdAt)! }));
 }
 
-export async function rateChatMessage(id: string, rating: ChatFeedbackRating, db: Executor = getDb()): Promise<boolean> {
-  return (await db.update(chatMessages).set({ rating }).where(eq(chatMessages.id, id)).returning({ id: chatMessages.id })).length > 0;
+/** 只能评价自己的问答；他人的与不存在的问答一样返回 false。 */
+export async function rateChatMessage(id: string, rating: ChatFeedbackRating, owner: ChatOwner, db: Executor = getDb()): Promise<boolean> {
+  return (await db.update(chatMessages).set({ rating }).where(and(eq(chatMessages.id, id), ownedBy(chatMessages, owner))).returning({ id: chatMessages.id })).length > 0;
 }

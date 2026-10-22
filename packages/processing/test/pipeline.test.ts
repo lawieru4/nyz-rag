@@ -112,8 +112,24 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   const apiBase = `http://127.0.0.1:${apiPort}`;
   const adminPassword = randomBytes(24).toString("hex");
   let adminCookie = "";
+  // 用户端请求像浏览器一样保存访客/账号 Cookie；每个 browser() 是一个独立的浏览器。
+  const browser = () => {
+    const jar = new Map<string, string>();
+    return async (url: string, init: RequestInit = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set("x-nyz-client", "1");
+      if (jar.size) headers.set("cookie", [...jar].map(([name, value]) => `${name}=${value}`).join("; "));
+      const response = await globalThis.fetch(url, { ...init, headers });
+      for (const line of response.headers.getSetCookie()) {
+        const [name, value] = line.split(";")[0]!.split("=") as [string, string];
+        if (/Max-Age=0\b/.test(line)) jar.delete(name); else jar.set(name, value);
+      }
+      return response;
+    };
+  };
+  const visitorFetch = browser();
   const fetch = (url: string, init: RequestInit = {}) => {
-    if (!url.startsWith(`${apiBase}/api/admin/`)) return globalThis.fetch(url, init);
+    if (!url.startsWith(`${apiBase}/api/admin/`)) return visitorFetch(url, init);
     const headers = new Headers(init.headers);
     headers.set("x-nyz-admin", "1");
     if (adminCookie) headers.set("cookie", adminCookie);
@@ -128,6 +144,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
         ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), TEST_EMBEDDING_KEY: "integration-test-key", DOCUMENT_QUEUE_NAME: `test-${schema}`,
         NYZ_ARTICLE_TOKEN: articleToken, CRAWL_REQUEST_DELAY_MS: "1000",
         ADMIN_USERNAME: "admin", ADMIN_PASSWORD: adminPassword, ADMIN_COOKIE_SECURE: "false",
+        // 不发送真实邮件：开发模式下验证码写入 API 日志，由测试从输出中读取。
+        SMTP_HOST: "", USER_COOKIE_SECURE: "false",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -284,6 +302,47 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.deepEqual([sessions.total, sessions.sessions[0].messageCount], [1, 2]);
     const followUpLogs = await (await fetch(`${apiBase}/api/admin/chat-logs?query=${encodeURIComponent("第二段")}`)).json();
     assert.deepEqual(followUpLogs.logs.map((log: { sessionId: string; supersededAt?: string }) => [log.sessionId, Boolean(log.supersededAt)]), [[session.id, false], [session.id, true]]);
+    assert.deepEqual(followUpLogs.logs.map((log: { ownerType: string }) => log.ownerType), ["visitor", "visitor"]);
+
+    // 访问隔离：另一个浏览器看不到、改不了这个访客的会话与问答。
+    const stranger = browser();
+    assert.deepEqual(await (await stranger(`${apiBase}/api/chat/sessions`)).json(), { sessions: [], total: 0 });
+    assert.equal((await stranger(`${apiBase}/api/chat/sessions/${session.id}/messages`)).status, 404);
+    assert.equal((await stranger(`${apiBase}/api/chat/sessions/${session.id}/stream`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ question: "x" }) })).status, 404);
+    assert.equal((await stranger(`${apiBase}/api/chat/sessions/${session.id}`, { method: "DELETE" })).status, 404);
+    assert.equal((await stranger(`${apiBase}/api/messages/${chat.messageId}/feedback`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ rating: "negative" }) })).status, 404);
+    assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).status, 200, "the owner still has access");
+    // 历史数据（无归属）对任何用户都不可见。
+    const { rows: [legacy] } = await getPool().query("INSERT INTO chat_sessions (id, title) VALUES (gen_random_uuid()::text, 'legacy') RETURNING id");
+    assert.equal((await fetch(`${apiBase}/api/chat/sessions/${legacy.id}/messages`)).status, 404);
+
+    // 邮箱注册：本浏览器的访客会话与问答归入账号；退出后看不到，重新登录后恢复。
+    const email = `reader-${schema}@example.com`;
+    const userPassword = "integration password";
+    const mailCode = async () => {
+      await until(async () => output.includes(email) && /验证码为 \d{6}/.test(output.slice(output.lastIndexOf(email))));
+      return output.slice(output.lastIndexOf(email)).match(/验证码为 (\d{6})/)![1]!;
+    };
+    assert.equal((await fetch(`${apiBase}/api/auth/register/code`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ email }) })).status, 204);
+    const registered = await fetch(`${apiBase}/api/auth/register`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ email, code: await mailCode(), password: userPassword }) });
+    assert.equal(registered.status, 201);
+    const account = (await registered.json()).user;
+    const owners = await getPool().query("SELECT user_id, visitor_hash FROM chat_messages WHERE id = $1 OR session_id = $2", [chat.messageId, session.id]);
+    assert.ok(owners.rows.length >= 4 && owners.rows.every((row) => row.user_id === account.id && row.visitor_hash === null), "visitor data moves to the account");
+    assert.equal((await (await fetch(`${apiBase}/api/chat/sessions`)).json()).total, 1);
+    const userLogs = await (await fetch(`${apiBase}/api/admin/chat-logs?query=${encodeURIComponent(email)}`)).json();
+    assert.ok(userLogs.total >= 4 && userLogs.logs.every((log: { ownerType: string; userEmail: string }) => log.ownerType === "user" && log.userEmail === email));
+    assert.equal((await fetch(`${apiBase}/api/auth/logout`, { method: "POST" })).status, 204);
+    assert.equal((await (await fetch(`${apiBase}/api/chat/sessions`)).json()).total, 0, "after logout the browser is a new visitor");
+    const adminUsers = await (await fetch(`${apiBase}/api/admin/users?query=${encodeURIComponent(email)}`)).json();
+    assert.deepEqual(adminUsers.users.map((user: { id: string; sessionCount: number; disabled: boolean }) => [user.id, user.sessionCount, user.disabled]), [[account.id, 1, false]]);
+    assert.equal((await fetch(`${apiBase}/api/admin/users/${account.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ disabled: true }) })).status, 200);
+    const userLogin = (credentials: object) => fetch(`${apiBase}/api/auth/login`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(credentials) });
+    assert.equal((await userLogin({ email, password: userPassword })).status, 403);
+    assert.equal((await fetch(`${apiBase}/api/admin/users/${account.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ disabled: false }) })).status, 200);
+    assert.equal((await userLogin({ email: email.toUpperCase(), password: userPassword })).status, 200);
+    assert.equal((await (await fetch(`${apiBase}/api/auth/session`)).json()).user.email, email);
+    assert.equal((await (await fetch(`${apiBase}/api/chat/sessions`)).json()).total, 1);
     const slow = new AbortController();
     const slowResponse = await fetch(`${apiBase}/api/chat/sessions/${session.id}/stream`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "slow question" }), signal: slow.signal });
     const reader = slowResponse.body!.getReader();
@@ -401,6 +460,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
 
     assert.doesNotMatch(output, new RegExp(articleToken));
     assert.doesNotMatch(output, new RegExp(adminPassword));
+    assert.doesNotMatch(output, /integration password/);
     assert.equal((await fetch(`${apiBase}/api/admin/auth/logout`, { method: "POST" })).status, 204);
     assert.equal((await fetch(`${apiBase}/api/admin/documents`)).status, 401);
   } finally {

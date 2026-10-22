@@ -183,19 +183,47 @@ export const modelProviders = pgTable("model_providers", {
   check("model_providers_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
 ]);
 
+// 用户端账号：邮箱经验证码验证后才创建，email 存小写形式。
+export const users = pgTable("users", {
+  id: text().primaryKey(),
+  email: text().notNull(),
+  passwordHash: text().notNull(),
+  // 修改/重置密码或停用时加一，使已签发的登录会话全部失效。
+  sessionVersion: integer().notNull().default(0),
+  disabledAt: timestamptz(),
+  lastLoginAt: timestamptz(),
+  createdAt: timestamptz().notNull().defaultNow(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("users_email_idx").on(table.email),
+  index("users_created_at_idx").on(table.createdAt.desc()),
+]);
+
+// 会话与问答的归属：注册用户（user_id）或匿名访客（visitor_hash，访客 Cookie 的 SHA-256），二者至多其一；
+// 都为空的是用户体系上线前的历史数据，只在管理端可见。
 export const chatSessions = pgTable("chat_sessions", {
   id: text().primaryKey(),
   title: text().notNull().default(""),
   // 知识库可能被删除，不设外键；删除后回退到最近创建的知识库。
   knowledgeBaseId: text(),
+  userId: text().references(() => users.id, { onDelete: "cascade" }),
+  visitorHash: text(),
   createdAt: timestamptz().notNull().defaultNow(),
   updatedAt: timestamptz().notNull().defaultNow(),
-}, (table) => [index("chat_sessions_updated_at_idx").on(table.updatedAt.desc())]);
+}, (table) => [
+  index("chat_sessions_updated_at_idx").on(table.updatedAt.desc()),
+  index("chat_sessions_user_id_idx").on(table.userId, table.updatedAt.desc()).where(sql`${table.userId} IS NOT NULL`),
+  index("chat_sessions_visitor_hash_idx").on(table.visitorHash, table.updatedAt.desc()).where(sql`${table.visitorHash} IS NOT NULL`),
+  check("chat_sessions_single_owner_check", sql`${table.userId} IS NULL OR ${table.visitorHash} IS NULL`),
+]);
 
 export const chatMessages = pgTable("chat_messages", {
   id: text().primaryKey(),
   // 早期单次问答没有会话。
   sessionId: text().references(() => chatSessions.id, { onDelete: "cascade" }),
+  // 与所属会话一致（单次问答取提问者），用于反馈归属校验；账号删除后保留问答记录。
+  userId: text().references(() => users.id, { onDelete: "set null" }),
+  visitorHash: text(),
   // 被重新生成替换的回答不再出现在会话中。
   supersededAt: timestamptz(),
   question: text().notNull(),
@@ -214,6 +242,9 @@ export const chatMessages = pgTable("chat_messages", {
 }, (table) => [
   index("chat_messages_created_at_idx").on(table.createdAt.desc()),
   index("chat_messages_session_id_idx").on(table.sessionId, table.createdAt),
+  index("chat_messages_user_id_idx").on(table.userId).where(sql`${table.userId} IS NOT NULL`),
+  index("chat_messages_visitor_hash_idx").on(table.visitorHash).where(sql`${table.visitorHash} IS NOT NULL`),
+  check("chat_messages_single_owner_check", sql`${table.userId} IS NULL OR ${table.visitorHash} IS NULL`),
   check("chat_messages_rating_check", sql`${table.rating} IN ('positive', 'negative')`),
   check("chat_messages_answer_mode_check", sql`${table.answerMode} IN ('generated', 'extractive')`),
 ]);

@@ -8,6 +8,64 @@ export interface AdminSession {
   expiresAt: string;
 }
 
+/** 用户端账号（邮箱注册）。未登录访客由浏览器 Cookie 识别，没有账号记录。 */
+export interface UserAccount {
+  id: string;
+  email: string;
+  createdAt: string;
+}
+
+/** 当前浏览器的身份：已登录时为账号，否则为匿名访客（user 为 null）。 */
+export interface UserSessionResponse {
+  user: UserAccount | null;
+}
+
+/** 发送注册或重置密码的邮件验证码。 */
+export interface EmailCodeRequest {
+  email: string;
+}
+
+export interface RegisterRequest {
+  email: string;
+  code: string;
+  password: string;
+}
+
+export interface UserLoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface ResetPasswordRequest {
+  email: string;
+  code: string;
+  password: string;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  password: string;
+}
+
+export interface AdminUserRecord {
+  id: string;
+  email: string;
+  disabled: boolean;
+  sessionCount: number;
+  messageCount: number;
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface AdminUserListResponse {
+  users: AdminUserRecord[];
+  total: number;
+}
+
+export interface UpdateUserRequest {
+  disabled: boolean;
+}
+
 export interface ApiHealth {
   status: "ok";
   service: "nyz-rag-api";
@@ -384,9 +442,15 @@ export interface ChatRetrievedChunk {
   rerankScore?: number;
 }
 
+/** 问答归属：注册用户、匿名访客，或用户体系上线前没有归属的历史记录。 */
+export type ChatOwnerType = "user" | "visitor" | "none";
+
 export interface ChatLogRecord {
   id: string;
   sessionId?: string;
+  ownerType: ChatOwnerType;
+  /** ownerType 为 user 时的账号邮箱。 */
+  userEmail?: string;
   /** 被“重新生成”替换的时间；替换后不再出现在会话中，但保留在问答记录里。 */
   supersededAt?: string;
   question: string;

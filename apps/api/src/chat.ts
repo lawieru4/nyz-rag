@@ -4,13 +4,14 @@ import {
   buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, hasProviderCredential, HISTORY_TURNS, keywordSearchChunks,
   listChatMessages, listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
-  summarySearchChunks, vectorSearchChunks, type AnswerContext, type ChatTurn,
+  summarySearchChunks, vectorSearchChunks, type AnswerContext, type ChatOwner, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
   ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
   ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord, RetrievalFilters,
 } from "@nyz-rag/types";
 import { elapsed, MAX_QUESTION_LENGTH, pageParams } from "./common.js";
+import { requestOwner } from "./user-auth.js";
 
 // SSE 心跳间隔，避免检索或等待首 Token 期间被代理（Nginx 默认 60 秒）断开。
 const HEARTBEAT_MS = 15_000;
@@ -105,11 +106,11 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   return { answer, answerMode, context, usage, retrievalMs, totalMs: elapsed(started) };
 }
 
-async function saveAnswer(result: AnswerResult, input: { question: string; knowledgeBase: KnowledgeBaseRecord | null; sessionId?: string; supersedes?: string }) {
+async function saveAnswer(result: AnswerResult, input: { question: string; knowledgeBase: KnowledgeBaseRecord | null; owner: ChatOwner; sessionId?: string; supersedes?: string }) {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   await createChatMessage({
-    id, createdAt, sessionId: input.sessionId, supersedes: input.supersedes, question: input.question, answer: result.answer, answerMode: result.answerMode,
+    id, createdAt, owner: input.owner, sessionId: input.sessionId, supersedes: input.supersedes, question: input.question, answer: result.answer, answerMode: result.answerMode,
     knowledgeBaseId: input.knowledgeBase?.id, ...result.usage, retrievalMs: result.retrievalMs, totalMs: result.totalMs,
     sources: result.context.sources, chunks: retrievedChunkRecords(result.context),
   });
@@ -135,31 +136,31 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
     if (knowledgeBaseId && knowledgeBase?.id !== knowledgeBaseId) return reply.code(404).send({ error: "knowledge base not found" });
 
     const result = await answerQuestion({ question: question!, knowledgeBase, filters, log: request.log });
-    const { id: messageId } = await saveAnswer(result, { question: question!, knowledgeBase });
+    const { id: messageId } = await saveAnswer(result, { question: question!, knowledgeBase, owner: requestOwner(request) });
     return { messageId, answer: result.answer, answerMode: result.answerMode, sources: result.context.sources };
   });
 
-  // 尚无用户体系，会话对所有访问者可见。
+  // 会话只对其归属者（登录账号或本浏览器的访客）可见；他人的会话与不存在的会话一样返回 404。
   app.get<{ Querystring: { page?: string; pageSize?: string } }>("/api/chat/sessions", async (request): Promise<ChatSessionListResponse> => {
     const { page = "1", pageSize = "20" } = request.query;
-    return listChatSessions(pageParams(page, pageSize));
+    return listChatSessions(pageParams(page, pageSize), requestOwner(request));
   });
 
   app.post<{ Body: CreateChatSessionRequest }>("/api/chat/sessions", async (request, reply): Promise<ChatSessionRecord> => {
     const { title = "", knowledgeBaseId } = request.body ?? {};
     if (typeof title !== "string") return reply.code(400).send({ error: "title must be a string" });
     if (knowledgeBaseId !== undefined && !await getKnowledgeBase(knowledgeBaseId)) return reply.code(404).send({ error: "knowledge base not found" });
-    return reply.code(201).send(await createChatSession({ title, knowledgeBaseId }));
+    return reply.code(201).send(await createChatSession({ title, knowledgeBaseId, owner: requestOwner(request) }));
   });
 
   app.get<{ Params: { id: string } }>("/api/chat/sessions/:id/messages", async (request, reply): Promise<ChatSessionMessagesResponse> => {
-    const session = await getChatSession(request.params.id);
+    const session = await getChatSession(request.params.id, requestOwner(request));
     if (!session) return reply.code(404).send({ error: "session not found" });
     return { session, messages: await listSessionMessages(session.id) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/chat/sessions/:id", async (request, reply) => {
-    if (!await deleteChatSession(request.params.id)) return reply.code(404).send({ error: "session not found" });
+    if (!await deleteChatSession(request.params.id, requestOwner(request))) return reply.code(404).send({ error: "session not found" });
     return reply.code(204).send();
   });
 
@@ -169,7 +170,8 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
     let filters: RetrievalFilters;
     try { filters = parseRetrievalFilters(request.body?.filters); }
     catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
-    const session = await getChatSession(request.params.id);
+    const owner = requestOwner(request);
+    const session = await getChatSession(request.params.id, owner);
     if (!session) return reply.code(404).send({ error: "session not found" });
     const { regenerate } = request.body ?? {};
     const messages = await listSessionMessages(session.id);
@@ -216,7 +218,7 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
         request.log.info("Client disconnected; the answer was discarded");
         return;
       }
-      const { id, createdAt } = await saveAnswer(result, { question, knowledgeBase, sessionId: session.id, supersedes: regenerate });
+      const { id, createdAt } = await saveAnswer(result, { question, knowledgeBase, owner, sessionId: session.id, supersedes: regenerate });
       send({ event: "done", data: { id, question, answer: result.answer, answerMode: result.answerMode, sources: result.context.sources, rating: null, createdAt } });
     } catch (error) {
       request.log.error(error);
@@ -230,7 +232,8 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
   app.post<{ Params: { id: string }; Body: ChatFeedbackRequest }>("/api/messages/:id/feedback", async (request, reply) => {
     const { rating } = request.body ?? {};
     if (rating !== "positive" && rating !== "negative") return reply.code(400).send({ error: "rating must be positive or negative" });
-    if (!await rateChatMessage(request.params.id, rating)) return reply.code(404).send({ error: "message not found" });
+    // 只能评价自己的问答。
+    if (!await rateChatMessage(request.params.id, rating, requestOwner(request))) return reply.code(404).send({ error: "message not found" });
     return reply.code(204).send();
   });
 };

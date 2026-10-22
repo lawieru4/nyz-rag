@@ -2,8 +2,10 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import type {
   ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamRequest, DocumentDetail, RetrievalFilters,
+  UserAccount, UserSessionResponse,
 } from "@nyz-rag/types";
-import { createApiClient } from "@nyz-rag/api-client";
+import AccountDialog, { type AccountMode } from "./AccountDialog.vue";
+import { client } from "./webClient";
 
 interface Turn {
   id?: string;
@@ -20,7 +22,10 @@ interface Turn {
 }
 
 const SESSION_KEY = "nyz-rag:session";
-const client = createApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
+const user = ref<UserAccount | null>(null);
+const accountMode = ref<AccountMode | null>(null);
+const accountMenuOpen = ref(false);
+const accountNotice = ref("");
 const question = ref("");
 const busy = ref(false);
 const sourcesCount = ref(0);
@@ -176,7 +181,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 onMounted(async () => {
   window.addEventListener("hashchange", syncArticleRoute);
+  document.addEventListener("click", closeAccountMenu);
   syncArticleRoute();
+  // 会话按身份隔离：先确定身份（同时取得访客 Cookie），再加载历史会话，避免并发请求各自分配访客身份。
+  try { user.value = (await api<UserSessionResponse>("/api/auth/session")).user; } catch { /* 按访客继续 */ }
   void loadSessions();
   const saved = localStorage.getItem(SESSION_KEY);
   if (saved) void openSession(saved);
@@ -188,7 +196,14 @@ onMounted(async () => {
   } catch { /* 状态面板保持默认值 */ }
 });
 
-onUnmounted(() => window.removeEventListener("hashchange", syncArticleRoute));
+onUnmounted(() => {
+  window.removeEventListener("hashchange", syncArticleRoute);
+  document.removeEventListener("click", closeAccountMenu);
+});
+
+function closeAccountMenu(event: MouseEvent) {
+  if (!(event.target instanceof Element && event.target.closest(".account-menu"))) accountMenuOpen.value = false;
+}
 
 async function loadSessions() {
   try {
@@ -217,6 +232,41 @@ function newSession() {
   sessionId.value = null;
   turns.value = [];
   localStorage.removeItem(SESSION_KEY);
+}
+
+function openAccount(mode: AccountMode) {
+  accountMenuOpen.value = false;
+  accountNotice.value = "";
+  accountMode.value = mode;
+}
+
+/** 登录、注册或重置密码成功：本浏览器的访客会话已归入账号，当前会话保持打开。 */
+function onAuthenticated(account: UserAccount) {
+  user.value = account;
+  accountMode.value = null;
+  sessionError.value = "";
+  void loadSessions();
+}
+
+function onPasswordChanged() {
+  accountMode.value = null;
+  accountNotice.value = "密码已修改，其他设备上的登录已失效。";
+}
+
+async function logout() {
+  accountMenuOpen.value = false;
+  if (busy.value) return;
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch (error) {
+    alert(error instanceof Error ? error.message : "退出失败");
+    return;
+  }
+  // 退出后浏览器成为新的访客，账号中的会话不再可见。
+  user.value = null;
+  newSession();
+  sessions.value = [];
+  void loadSessions();
 }
 
 async function removeSession(id: string) {
@@ -339,8 +389,20 @@ function useSuggestion(text: string) {
   <main class="shell">
     <header class="topbar">
       <a class="brand" href="#/" aria-label="NYZ RAG 首页"><span class="brand-mark">N</span><span>NYZ <b>知识问答</b></span></a>
-      <div class="status"><span></span>文章知识库</div>
+      <div class="topbar-actions">
+        <div class="status"><span></span>文章知识库</div>
+        <div v-if="user" class="account-menu">
+          <button class="account-trigger" :aria-expanded="accountMenuOpen" aria-haspopup="menu" @click="accountMenuOpen = !accountMenuOpen"><span class="account-avatar">{{ user.email.slice(0, 1).toUpperCase() }}</span><span class="account-email">{{ user.email }}</span></button>
+          <div v-if="accountMenuOpen" class="account-dropdown" role="menu">
+            <button role="menuitem" @click="openAccount('password')">修改密码</button>
+            <button role="menuitem" :disabled="busy" @click="logout">退出登录</button>
+          </div>
+        </div>
+        <button v-else class="account-login" @click="openAccount('login')">登录 / 注册</button>
+      </div>
     </header>
+    <p v-if="accountNotice" class="account-notice" role="status">{{ accountNotice }}<button aria-label="关闭提示" @click="accountNotice = ''">×</button></p>
+    <AccountDialog v-if="accountMode" v-model:mode="accountMode" @close="accountMode = null" @authenticated="onAuthenticated" @password-changed="onPasswordChanged" />
 
     <section v-show="onArticlePage" class="public-article" aria-live="polite">
       <a class="article-back" href="#/">← 返回知识问答</a>
@@ -455,6 +517,7 @@ function useSuggestion(text: string) {
 
       <aside class="context-panel">
         <div class="panel-title"><span>历史会话</span><button class="text-button" :disabled="busy" @click="newSession">新会话</button></div>
+        <p v-if="!user" class="session-scope">未登录：会话仅保存在当前浏览器。<button @click="openAccount('login')">登录</button>后可跨设备查看。</p>
         <nav class="session-list" aria-label="历史会话">
           <div v-for="session in sessions" :key="session.id" class="session-item" :class="{ active: session.id === sessionId }">
             <button class="session-open" :disabled="busy" :title="session.title" @click="openSession(session.id)"><span>{{ session.title || '新会话' }}</span><small>{{ session.messageCount }} 轮 · {{ new Date(session.updatedAt).toLocaleDateString() }}</small></button>

@@ -600,6 +600,8 @@ const chatLogRecordSchema = {
   properties: {
     id: { type: "string" },
     sessionId: { type: "string" },
+    ownerType: { type: "string", enum: ["user", "visitor", "none"] },
+    userEmail: { type: "string" },
     supersededAt: { type: "string" },
     question: { type: "string" },
     answer: { type: "string" },
@@ -616,7 +618,7 @@ const chatLogRecordSchema = {
     rating: { type: "string", nullable: true },
     createdAt: { type: "string" },
   },
-  required: ["id", "question", "answer", "answerMode", "sources", "chunks", "createdAt"],
+  required: ["id", "ownerType", "question", "answer", "answerMode", "sources", "chunks", "createdAt"],
   additionalProperties: false,
 } as const;
 
@@ -747,6 +749,47 @@ const adminSessionSchema = {
   additionalProperties: false,
 } as const;
 
+// ─── User accounts ────────────────────────────────────────────────────────────
+
+// Handlers trim and lower-case emails; the format check rejects surrounding whitespace.
+const emailString = { type: "string", format: "email", maxLength: 254 } as const;
+const newPasswordString = { type: "string", minLength: 8, maxLength: 128, pattern: "\\S" } as const;
+const emailCodeString = { type: "string", pattern: "^[0-9]{6}$" } as const;
+const noContent = { "204": { type: "object", additionalProperties: true }, ...errorResponses } as const;
+
+const userAccountSchema = {
+  type: "object",
+  properties: { id: { type: "string" }, email: { type: "string" }, createdAt: { type: "string" } },
+  required: ["id", "email", "createdAt"],
+  additionalProperties: false,
+} as const;
+
+const userSessionSchema = {
+  type: "object",
+  properties: { user: { ...userAccountSchema, nullable: true } },
+  required: ["user"],
+  additionalProperties: false,
+} as const;
+
+const objectBody = (properties: Record<string, unknown>) => ({
+  type: "object", properties, required: Object.keys(properties), additionalProperties: false,
+});
+
+const adminUserRecordSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    email: { type: "string" },
+    disabled: { type: "boolean" },
+    sessionCount: { type: "number" },
+    messageCount: { type: "number" },
+    createdAt: { type: "string" },
+    lastLoginAt: { type: "string" },
+  },
+  required: ["id", "email", "disabled", "sessionCount", "messageCount", "createdAt"],
+  additionalProperties: false,
+} as const;
+
 /**
  * Registry keyed by `"METHOD /path/template"` exactly as registered in Fastify.
  * Consumed by the `onRoute` hook in configureCommon to attach schemas.
@@ -763,6 +806,51 @@ export const routeSchemas: Record<string, RouteSchema> = {
   },
   "GET /api/admin/auth/session": { response: { "200": adminSessionSchema, ...errorResponses } },
   "POST /api/admin/auth/logout": { response: { "204": { type: "object" }, ...errorResponses } },
+
+  // ── User accounts ───────────────────────────────────────────────────────────
+  "GET /api/auth/session": { response: { "200": userSessionSchema, ...errorResponses } },
+  "POST /api/auth/register/code": { body: objectBody({ email: emailString }), response: noContent },
+  "POST /api/auth/register": {
+    body: objectBody({ email: emailString, code: emailCodeString, password: newPasswordString }),
+    response: { "201": userSessionSchema, ...errorResponses },
+  },
+  "POST /api/auth/login": {
+    body: objectBody({ email: emailString, password: { type: "string", minLength: 1, maxLength: 1024 } }),
+    response: { "200": userSessionSchema, ...errorResponses },
+  },
+  "POST /api/auth/logout": { response: noContent },
+  "POST /api/auth/password-reset/code": { body: objectBody({ email: emailString }), response: noContent },
+  "POST /api/auth/password-reset": {
+    body: objectBody({ email: emailString, code: emailCodeString, password: newPasswordString }),
+    response: { "200": userSessionSchema, ...errorResponses },
+  },
+  "POST /api/auth/password": {
+    body: objectBody({ currentPassword: { type: "string", minLength: 1, maxLength: 1024 }, password: newPasswordString }),
+    response: noContent,
+  },
+
+  // ── Admin: users ────────────────────────────────────────────────────────────
+  "GET /api/admin/users": {
+    querystring: {
+      type: "object",
+      properties: { query: { type: "string" }, page: { type: "string", pattern: "^[1-9][0-9]*$" }, pageSize: { type: "string", pattern: "^[1-9][0-9]*$" } },
+      additionalProperties: false,
+    },
+    response: {
+      "200": {
+        type: "object",
+        properties: { users: { type: "array", items: adminUserRecordSchema }, total: { type: "number" } },
+        required: ["users", "total"],
+        additionalProperties: false,
+      },
+      ...errorResponses,
+    },
+  },
+  "PATCH /api/admin/users/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: objectBody({ disabled: { type: "boolean" } }),
+    response: { "200": adminUserRecordSchema, ...errorResponses },
+  },
   // ── Health ──────────────────────────────────────────────────────────────────
   "GET /health": {
     response: healthResponseSchema,

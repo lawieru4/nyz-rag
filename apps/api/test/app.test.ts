@@ -3,7 +3,7 @@ import test from "node:test";
 import { buildApp } from "../src/app.js";
 import type { DocumentQueue } from "../src/queue.js";
 import { routeSchemas } from "../src/schemas.js";
-import { adminAuth, adminHeaders, memoryAuthStore } from "./auth-helpers.js";
+import { adminAuth, adminHeaders, memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";
 
 test("the application registers all domains and rejects bad requests before accessing infrastructure", async () => {
   let closed = false;
@@ -12,7 +12,7 @@ test("the application registers all domains and rejects bad requests before acce
     hasDocumentJob: unexpected, hasSourceJob: unexpected, enqueueDocument: unexpected, enqueueSource: unexpected,
     close: async () => { closed = true; },
   };
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore() });
+  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
   try {
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200);
@@ -27,7 +27,7 @@ test("the application registers all domains and rejects bad requests before acce
     assert.equal(login.statusCode, 200, login.body);
     const cookie = String(login.headers["set-cookie"]).split(";")[0]!;
     for (const url of ["/api/chat", "/api/search", "/api/admin/sources", "/api/admin/knowledge-bases", "/api/admin/model-providers", "/api/chat/sessions/session/stream"]) {
-      const result = await app.inject({ method: "POST", url, headers: { ...adminHeaders, cookie }, payload: { question: 42, query: [], name: 23 } });
+      const result = await app.inject({ method: "POST", url, headers: { ...adminHeaders, ...userHeaders, cookie }, payload: { question: 42, query: [], name: 23 } });
       assert.equal(result.statusCode, 400, `${url}: ${result.body}`);
       assert.deepEqual(Object.keys(result.json()), ["error"]);
     }
