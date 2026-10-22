@@ -314,6 +314,17 @@ const articleMetadataSchema = {
     cover: { type: "string", nullable: true },
     doi: { type: "string", nullable: true },
     sourceMeta: { ...articleSourceMetaSchema, nullable: true },
+    projectMeta: {
+      type: "object", nullable: true,
+      properties: {
+        name: { type: "string" },
+        principal: { type: "string", nullable: true },
+        institution: { type: "string", nullable: true },
+        keywords: { type: "array", items: { type: "string" } },
+      },
+      required: ["name", "principal", "institution", "keywords"],
+      additionalProperties: false,
+    },
     relatedArticleKeys: { type: "array", items: { type: "string" } },
     followUpQuestions: { type: "array", items: { type: "string" } },
     attachments: { type: "array", items: articleAttachmentSchema },

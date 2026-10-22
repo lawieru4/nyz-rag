@@ -16,6 +16,7 @@ export function articleDocumentUpdate(article: ParsedArticle): DocumentContentUp
     parserVersion: article.parserVersion,
     metadata: {
       summary: article.summary, cover: article.cover, doi: article.doi, sourceMeta: article.sourceMeta, relatedArticleKeys: article.relatedArticleKeys,
+      projectMeta: article.projectMeta,
       followUpQuestions: articleQuestions(article), attachments: article.attachments, images: article.images, media: article.media,
       isVIP: article.isVIP, original: article.original, unknownNodeTypes: article.unknownNodeTypes, demotedHeadings: article.demotedHeadings,
     },

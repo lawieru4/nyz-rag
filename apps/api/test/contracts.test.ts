@@ -696,6 +696,7 @@ test("GET /api/admin/documents/:id — response serializer preserves nested meta
       cover: null,
       doi: null,
       sourceMeta: null,
+      projectMeta: { name: "Battery project", principal: "A. Smith", institution: "National Lab", keywords: ["battery"] },
       relatedArticleKeys: [],
       followUpQuestions: ["q1"],
       attachments: [],
@@ -716,8 +717,19 @@ test("GET /api/admin/documents/:id — response serializer preserves nested meta
     assert.ok(Array.isArray(body.chunks));
     const meta = body.metadata as Record<string, unknown>;
     assert.equal(meta.summary, "summary text");
+    assert.deepEqual(meta.projectMeta, mockDoc.metadata.projectMeta);
     assert.ok(Array.isArray(meta.followUpQuestions));
   });
+  // 历史文档没有该字段，新解析的非项目文章则显式返回 null。
+  const metadata = mockDoc.metadata as Partial<typeof mockDoc.metadata>;
+  delete metadata.projectMeta;
+  const legacy = await app.inject({ method: "GET", url: `/api/admin/documents/${UUID}` });
+  assertOk(legacy);
+  assert.equal(Object.hasOwn(legacy.json().metadata, "projectMeta"), false);
+  Object.assign(metadata, { projectMeta: null });
+  const regular = await app.inject({ method: "GET", url: `/api/admin/documents/${UUID}` });
+  assertOk(regular);
+  assert.equal(regular.json().metadata.projectMeta, null);
 });
 
 test("POST /api/chat — response serializer preserves all ChatSuccessResponse fields", async () => {

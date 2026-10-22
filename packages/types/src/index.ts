@@ -189,6 +189,14 @@ export interface ArticleSourceMeta {
   scenarios: string[];
 }
 
+/** 项目导读文首字段，保留原始中英文名称，不推断机构或负责人。 */
+export interface ArticleProjectMeta {
+  name: string;
+  principal: string | null;
+  institution: string | null;
+  keywords: string[];
+}
+
 export interface ArticleImage {
   index: number;
   src: string;
@@ -220,6 +228,8 @@ export interface ArticleMetadata {
   cover: string | null;
   doi: string | null;
   sourceMeta: ArticleSourceMeta | null;
+  /** 旧版本解析结果可能尚未包含此字段。 */
+  projectMeta?: ArticleProjectMeta | null;
   relatedArticleKeys: string[];
   /** 「延伸思考」中的编辑提问，可用作推荐追问。 */
   followUpQuestions: string[];

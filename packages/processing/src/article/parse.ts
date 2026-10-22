@@ -1,9 +1,9 @@
 // nyzdata 文章解析：ProseMirror/Tiptap JSON → 结构化块、Markdown 与纯文本。未知节点记录后继续处理。
 // 原型为 scripts/nyz-articles/parse.mjs（v3），规则调整时同步提升 PARSER_VERSION。
 import { createHash } from "node:crypto";
-import type { ArticleAttachment, ArticleImage, ArticleMedia, ArticleSourceMeta } from "@nyz-rag/types";
+import type { ArticleAttachment, ArticleImage, ArticleMedia, ArticleProjectMeta, ArticleSourceMeta } from "@nyz-rag/types";
 
-export const PARSER_VERSION = 3;
+export const PARSER_VERSION = 4;
 
 export type BlockRole = "content" | "meta" | "related" | "reference" | "questions";
 export type BlockType = "paragraph" | "heading" | "quote" | "list" | "code" | "table" | "image" | "caption" | "media";
@@ -37,6 +37,7 @@ export interface ParsedArticle {
   attachments: ArticleAttachment[];
   doi: string | null;
   sourceMeta: ArticleSourceMeta | null;
+  projectMeta: ArticleProjectMeta | null;
   relatedArticleKeys: string[];
   images: ArticleImage[];
   media: ArticleMedia[];
@@ -148,13 +149,41 @@ function parseMeta(text: string): ArticleSourceMeta | null {
   return { generator: field("作者"), repostSource: field("转载源"), keywords: links(field("关键词")), scenarios: links(field("场景")) };
 }
 
+function extractProjectMeta(blocks: ArticleBlock[]): ArticleProjectMeta | null {
+  const fields = new Map<string, string>();
+  const candidates: ArticleBlock[] = [];
+  // 只识别文首连续的完整字段块；遇到正文即停止，混合正文的块不移除。
+  for (const block of blocks) {
+    if (block.role === "meta") continue;
+    if (block.role !== "content" || !["paragraph", "quote", "list"].includes(block.type)) break;
+    const lines = block.text.split("\n").map((line) => line.trim()).filter(Boolean);
+    const matches = lines.map((line) => line.match(/^(项目名称|项目负责人|承担单位|关键词)\s*[:：]\s*(.+)$/));
+    if (!matches.length || matches.some((match) => !match)) break;
+    // 重复字段可能是正文里的项目对比，不把后一个项目并入导读。
+    const labels = matches.map((match) => match![1]);
+    if (new Set(labels).size !== labels.length || labels.some((label) => fields.has(label))) break;
+    for (const match of matches) fields.set(match![1], match![2].trim());
+    candidates.push(block);
+  }
+  const name = fields.get("项目名称");
+  if (!name || !(fields.get("项目负责人") || fields.get("承担单位"))) return null;
+  for (const block of candidates) block.role = "meta";
+  const keywords = fields.get("关键词") ?? "";
+  const links = [...keywords.matchAll(WIKI_LINK)].map((match) => match[1].trim());
+  return {
+    name: name.replace(WIKI_LINK, "$1"),
+    principal: fields.get("项目负责人")?.replace(WIKI_LINK, "$1") ?? null,
+    institution: fields.get("承担单位")?.replace(WIKI_LINK, "$1") ?? null,
+    keywords: [...new Set((links.length ? links : keywords.split(/[,，、;；]/)).map((value) => value.trim()).filter(Boolean))],
+  };
+}
+
 function pushBlock(ctx: Context, type: BlockType, text: string, markdown: string, extra: Partial<ArticleBlock> = {}) {
-  let plain = text.replace(/[ \t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  const plain = text.replace(/[ \t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
   if (!plain && type !== "image" && type !== "media") return;
   let role: BlockRole = ctx.headings.length ? sectionRole(ctx.headings.at(-1)!.text) : "content";
   const meta = !ctx.sourceMeta && type !== "heading" ? parseMeta(plain) : null;
   if (meta) { ctx.sourceMeta = meta; role = "meta"; }
-  plain = plain.replace(WIKI_LINK, "$1");
   ctx.blocks.push({ index: ctx.blocks.length, type, role, sectionPath: ctx.sectionPath(), nodeIndex: ctx.nodeIndex, text: plain, markdown: markdown.replace(WIKI_LINK, "$1").trim(), ...extra });
 }
 
@@ -266,6 +295,8 @@ export function parseArticle(detail: ArticleDetail): ParsedArticle {
   if (content?.type !== "doc" || !Array.isArray(content.content)) throw new Error("文章正文不是 ProseMirror 文档");
   const ctx = new Context();
   content.content.forEach((node, index) => { ctx.nodeIndex = index; block(node, ctx); });
+  const projectMeta = extractProjectMeta(ctx.blocks);
+  for (const item of ctx.blocks) item.text = item.text.replace(WIKI_LINK, "$1");
 
   const doi = ctx.links.map((link) => link.match(/10\.\d{4,9}\/[^\s?#]+/)?.[0]).find(Boolean) ?? null;
   const relatedArticleKeys = [...new Set(ctx.links.map((link) => link.match(/ArticleDetail\?id=(\d+)/)?.[1]).filter((key): key is string => Boolean(key)))];
@@ -286,6 +317,7 @@ export function parseArticle(detail: ArticleDetail): ParsedArticle {
     attachments: (detail.attachment ?? []).map((item) => ({ originalName: item.originalName ?? null, storageKey: item.onlineStorageKey ?? null, canDownload: Boolean(item.canDownload) })),
     doi,
     sourceMeta: ctx.sourceMeta,
+    projectMeta,
     relatedArticleKeys,
     images: ctx.images,
     media: ctx.media,

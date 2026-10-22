@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ArticleApiError, createArticleClient, type ArticleListItem } from "../src/article/client.js";
-import { parseArticle, type ArticleDetail } from "../src/article/parse.js";
+import { PARSER_VERSION, parseArticle, type ArticleDetail } from "../src/article/parse.js";
 import { syncArticles } from "../src/article/sync.js";
 import { articleQuestions, chunkArticle, chunkBlocks, chunkText, embeddingInput, estimateTokens } from "../src/chunking.js";
 import { prepareDocument } from "../src/prepare.js";
@@ -79,6 +79,88 @@ test("article chunks exclude meta, related, reference and questions and carry co
 
   const imageOnly = parseArticle(detail([{ type: "image", attrs: { src: "https://cdn.test/a.png" } }]));
   assert.deepEqual(chunkArticle("img", imageOnly).map((chunk) => chunk.content), ["摘要文字"]);
+});
+
+test("project intro paragraphs become metadata without entering body chunks", () => {
+  const rawJson = detail([
+    paragraph(text("项目名称：", [{ type: "bold" }]), text(" Lithium-Sulfur Batteries（锂硫电池），项目编号 bat230")),
+    paragraph(text("项目负责人： A. Smith（National Lab）")),
+    paragraph(text("承担单位： National Lab；合作单位 University A")),
+    paragraph(text("关键词： [[锂硫电池]]，[[聚合物，复合电解质]]，[[锂硫电池]]")),
+    paragraph(),
+    heading(2, "项目概述"),
+    paragraph(text("开发高能量密度电池，提高循环寿命。")),
+  ]);
+  const article = parseArticle(rawJson);
+  assert.deepEqual(article.projectMeta, {
+    name: "Lithium-Sulfur Batteries（锂硫电池），项目编号 bat230",
+    principal: "A. Smith（National Lab）",
+    institution: "National Lab；合作单位 University A",
+    keywords: ["锂硫电池", "聚合物，复合电解质"],
+  });
+  assert.equal(article.sourceMeta, null);
+  assert.ok(article.blocks.slice(0, 4).every((block) => block.role === "meta"));
+  assert.match(article.markdown, /项目负责人/, "full Markdown remains available for source inspection");
+  assert.doesNotMatch(article.plainText, /\[\[/);
+  const { update, chunks } = prepareDocument("project", { title: "old", content: "old", rawJson });
+  assert.equal(update.parserVersion, PARSER_VERSION);
+  assert.deepEqual(update.metadata?.projectMeta, article.projectMeta);
+  assert.doesNotMatch(update.content, /项目名称|项目负责人|承担单位|关键词|bat230/);
+  assert.match(update.content, /开发高能量密度电池/);
+  assert.doesNotMatch(chunks.map((chunk) => chunk.content).join("\n"), /A\. Smith|National Lab|关键词/);
+  assert.match(chunks[0].context, /关键词：锂硫电池、聚合物，复合电解质/);
+  assert.deepEqual(prepareDocument("project", { title: "", content: "", rawJson }), { update, chunks });
+});
+
+test("project intro supports multiline blocks, ASCII colons and plain keywords", () => {
+  const lines = ["项目名称: Battery project", "项目负责人: A. Smith", "关键词: 锂硫电池, 固态电池；锂硫电池"];
+  const containers = [
+    paragraph(text(lines.join("\n"))),
+    { type: "blockquote", content: lines.map((line) => paragraph(text(line))) },
+    { type: "bulletList", content: lines.map((line) => ({ type: "listItem", content: [paragraph(text(line, [{ type: "bold" }]))] })) },
+  ];
+  for (const container of containers) {
+    const article = parseArticle(detail([container, paragraph(text("项目概述正文"))]));
+    assert.deepEqual(article.projectMeta, { name: "Battery project", principal: "A. Smith", institution: null, keywords: ["锂硫电池", "固态电池"] });
+    assert.equal(article.blocks[0].role, "meta");
+    assert.equal(article.blocks[1].role, "content");
+  }
+});
+
+test("project extraction preserves ambiguous or non-intro body text", () => {
+  const fields = [paragraph(text("项目名称：测试项目")), paragraph(text("承担单位：测试单位"))];
+  for (const content of [
+    [fields[0], paragraph(text("普通正文"))],
+    [paragraph(text("项目名称：测试项目\n承担单位：测试单位\n不能丢失的正文"))],
+    [paragraph(text("普通正文")), ...fields],
+    [heading(2, "项目对比"), ...fields],
+    [paragraph(text("关键词：电池")), paragraph(text("普通正文"))],
+    [paragraph(text("项目名称：测试项目\n项目名称：另一项目\n承担单位：测试单位"))],
+    [{ type: "codeBlock", content: [text("项目名称：测试项目\n承担单位：测试单位")] }],
+  ]) {
+    const article = parseArticle(detail(content));
+    assert.equal(article.projectMeta, null);
+    assert.ok(article.blocks.every((block) => block.role === "content"));
+  }
+  const repeated = parseArticle(detail([...fields, paragraph(text("项目名称：另一项目")), paragraph(text("正文内容"))]));
+  assert.equal(repeated.projectMeta?.name, "测试项目");
+  assert.equal(repeated.blocks[2].role, "content");
+  assert.equal(parseArticle(sample).projectMeta, null);
+});
+
+test("project and repost metadata coexist and merge keyword context without duplicates", () => {
+  const rawJson = detail([
+    { type: "blockquote", content: [paragraph(text("作者：qwen\n转载源：原始来源\n关键词：[[电池]]\n场景：[[研发]]"))] },
+    paragraph(text("项目名称：电池项目")),
+    paragraph(text("承担单位：研究院")),
+    paragraph(text("关键词：[[电池]]、[[硫正极]]")),
+    paragraph(text("有效正文")),
+  ]);
+  const { update, chunks } = prepareDocument("project", { title: "", content: "", rawJson });
+  assert.equal(update.metadata?.sourceMeta?.repostSource, "原始来源");
+  assert.equal(update.metadata?.projectMeta?.institution, "研究院");
+  assert.equal(update.content, "有效正文");
+  assert.match(chunks[0].context, /关键词：电池、硫正极$/);
 });
 
 test("chunkBlocks keeps sections apart, merges short sections, keeps tables and splits long text", () => {

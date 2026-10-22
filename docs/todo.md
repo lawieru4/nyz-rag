@@ -86,9 +86,9 @@
 ## 四、采集、清洗与切片
 
 - [x] 文章 API 数据源：来源地址为文章列表接口（如 `…/nyzfoxx/article?tagKey=…`），详情接口为同路径 `/articleDetail`；token 只从 Worker 环境变量 `NYZ_ARTICLE_TOKEN` 读取，API 拒绝带 token 的地址，错误信息不含 URL
-- [x] ProseMirror/Tiptap 解析器（纯函数，`packages/processing/src/article/parse.ts`）：由 `parse.mjs`（v3）移植，200 篇样本输出一致；生成 Markdown 与纯文本，未知节点记录到 `metadata.unknownNodeTypes` 并继续
+- [x] ProseMirror/Tiptap 解析器（纯函数，`packages/processing/src/article/parse.ts`）：由 `parse.mjs`（v3）移植，初始版本在 200 篇样本上输出一致；当前 v4 增加项目导读元信息提取。生成 Markdown 与纯文本，未知节点记录到 `metadata.unknownNodeTypes` 并继续
 - [x] 章节角色：相关阅读、本文链接不进入正文与切片，提取为 `relatedArticleKeys` 与 DOI；延伸思考不做向量化，提取为 `metadata.followUpQuestions`
-- [ ] 文首元信息（作者/转载源/关键词/场景，`[[双链]]`）与项目导读信息（项目名称/负责人/承担单位）提取为结构化字段，不进入正文；引用时标注原始转载源。（文首元信息已完成，存于 `metadata.sourceMeta`；项目导读信息与引用标注未做）
+- [x] 文首元信息（作者/转载源/关键词/场景，`[[双链]]`）与项目导读信息（项目名称/负责人/承担单位/关键词）提取为结构化字段，不进入检索正文与切片正文。分别存于 `metadata.sourceMeta` / `metadata.projectMeta`，完整 Markdown 保留原始字段；项目关键词加入切片上下文，管理端详情 API 保留项目字段。引用已标注原始转载源（见第三阶段）。解析器 v4 对文首连续字段块保守识别，不推断机构或负责人，不单独拆解嵌在名称中的项目编号；历史文档需执行「重新处理」后生效
 - [ ] 误用标题（超长、以句末或冒号结尾）降级为段落，标题文字计入切片；从标题解析机构与期刊。（降级已完成；机构与期刊解析未做）
 - [x] 列表接口增量同步：按 `updateTime` 判断变化，置顶文章不参与停止判断，连续 `NYZ_ARTICLE_OVERLAP_PAGES` 页无变化才停止；单次上限 `NYZ_ARTICLE_SYNC_LIMIT`，回填进度与失败文章记录在 `data_sources.sync_state`，下次继续；`invalidToken`、401/403 中止同步，无正文（VIP/无权限）的文章记为失败
 - [ ] 近似去重（MinHash 等）：同一论文的多版改写只保留一篇或合并

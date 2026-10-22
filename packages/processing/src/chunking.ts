@@ -142,7 +142,8 @@ export function articleQuestions(article: Pick<ParsedArticle, "blocks">): string
 }
 
 export function chunkArticle(documentId: string, article: ParsedArticle, options?: ChunkOptions): StructuredChunk[] {
-  return chunkBlocks(documentId, articleChunkBlocks(article), { title: article.title, keywords: article.sourceMeta?.keywords }, options);
+  const keywords = [...new Set([...(article.sourceMeta?.keywords ?? []), ...(article.projectMeta?.keywords ?? [])])];
+  return chunkBlocks(documentId, articleChunkBlocks(article), { title: article.title, keywords }, options);
 }
 
 /** 网页等纯文本正文：按行作为块，没有章节信息。 */
