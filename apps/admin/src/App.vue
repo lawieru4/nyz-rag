@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, type Component } from "vue";
-import { Bell, Database, FileText, Library, LogOut, MessagesSquare, Settings2, Shield, User, Users } from "@lucide/vue";
+import { Database, FileText, Library, LogOut, MessagesSquare, Settings2, Shield, User, Users } from "@lucide/vue";
 import type { AdminSession } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { ConfirmDialog } from "@nyz-rag/ui/confirm";
@@ -28,6 +28,7 @@ const allModules: Array<{ name: string; icon: Component; view: Component; superO
 ];
 
 const PROFILE_MODULE = "个人资料";
+const isDev = import.meta.env.DEV;
 
 const session = ref<AdminSession | null>(null);
 const activeModule = ref("数据源");
@@ -163,14 +164,10 @@ onMounted(restoreSession);
     <main class="ml-58 min-h-screen max-lg:ml-48 max-md:ml-14">
       <header class="flex h-14 items-center justify-between border-b bg-card px-9 max-lg:px-6 max-md:px-4">
         <div class="text-xs text-muted-foreground">管理后台 <span class="px-2 text-muted-foreground/50">/</span> {{ activeModule }}</div>
-        <div class="flex items-center gap-3">
-          <span class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><i class="size-1.5 rounded-full bg-success" />开发环境</span>
-          <Button variant="ghost" size="icon-sm" class="text-muted-foreground" title="通知" aria-label="通知"><Bell /></Button>
-          <Button variant="ghost" size="sm" class="text-xs text-muted-foreground max-md:hidden">帮助中心</Button>
-        </div>
+        <span v-if="isDev" class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><i class="size-1.5 rounded-full bg-success" />开发环境</span>
       </header>
       <div class="mx-auto max-w-330 px-10 pt-9 pb-7 max-lg:px-6 max-md:px-4">
-        <SourcesView v-if="activeView === SourcesView" :key="`sources-${viewKey}`" :title="activeModule" @navigate="select" />
+        <SourcesView v-if="activeView === SourcesView" :key="`sources-${viewKey}`" :title="activeModule" />
         <ProfileView
           v-else-if="activeView === ProfileView && session"
           :key="`profile-${viewKey}`"

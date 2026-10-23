@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, type Component } from "vue";
-import { ArrowUpRight, Check, Clock, Database, Ellipsis, FileText, Info, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
+import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
+import { Check, Clock, Database, FileText, Info, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
 import type { SecretSettingStatus } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Badge } from "@nyz-rag/ui/components/badge";
@@ -19,16 +19,34 @@ import StatusBadge from "../components/StatusBadge.vue";
 import { client, errorMessage, loadKnowledge, sources, tasks, type Source, type Task } from "../workspace";
 
 defineProps<{ title: string }>();
-const emit = defineEmits<{ (e: "navigate", module: string): void }>();
 
 const emptyForm = () => ({ name: "", url: "", frequency: "每天" });
 const dialogOpen = ref(false);
 const form = ref(emptyForm());
-const summary = computed<Array<{ label: string; value: number; unit?: string; hint: string; icon: Component }>>(() => [
+
+// 进入页面时重新加载，避免显示登录时缓存的旧列表；每分钟刷新一次相对时间。
+const now = ref(Date.now());
+let clock: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  loadKnowledge().catch(() => { toast.error("数据源加载失败，请检查 API 服务"); });
+  clock = setInterval(() => { now.value = Date.now(); }, 60_000);
+});
+onUnmounted(() => clearInterval(clock));
+
+/** 最近一次同步完成的数据源，以及距今的时间（值 + 单位）。 */
+const lastSync = computed(() => {
+  const latest = sources.value.filter((source) => source.syncedAt).sort((a, b) => Date.parse(b.syncedAt!) - Date.parse(a.syncedAt!))[0];
+  if (!latest) return { value: "—", hint: "尚未同步" };
+  const minutes = Math.max(0, Math.floor((now.value - Date.parse(latest.syncedAt!)) / 60_000));
+  const [value, unit] = minutes < 1 ? ["刚刚", undefined] : minutes < 60 ? [minutes, "分钟前"] : minutes < 1440 ? [Math.floor(minutes / 60), "小时前"] : [Math.floor(minutes / 1440), "天前"];
+  return { value, unit, hint: latest.name };
+});
+
+const summary = computed<Array<{ label: string; value: number | string; unit?: string; hint: string; icon: Component }>>(() => [
   { label: "数据源", value: sources.value.length, hint: "已配置来源", icon: Database },
   { label: "收录文章", value: sources.value.reduce((total, source) => total + source.pages, 0), hint: "来自全部数据源", icon: FileText },
   { label: "执行中任务", value: tasks.value.filter((task) => task.status === "运行中").length, hint: "队列与抓取进度", icon: RefreshCw },
-  { label: "最近同步", value: 10, unit: "分钟", hint: "NYZ 文章库", icon: Clock },
+  { label: "最近同步", ...lastSync.value, icon: Clock },
 ]);
 
 const taskState = {
@@ -157,10 +175,7 @@ async function startCrawl(source: Source) {
   </Card>
 
   <section class="mb-7">
-    <div class="mb-3 flex items-center justify-between">
-      <div><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置 nyzdata 文章接口，并管理同步计划</p></div>
-      <Button variant="link" size="sm" class="text-link" @click="emit('navigate', '数据源')">查看全部 <ArrowUpRight /></Button>
-    </div>
+    <div class="mb-3"><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置 nyzdata 文章接口，并管理同步计划</p></div>
     <Card class="gap-0 overflow-hidden py-0">
       <Table class="min-w-[750px]">
         <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>同步频率</TableHead><TableHead>文章数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
@@ -180,7 +195,6 @@ async function startCrawl(source: Source) {
               <div class="flex justify-end gap-0.5">
                 <Button variant="ghost" size="icon-sm" title="立即同步" aria-label="立即同步" @click="startCrawl(source)"><RefreshCw /></Button>
                 <Button variant="ghost" size="icon-sm" title="暂停或启用" aria-label="暂停或启用" @click="toggleSource(source)"><Pause v-if="source.status === '运行中'" /><Play v-else /></Button>
-                <Button variant="ghost" size="icon-sm" title="更多操作" aria-label="更多操作"><Ellipsis /></Button>
               </div>
             </TableCell>
           </TableRow>
@@ -191,10 +205,7 @@ async function startCrawl(source: Source) {
   </section>
 
   <section class="mb-7">
-    <div class="mb-3 flex items-center justify-between">
-      <div><h2 class="text-sm font-semibold">抓取任务</h2><p class="mt-1 text-xs text-muted-foreground">查看近期同步状态与处理进度</p></div>
-      <Button variant="link" size="sm" class="text-link" @click="emit('navigate', '抓取任务')">任务记录 <ArrowUpRight /></Button>
-    </div>
+    <div class="mb-3"><h2 class="text-sm font-semibold">抓取任务</h2><p class="mt-1 text-xs text-muted-foreground">查看近期同步状态与处理进度</p></div>
     <Card class="gap-0 py-0">
       <div v-for="task in tasks" :key="task.id" class="flex min-h-14 items-center gap-3 border-b px-4 last:border-b-0">
         <span :class="['grid size-6 flex-none place-items-center rounded-full', taskState[task.status].class]"><component :is="taskState[task.status].icon" class="size-3.5" /></span>
@@ -206,8 +217,7 @@ async function startCrawl(source: Source) {
           <Progress :model-value="task.progress" class="h-1" />
           <small class="min-w-10 text-[11px] text-muted-foreground">{{ task.status === '运行中' ? `${task.progress}%` : taskState[task.status].progress }}</small>
         </div>
-        <span class="w-32 text-[11px] text-muted-foreground max-md:hidden">{{ taskState[task.status].result }}</span>
-        <Button variant="ghost" size="icon-sm" class="ml-auto" aria-label="任务选项"><Ellipsis /></Button>
+        <span class="ml-auto w-32 text-[11px] text-muted-foreground max-md:hidden">{{ taskState[task.status].result }}</span>
       </div>
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>
