@@ -103,6 +103,14 @@
   - **时效性问题**：价格、行情、周报等问题必须写明时间范围，提示的文章头加入发布日期；年份不再算作泄漏答案。
   - **试点**：同一批 50 篇，第 4 版 46 题通过、4 篇未通过，审核拒绝 10 次（9 次因同主题文章也能回答）。`low` 题通过比例偏低，详见 evaluation-plan.md 第 5.4 节。
   - **未做**：全量生成与冻结尚未执行。
+- 本轮完成（评估集冻结与评估工具，2026-10-24）：
+  - **数据集**：400 篇按第 4 版生成，350 题通过，冻结为 `test/evaluation/nyz-rag-synthetic-v1.json`（dev 238 / test 112），结果见 evaluation-plan.md 第 5.5 节。
+  - **hybrid 评估**：`evaluate:retrieval --mode=hybrid` 调用 `retrieve()`，按 keyword、vector、summary、fused、rerank 变体消融，每题共用一次查询 Embedding；排名列表取 30 个候选切片，回答上下文按知识库 `topK` 与 `maxContextLength` 截取；输出来源文章 Hit@1/5/10、MRR、证据命中、上下文命中、耗时与可靠性计数，并按 split、题型、具体度、词面重叠分组。来源文章被删除或证据已不在原文中的题目排除在指标之外。
+  - **运行记录与对比**：运行记录保存到 `.nyz-data/eval-runs/`；`evaluate:compare` 输出指标差值、按题型和具体度的差值、名次升降与进入/跌出前 5、前 10 的题目，数据集版本或 split 不同时拒绝对比。
+  - **其他**：`evaluate:retrieval` 的 `--dataset`、`--corpus` 相对路径改为按执行命令的目录解析。
+  - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 99 项（87 通过、12 项集成测试默认跳过）全部无失败；dev 前 10 题冒烟运行与 compare 正常。
+  - **基线**：dev 集全部变体约 4 分钟，rerank Hit@1 95.0、Hit@10 99.2，keyword 单路 Hit@1 91.6 高于 fused 的 76.9，详见 evaluation-plan.md 第 8.4 节。
+  - **未做**：失败题复判（H）与回答层评估（I）。
 
 ## 向量化运行配置
 

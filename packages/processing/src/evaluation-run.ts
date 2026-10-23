@@ -1,0 +1,328 @@
+// 检索评估运行（hybrid 模式）：按变体裁剪 retrieve() 的依赖，得到文章排名与回答上下文，计算第七节的指标，并对比两次运行。方案见 docs/evaluation-plan.md 第七、八节。
+import type { CorpusSnapshot, EvaluationLabel, EvaluationQuestion, QuestionType, Specificity, Split } from "./evaluation.js";
+import { buildAnswerContext, CANDIDATE_LIMIT, retrieve, type RetrievalDependencies, type RetrievalSettings } from "./rag.js";
+
+export const RETRIEVAL_VARIANTS = ["keyword", "vector", "summary", "fused", "rerank"] as const;
+export type RetrievalVariant = (typeof RETRIEVAL_VARIANTS)[number];
+
+export const RUN_SCHEMA_VERSION = 1;
+export const HIT_KS = [1, 5, 10] as const;
+/** 排名列表以合并后的候选上限调用 retrieve()，开启 Rerank 时 topN 随之相同（7.1）。 */
+export const RANKING_DEPTH = CANDIDATE_LIMIT;
+/** 排名列表不足这么多篇文章时计入「排名深度不足」。 */
+export const MIN_RANKED_ARTICLES = 10;
+/** 证据的字符二元组被回答上下文覆盖的比例达到该值即为证据命中。 */
+export const EVIDENCE_COVERAGE = 0.8;
+
+/** 排名列表中的切片与各路得分。 */
+export interface RunChunk {
+  chunkId: string;
+  articleKey: string;
+  score: number;
+  vectorScore?: number;
+  keywordScore?: number;
+  summaryScore?: number;
+  rerankScore?: number;
+}
+
+export interface VariantResult {
+  /** 文章排名：切片按名次取所属文章并去重。 */
+  articles: string[];
+  chunks: RunChunk[];
+  /** 回答上下文：排名列表前「知识库 topK」个切片经 buildAnswerContext 截取后的切片，与线上进入模型的内容一致。 */
+  context: Array<{ chunkId: string; articleKey: string }>;
+  /** 来源文章在文章排名中的名次（从 1 开始），不在排名列表中为 null。 */
+  rank: number | null;
+  contextHit: boolean;
+  /** 回答上下文中来源文章的切片是否覆盖证据；metadata 题不计算，为 null。 */
+  evidenceHit: boolean | null;
+  /** retrieve() 耗时，不含查询 Embedding。 */
+  retrievalMs: number;
+  /** 降级说明（向量、摘要召回或 Rerank 失败）。 */
+  warnings: string[];
+  error?: string;
+}
+
+export interface RunQuestion {
+  id: string;
+  question: string;
+  type: QuestionType;
+  specificity?: Specificity;
+  split: Split;
+  lexicalOverlap?: number;
+  sourceArticleKeys: string[];
+  /** 因语料变化排除的原因：来源文章已不在语料中，或证据已不在原文中。 */
+  excluded?: string;
+  embeddingMs?: number;
+  /** 查询 Embedding 失败，所有变体都没有结果。 */
+  error?: string;
+  results: Partial<Record<RetrievalVariant, VariantResult>>;
+}
+
+export interface HybridMetrics {
+  questions: number;
+  hitAt: Record<string, number>;
+  mrr: number;
+  contextHit: number;
+  evidenceHit: number | null;
+  evidenceQuestions: number;
+}
+
+export const GROUP_DIMENSIONS = ["split", "type", "specificity", "overlap"] as const;
+export type GroupDimension = (typeof GROUP_DIMENSIONS)[number];
+
+export interface VariantSummary {
+  overall: HybridMetrics;
+  groups: Record<GroupDimension, Record<string, HybridMetrics>>;
+  reliability: { evaluated: number; excluded: number; errors: number; degraded: number; shallowRanking: number };
+  latency: { p50: number | null; p95: number | null };
+}
+
+interface ModelInfo { provider: string; model: string }
+
+export interface RunRecord {
+  schemaVersion: typeof RUN_SCHEMA_VERSION;
+  name: string;
+  createdAt: string;
+  dataset: { name: string; version: string; path: string; split: Split | "all"; questions: number; limit?: number; corpusFingerprint: string | null; generation?: Record<string, unknown> };
+  /** 运行时的语料快照。 */
+  corpus: CorpusSnapshot;
+  corpusChanged: boolean;
+  /** 向量化覆盖率不足 100% 时为 true，结果不完整。 */
+  incomplete: boolean;
+  settings: { knowledgeBase: { id: string; name: string } | null; retrieval: RetrievalSettings; rankingDepth: number };
+  models: { embedding: ModelInfo | null; rerank: ModelInfo | null };
+  variants: RetrievalVariant[];
+  summary: Partial<Record<RetrievalVariant, VariantSummary>>;
+  embedding: { p50: number | null; p95: number | null; failures: number };
+  questions: RunQuestion[];
+}
+
+const round = (value: number, digits = 4) => Math.round(value * 10 ** digits) / 10 ** digits;
+const ratio = (part: number, total: number) => total ? round(part / total) : 0;
+
+export const sourceLabels = (question: Pick<EvaluationQuestion, "labels">): EvaluationLabel[] => question.labels.filter((label) => label.relevance > 0);
+
+export const overlapBucket = (value: number | undefined) => value === undefined ? "unknown" : value < 0.4 ? "<0.4" : value < 0.6 ? "0.4-0.6" : ">=0.6";
+
+/** 最近秩百分位。 */
+export function percentile(values: number[], p: number): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
+}
+
+// ---- 证据命中 ----
+
+// 规范化：NFKC、去空白与标点、小写；按字符二元组比较，切片边界与排版差异不影响结果。
+const evidenceText = (text: string) => text.normalize("NFKC").replace(/[\s\p{P}]/gu, "").toLowerCase();
+const bigrams = (text: string) => {
+  const chars = [...text];
+  return chars.length < 2 ? chars : chars.slice(1).map((char, index) => chars[index] + char);
+};
+
+/** 证据的字符二元组中出现在 text 里的比例。 */
+export function evidenceCoverage(evidence: string, text: string): number {
+  const target = bigrams(evidenceText(evidence));
+  if (!target.length) return 0;
+  const available = new Set(bigrams(evidenceText(text)));
+  return target.filter((gram) => available.has(gram)).length / target.length;
+}
+
+// ---- 运行 ----
+
+/** 按变体裁剪依赖：关键词召回是 retrieve() 的必需依赖，不使用时返回空。 */
+export function variantDependencies(variant: RetrievalVariant, full: RetrievalDependencies): RetrievalDependencies {
+  const uses = {
+    keyword: variant === "keyword" || variant === "fused" || variant === "rerank",
+    vector: variant === "vector" || variant === "fused" || variant === "rerank",
+    summary: variant === "summary" || variant === "fused" || variant === "rerank",
+    rerank: variant === "rerank",
+  };
+  if ((uses.vector && !full.vectorSearch) || (uses.summary && !full.summarySearch)) throw new Error(`Variant ${variant} requires an embedding model`);
+  if (uses.rerank && !full.rerank) throw new Error(`Variant ${variant} requires a rerank model`);
+  return {
+    keywordSearch: uses.keyword ? full.keywordSearch : async () => [],
+    ...(uses.vector ? { vectorSearch: full.vectorSearch } : {}),
+    ...(uses.summary ? { summarySearch: full.summarySearch } : {}),
+    ...(uses.rerank ? { rerank: full.rerank } : {}),
+  };
+}
+
+/**
+ * 用一个变体检索一道题：排名列表取 RANKING_DEPTH 个切片，回答上下文取其中前 settings.topK 个并按 maxContextLength 截取。
+ * 只有 rerank 变体开启 Rerank，其余参数取自知识库。
+ */
+export async function runVariant(
+  question: Pick<EvaluationQuestion, "question" | "type" | "labels">, variant: RetrievalVariant, settings: RetrievalSettings,
+  dependencies: RetrievalDependencies, articleKeyOf: (documentId: string) => string,
+): Promise<VariantResult> {
+  const started = performance.now();
+  const { chunks, warnings } = await retrieve(question.question, { ...settings, topK: RANKING_DEPTH, rerankEnabled: variant === "rerank" }, variantDependencies(variant, dependencies));
+  const retrievalMs = round(performance.now() - started, 1);
+  const ranked: RunChunk[] = chunks.map((chunk) => ({
+    chunkId: chunk.chunkId, articleKey: articleKeyOf(chunk.documentId), score: round(chunk.score, 6),
+    ...(chunk.vectorScore !== undefined ? { vectorScore: round(chunk.vectorScore) } : {}),
+    ...(chunk.keywordScore !== undefined ? { keywordScore: round(chunk.keywordScore) } : {}),
+    ...(chunk.summaryScore !== undefined ? { summaryScore: round(chunk.summaryScore) } : {}),
+    ...(chunk.rerankScore !== undefined ? { rerankScore: round(chunk.rerankScore) } : {}),
+  }));
+  const articles = [...new Set(ranked.map((chunk) => chunk.articleKey))];
+  const context = buildAnswerContext(chunks.slice(0, settings.topK), settings.maxContextLength).chunks.map((chunk) => ({ ...chunk, articleKey: articleKeyOf(chunk.documentId) }));
+  const labels = sourceLabels(question);
+  const sources = new Set(labels.map((label) => label.articleKey));
+  const index = articles.findIndex((key) => sources.has(key));
+  const evidenceHit = question.type === "metadata" ? null : labels.some((label) => {
+    const text = context.filter((chunk) => chunk.articleKey === label.articleKey).map((chunk) => chunk.content).join("\n");
+    return Boolean(text) && label.evidence.some((evidence) => evidenceCoverage(evidence, text) >= EVIDENCE_COVERAGE);
+  });
+  return {
+    articles, chunks: ranked, context: context.map(({ chunkId, articleKey }) => ({ chunkId, articleKey })),
+    rank: index >= 0 ? index + 1 : null, contextHit: context.some((chunk) => sources.has(chunk.articleKey)), evidenceHit, retrievalMs, warnings,
+  };
+}
+
+export const failedResult = (error: string): VariantResult => ({ articles: [], chunks: [], context: [], rank: null, contextHit: false, evidenceHit: null, retrievalMs: 0, warnings: [], error });
+
+// ---- 指标 ----
+
+export function hybridMetrics(results: VariantResult[]): HybridMetrics {
+  const total = results.length;
+  const evidence = results.filter((result) => result.evidenceHit !== null);
+  return {
+    questions: total,
+    hitAt: Object.fromEntries(HIT_KS.map((k) => [String(k), ratio(results.filter((result) => result.rank !== null && result.rank <= k).length, total)])),
+    mrr: ratio(results.reduce((sum, result) => sum + (result.rank ? 1 / result.rank : 0), 0), total),
+    contextHit: ratio(results.filter((result) => result.contextHit).length, total),
+    evidenceHit: evidence.length ? ratio(evidence.filter((result) => result.evidenceHit).length, evidence.length) : null,
+    evidenceQuestions: evidence.length,
+  };
+}
+
+const groupKey: Record<GroupDimension, (question: RunQuestion) => string> = {
+  split: (question) => question.split,
+  type: (question) => question.type,
+  specificity: (question) => question.specificity ?? "unknown",
+  overlap: (question) => overlapBucket(question.lexicalOverlap),
+};
+
+/** 参与指标的题目：未因语料变化排除，查询 Embedding 与该变体的检索都成功。 */
+export function evaluatedResults(questions: RunQuestion[], variant: RetrievalVariant): Array<[RunQuestion, VariantResult]> {
+  return questions.flatMap((question) => {
+    const result = question.results[variant];
+    return !question.excluded && !question.error && result && !result.error ? [[question, result] as [RunQuestion, VariantResult]] : [];
+  });
+}
+
+function groupedMetrics(pairs: Array<[RunQuestion, VariantResult]>, dimension: GroupDimension): Record<string, HybridMetrics> {
+  const groups = new Map<string, VariantResult[]>();
+  for (const [question, result] of pairs) {
+    const key = groupKey[dimension](question);
+    groups.set(key, [...(groups.get(key) ?? []), result]);
+  }
+  return Object.fromEntries([...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, results]) => [key, hybridMetrics(results)]));
+}
+
+export function summarizeVariant(questions: RunQuestion[], variant: RetrievalVariant): VariantSummary {
+  const included = questions.filter((question) => !question.excluded);
+  const pairs = evaluatedResults(questions, variant);
+  const results = pairs.map(([, result]) => result);
+  const latencies = results.map((result) => result.retrievalMs);
+  return {
+    overall: hybridMetrics(results),
+    groups: Object.fromEntries(GROUP_DIMENSIONS.map((dimension) => [dimension, groupedMetrics(pairs, dimension)])) as VariantSummary["groups"],
+    reliability: {
+      evaluated: results.length,
+      excluded: questions.length - included.length,
+      errors: included.length - results.length,
+      degraded: results.filter((result) => result.warnings.length).length,
+      shallowRanking: results.filter((result) => result.articles.length < MIN_RANKED_ARTICLES).length,
+    },
+    latency: { p50: percentile(latencies, 0.5), p95: percentile(latencies, 0.95) },
+  };
+}
+
+// ---- 对比 ----
+
+export interface MetricsDelta {
+  hitAt: Record<string, number>;
+  mrr: number;
+  contextHit: number;
+  evidenceHit: number | null;
+}
+
+export interface RankMove {
+  id: string;
+  question: string;
+  from: number | null;
+  to: number | null;
+}
+
+export interface RunComparison {
+  variants: [RetrievalVariant, RetrievalVariant];
+  /** 两次运行都有效的题数。 */
+  questions: number;
+  a: HybridMetrics;
+  b: HybridMetrics;
+  delta: MetricsDelta;
+  groups: Record<"type" | "specificity", Record<string, { a: HybridMetrics; b: HybridMetrics; delta: MetricsDelta }>>;
+  ranks: { improved: number; worsened: number; unchanged: number };
+  moves: { enteredTop5: RankMove[]; leftTop5: RankMove[]; enteredTop10: RankMove[]; leftTop10: RankMove[] };
+}
+
+export function metricsDelta(a: HybridMetrics, b: HybridMetrics): MetricsDelta {
+  return {
+    hitAt: Object.fromEntries(Object.keys(a.hitAt).filter((k) => k in b.hitAt).map((k) => [k, round(b.hitAt[k] - a.hitAt[k])])),
+    mrr: round(b.mrr - a.mrr),
+    contextHit: round(b.contextHit - a.contextHit),
+    evidenceHit: a.evidenceHit === null || b.evidenceHit === null ? null : round(b.evidenceHit - a.evidenceHit),
+  };
+}
+
+/** 数据集名称、版本或划分不同的运行不能对比（抛出）；语料快照不同时返回警告。 */
+export function comparisonWarnings(a: RunRecord, b: RunRecord): string[] {
+  if (a.dataset.name !== b.dataset.name || a.dataset.version !== b.dataset.version) {
+    throw new Error(`Datasets differ: ${a.dataset.name}@${a.dataset.version} vs ${b.dataset.name}@${b.dataset.version}`);
+  }
+  if (a.dataset.split !== b.dataset.split) throw new Error(`Splits differ: ${a.dataset.split} vs ${b.dataset.split}`);
+  const warnings: string[] = [];
+  if (a.corpus.fingerprint !== b.corpus.fingerprint) warnings.push("两次运行的语料快照不同，指标受语料变化影响，只比较两边都有效的题目。");
+  if (a.incomplete || b.incomplete) warnings.push("至少一次运行的向量化覆盖率不足 100%，结果不完整。");
+  return warnings;
+}
+
+/** 只比较两次运行都有效的题目；名次 null 视为排在最后。 */
+export function compareRuns(a: RunRecord, b: RunRecord, variantA: RetrievalVariant, variantB: RetrievalVariant = variantA): RunComparison {
+  const resultsB = new Map(evaluatedResults(b.questions, variantB).map(([question, result]) => [question.id, result]));
+  const pairs = evaluatedResults(a.questions, variantA).flatMap(([question, result]) => {
+    const other = resultsB.get(question.id);
+    return other ? [{ question, a: result, b: other }] : [];
+  });
+  const compare = (items: typeof pairs) => {
+    const metricsA = hybridMetrics(items.map((item) => item.a));
+    const metricsB = hybridMetrics(items.map((item) => item.b));
+    return { a: metricsA, b: metricsB, delta: metricsDelta(metricsA, metricsB) };
+  };
+  const grouped = (dimension: "type" | "specificity") => {
+    const groups = new Map<string, typeof pairs>();
+    for (const item of pairs) {
+      const key = groupKey[dimension](item.question);
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    return Object.fromEntries([...groups].sort(([x], [y]) => x.localeCompare(y)).map(([key, items]) => [key, compare(items)]));
+  };
+  const position = (rank: number | null) => rank ?? Number.POSITIVE_INFINITY;
+  const moves: RunComparison["moves"] = { enteredTop5: [], leftTop5: [], enteredTop10: [], leftTop10: [] };
+  const ranks = { improved: 0, worsened: 0, unchanged: 0 };
+  for (const item of pairs) {
+    const from = position(item.a.rank);
+    const to = position(item.b.rank);
+    ranks[to < from ? "improved" : to > from ? "worsened" : "unchanged"] += 1;
+    const move = { id: item.question.id, question: item.question.question, from: item.a.rank, to: item.b.rank };
+    for (const k of [5, 10] as const) {
+      if (from > k && to <= k) moves[`enteredTop${k}`].push(move);
+      if (from <= k && to > k) moves[`leftTop${k}`].push(move);
+    }
+  }
+  return { variants: [variantA, variantB], questions: pairs.length, ...compare(pairs), groups: { type: grouped("type"), specificity: grouped("specificity") }, ranks, moves };
+}
