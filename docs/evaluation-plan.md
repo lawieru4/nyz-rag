@@ -1,6 +1,6 @@
 # 检索评估集方案：文章派生合成基线
 
-状态：方案，未实施。目标是在没有人工标注资源的条件下，由 AI 按文章生成带原文证据的问题，建立可重复运行的检索回归基线，作为切片、检索、Rerank 等调整的对比依据。[切片改造](chunking-design.md)以本基线验收。
+状态：生成（G）、评估（A）与对比（B）已实现，`nyz-rag-synthetic-v1` 已冻结（第 5.5 节），dev 集基线已运行（第 8.4 节）。目标是在没有人工标注资源的条件下，由 AI 按文章生成带原文证据的问题，建立可重复运行的检索回归基线，作为切片、检索、Rerank 等调整的对比依据。[切片改造](chunking-design.md)以本基线验收。
 
 ## 一、定位与边界
 
@@ -33,7 +33,7 @@
 | `chunkerVersion` | 切片规则版本（`CHUNKER_VERSION` 引入前为空） |
 | `embeddingModel` / `embeddingCoverage` | 默认 Embedding 模型与已向量化文章的比例 |
 
-评估运行时重新计算指纹。与数据集不一致时（文章被修改或删除），列出受影响的题目，并把这些题目排除在指标之外。
+评估运行时重新计算指纹。与数据集不一致时给出警告，并逐题检查：来源文章已不在语料中，或证据已不在原文（`metadata` 题含标题与元数据线索）中的题目列出并排除在指标之外。冻结的数据集不保存逐篇的 `content_hash`，因此以证据是否仍在原文中判断，正文改动未涉及证据的题目仍然有效。
 
 ### 3.2 抽样
 
@@ -244,7 +244,7 @@
   - 证据可在正文（或 `metadata` 题的元数据）中找到；
   - `source=synthetic` 时 `provenance` 必须声明合成且未经人工验证。
 - 兼容读取：现有 `packages/processing/test/evaluation/retrieval-dataset.json`（schemaVersion 1）读取时转为 v2，`source=synthetic`，题型记为 `fact`、划分记为 `dev`，原分类保存在 `notes`，证据转为数组；可回答性规则只用于 v2。它保留为 200 篇样本上的冒烟测试。
-- 冻结版本提交到 `packages/processing/test/evaluation/synthetic-v1.json`，冻结后不再修改；修正或扩充时发布新版本。
+- 冻结版本提交到 `packages/processing/test/evaluation/<名称>.json`（首版为 `nyz-rag-synthetic-v1.json`），冻结后不再修改；修正或扩充时发布新版本。
 
 ## 七、指标
 
@@ -263,7 +263,7 @@
 | --- | --- |
 | 来源文章 Hit@1 / @5 / @10 | 文章排名前 K 中包含来源文章的题目比例 |
 | 来源文章 MRR | 来源文章名次的倒数，不在排名列表中计 0 |
-| Evidence Hit@topK | 回答上下文中来源文章的切片文本（规范化：NFKC、去空白与标点）覆盖证据原文中文二元组的比例 ≥ 0.8 即为命中，多段证据任一段命中即可；不依赖切片 ID。`metadata` 题不计算 |
+| Evidence Hit@topK | 回答上下文中来源文章的切片文本（规范化：NFKC、去空白与标点）覆盖证据原文字符二元组的比例 ≥ 0.8 即为命中，多段证据任一段命中即可；不依赖切片 ID。`metadata` 题不计算 |
 | 上下文命中率 | 回答上下文中包含来源文章任一切片的题目比例 |
 | 检索耗时 p50 / p95 | `retrieve()` 耗时，不含查询 Embedding；查询 Embedding 耗时单独统计 |
 | 运行可靠性 | 降级（`warnings`）题数、调用失败题数、排名深度不足题数、因语料变化排除的题数 |
@@ -289,7 +289,7 @@
 | `fused` | 三路召回，不 Rerank |
 | `rerank` | 三路召回 + Rerank（需配置 Rerank 模型） |
 
-同一次运行中，每道题只计算一次查询 Embedding，各变体共用，与 API 一致。
+同一次运行中，每道题只计算一次查询 Embedding，各变体共用，与 API 一致。检索参数取最近创建的知识库（`topK`、`similarityThreshold`、`maxContextLength`），`rerankEnabled` 由变体决定。Embedding 与 Rerank 调用失败时最多重试 2 次，避免偶发故障使 Rerank 降级为合并排序；重试后仍失败的记为降级或调用失败，单独报告。
 
 ### 8.2 运行记录
 
@@ -299,26 +299,48 @@
 - 语料指纹与覆盖率、`parserVersions`、`chunkerVersion`；
 - 知识库参数，以及 Embedding、Rerank 的模型与供应商（不含密钥）；
 - 每题每个变体的文章排名（含各路得分）、回答上下文的切片 ID 与所属文章、耗时、警告；
-- 汇总指标。
+- 汇总指标：每个变体的总体指标、按 split / 题型 / 具体度 / 词面重叠分组的指标、可靠性计数与耗时。
+
+`--limit=N` 只取前 N 道题，用于冒烟测试，不作为基线。
 
 ### 8.3 对比
 
-`evaluate:compare <运行A> <运行B>` 输出以下内容：
+`evaluate:compare <运行A> <运行B>`（运行名取该名称最新的一次，也可以写运行记录的路径）输出以下内容：
 
 - 各指标差值；
 - 每题来源文章名次的升降，以及进入或跌出前 5、前 10 的题目清单；
 - 按题型和具体度的差值。
 
-两次运行的数据集版本不同时拒绝对比。语料指纹不同时给出警告，并只比较两边都有效的题目。
+两次运行的数据集版本或 split 不同时拒绝对比。语料指纹不同时给出警告。只比较两边都有效的题目（未排除、未调用失败）。默认对比两次运行共有的变体；`--variant=fused:rerank` 表示 A 的 `fused` 对比 B 的 `rerank`，两个参数写同一个运行即可对比同一次运行内的两个变体。`--json` 输出完整结果。
+
+### 8.4 基线（2026-10-24）
+
+`baseline`：`nyz-rag-synthetic-v1` dev 238 道题，语料 1126 篇（向量化覆盖率 99.91%，标记为不完整），知识库 topK=5、阈值 0.35、上下文 6144 字，Embedding `BAAI/bge-m3`，Rerank `BAAI/bge-reranker-v2-m3`。全部变体约 4 分钟，没有降级、调用失败或因语料变化排除的题目。
+
+| 变体 | Hit@1 | Hit@5 | Hit@10 | MRR | 证据命中 | 上下文命中 | 检索 p50 / p95 | 排名深度不足 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keyword | 91.6 | 96.2 | 97.5 | 93.8 | 89.7 | 96.2 | 126 / 182 ms | 26 |
+| vector | 75.6 | 88.2 | 91.2 | 81.0 | 70.3 | 85.3 | 75 / 91 ms | 69 |
+| summary | 62.6 | 74.4 | 79.8 | 68.0 | 31.9 | 74.4 | 8 / 13 ms | 0 |
+| fused | 76.9 | 92.4 | 98.7 | 84.0 | 76.8 | 92.0 | 131 / 185 ms | 0 |
+| rerank | 95.0 | 99.2 | 99.2 | 97.0 | 96.8 | 98.7 | 613 / 710 ms | 0 |
+
+查询 Embedding p50 99 ms、p95 164 ms。观察：
+
+- **Rerank 最好**，`low` 题 Hit@1 92.5、`high` 题 95.9。分数接近上限，只看 rerank 变体难以分辨改进，切片改造的对比应同时看 `fused`、`vector` 与 `low`、词面重叠 `<0.4` 分组。
+- **关键词单路的 Hit@1 高于 fused**（91.6 对 76.9）：RRF 把向量与摘要召回的其他文章排到了前面，但 fused 的 Hit@10 最高（98.7），为 Rerank 提供了最完整的候选。合成题偏向原文措辞，关键词的优势在真实问题上可能偏高。
+- **向量单路**有 69 道题排名不足 10 篇文章，原因是相似度阈值 0.35 过滤了候选。
+- **摘要召回**每篇只给一个切片，证据命中低（31.9）是预期的，它的作用是给相关文章加分。
+- Rerank 没有排在第 1 的 12 道题中，2 道（s0152、s0163）任何变体的排名列表里都没有来源文章，都是问题较泛的 `low` 题，可能也能由其他文章回答（第 5.4 节）。
 
 ## 九、工具实现
 
 | 步骤 | 内容 | 预估 |
 | --- | --- | --- |
-| C | 数据集 schemaVersion 2 的类型、校验与 v1 兼容读取；`--split=dev\|test` | 0.5 天 |
-| G | 生成命令 `evaluate:generate`：语料快照与分层抽样、题型与具体度分配、生成、程序校验、AI 审核、重试、断点续跑；`--limit` 用于试点；`evaluate:generate --freeze` 导出冻结版本 | 2 天 |
-| A | 评估命令 `--mode=hybrid`：复用 API 的检索接线（`retrieve()` + 数据库召回 + 业务模型配置），`--variant` 消融；排名列表与回答上下文分离；输出第七节的指标与分组 | 1 天 |
-| B | 运行记录保存与 `evaluate:compare` | 1 天 |
+| C ✅ | 数据集 schemaVersion 2 的类型、校验与 v1 兼容读取；`--split=dev\|test` | 0.5 天 |
+| G ✅ | 生成命令 `evaluate:generate`：语料快照与分层抽样、题型与具体度分配、生成、程序校验、AI 审核、重试、断点续跑；`--limit` 用于试点；`evaluate:generate --freeze` 导出冻结版本 | 2 天 |
+| A ✅ | 评估命令 `--mode=hybrid`：复用 API 的检索接线（`retrieve()` + 数据库召回 + 业务模型配置），`--variant` 消融；排名列表与回答上下文分离；输出第七节的指标与分组 | 1 天 |
+| B ✅ | 运行记录保存与 `evaluate:compare` | 1 天 |
 | — | 试点 50 篇 → 调整提示与阈值 → 全量 400 篇 → 冻结 `synthetic-v1` → 基线运行（全部变体） | 0.5 天 + 模型运行时间 |
 | H | 失败题复判（第 7.3 节） | 1 天，基线产出后 |
 | I | 回答层评估：对评估集运行完整问答（不保存问答记录），计算来源文章被引用的比例；LLM 评审回答是否忠实于上下文 | 2 天，切片改造后 |
@@ -335,15 +357,16 @@ pnpm --filter @nyz-rag/processing evaluate:generate --name=nyz-rag-synthetic-v1 
 pnpm --filter @nyz-rag/processing evaluate:generate --name=nyz-rag-synthetic-v1
 pnpm --filter @nyz-rag/processing evaluate:generate --name=nyz-rag-synthetic-v1 --freeze
 
-# 3. 记录基线
-pnpm --filter @nyz-rag/processing evaluate:retrieval --mode=hybrid --dataset=<路径> --split=dev --variant=keyword,vector,summary,fused,rerank --name=baseline
+# 3. 记录基线（--variant 默认为全部五个变体；相对路径按执行命令的目录解析）
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --name=baseline
 
 # 4. 修改检索或切片后再运行，并与基线对比
-pnpm --filter @nyz-rag/processing evaluate:retrieval --mode=hybrid --dataset=<路径> --split=dev --variant=fused,rerank --name=parent-child
-pnpm --filter @nyz-rag/processing evaluate:compare baseline parent-child
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --variant=fused,rerank --name=parent-child
+pnpm evaluate:compare baseline parent-child
+pnpm evaluate:compare baseline baseline --variant=fused:rerank   # 同一次运行内对比两个变体
 ```
 
-命令名与参数在实现时确定，以上为约定的形式。
+根目录的 `evaluate:*` 脚本转发到 `@nyz-rag/processing`。dev 集 238 道题、全部变体按顺序运行约需数分钟，`--concurrency` 可以并行，但会使耗时指标偏高。
 
 ## 十一、验收规则
 

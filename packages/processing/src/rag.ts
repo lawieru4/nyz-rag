@@ -46,7 +46,7 @@ export const NO_MATCH_ANSWER = "知识库中暂未找到与问题直接匹配的
 // 每路召回数（摘要召回按文章计，每篇一个切片）、合并后进入 Rerank 的候选数，以及 RRF 常数。
 export const RECALL_LIMIT = 20;
 export const SUMMARY_RECALL_LIMIT = 10;
-const CANDIDATE_LIMIT = 30;
+export const CANDIDATE_LIMIT = 30;
 const RRF_K = 60;
 const MAX_QUERY_TERMS = 64;
 const EXCERPT_CHARS = 300;
