@@ -68,7 +68,9 @@ async function syncArticleSource(source: DataSourceRecord, taskId: string) {
     overlapPages: articleOverlapPages,
     pause: () => delay(requestDelayMs),
     saveState: (state) => saveSourceSyncState(source.id, state),
-    onProgress: (count) => updateTask(taskId, { progress: Math.min(95, Math.round(count / articleSyncLimit * 100)) }),
+    onProgress: ({ processed, failed }) => updateTask(taskId, {
+      processedCount: processed, failedCount: failed, progress: Math.min(95, Math.round((processed + failed) / articleSyncLimit * 100)),
+    }),
     process: async (item) => {
       const detail = await client.detail(item._key);
       const url = normalizeUrl(client.articleUrl(detail._key))!;
@@ -120,7 +122,7 @@ async function reprocessDocument(documentId: string) {
 async function syncSource(sourceId: string, taskId: string) {
   const [task, source] = await Promise.all([getTask(taskId), getSource(sourceId)]);
   if (!task || !source) throw new Error("source or task not found");
-  await updateTask(taskId, { status: "运行中", progress: 0, error: null });
+  await updateTask(taskId, { status: "运行中", progress: 0, processedCount: 0, failedCount: 0, articleLimit: articleSyncLimit, error: null });
   try {
     const { count, note } = await syncArticleSource(source, taskId);
     await withTransaction(async (tx) => {

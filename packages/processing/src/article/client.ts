@@ -10,8 +10,14 @@ export interface ArticleListItem {
   top?: number;
 }
 
+export interface ArticleListPage {
+  items: ArticleListItem[];
+  /** 接口返回的文章总数（不受分页影响），缺失时为 undefined。 */
+  total?: number;
+}
+
 export interface ArticleClient {
-  list(page: number, perPage: number): Promise<ArticleListItem[]>;
+  list(page: number, perPage: number): Promise<ArticleListPage>;
   detail(articleKey: string): Promise<ArticleDetail>;
   /** 文章在站点上的页面地址，作为文档 URL。 */
   articleUrl(articleKey: string): string;
@@ -63,8 +69,9 @@ export function createArticleClient(options: { listUrl: string; token: string; t
       const params: Record<string, string | number> = { curPage: page, perPage };
       if (!listUrl.searchParams.has("type")) params.type = 2;
       if (!listUrl.searchParams.has("sort")) params.sort = "desc";
-      const data = await getJson<{ list?: ArticleListItem[] }>(listUrl.pathname, params, "文章列表");
-      return data?.list ?? [];
+      const data = await getJson<{ list?: ArticleListItem[]; total?: unknown }>(listUrl.pathname, params, "文章列表");
+      const total = Number(data?.total);
+      return { items: data?.list ?? [], total: data?.total != null && Number.isSafeInteger(total) && total >= 0 ? total : undefined };
     },
     async detail(articleKey) {
       const data = await getJson<ArticleDetail>(detailPath, { articleKey }, "文章详情");

@@ -8,6 +8,7 @@ import { crawlTaskRoutes } from "./crawl-tasks.js";
 import { dataSourceRoutes } from "./data-sources.js";
 import { documentRoutes } from "./documents.js";
 import { knowledgeBaseRoutes } from "./knowledge-bases.js";
+import { knowledgeEventRoutes, type OverviewEventsOptions } from "./knowledge-events.js";
 import { createMailer, type Mailer } from "./mailer.js";
 import { modelProviderRoutes } from "./model-providers.js";
 import { createDocumentQueue, type DocumentQueue } from "./queue.js";
@@ -24,6 +25,7 @@ export function buildApp(options: {
   adminAuth?: AdminAuthConfig; authStore?: AuthStore; admins?: AdminRepository;
   userAuth?: UserAuthConfig; userAuthStore?: AuthStore; mailer?: Mailer | null; users?: UserRepository;
   limiter?: AdmissionLimiter; rateLimits?: ReturnType<typeof rateLimitConfig>;
+  overviewEvents?: OverviewEventsOptions;
 } = {}) {
   const auth = options.adminAuth ?? adminAuthConfig();
   const userAuth = options.userAuth ?? userAuthConfig();
@@ -51,6 +53,7 @@ export function buildApp(options: {
     });
   });
   app.register(commonRoutes);
+  app.register(async (instance) => knowledgeEventRoutes(instance, options.overviewEvents));
   app.register(chatRoutes);
   app.register(searchRoutes);
   app.register(documentRoutes, { queue });

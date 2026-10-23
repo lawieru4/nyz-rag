@@ -220,7 +220,7 @@ test("article client builds URLs, keeps the token out of errors and stops on inv
     ? url.searchParams.get("articleKey") === "bad" ? { body: { status: 200, data: { _key: "bad", invalidToken: true } } } : { status: 500, body: {} }
     : { body: { status: 200, data: { list: [{ _key: "1" }], total: 1 } } });
   const client = createArticleClient({ listUrl: "https://x.test/api/article?tagKey=9", token, fetch: fetchImpl });
-  assert.deepEqual(await client.list(3, 10), [{ _key: "1" }]);
+  assert.deepEqual(await client.list(3, 10), { items: [{ _key: "1" }], total: 1 });
   assert.equal(calls[0].pathname, "/api/article");
   assert.deepEqual(Object.fromEntries(calls[0].searchParams), { tagKey: "9", curPage: "3", perPage: "10", type: "2", sort: "desc", token });
   await assert.rejects(client.detail("bad"), (error: unknown) => error instanceof ArticleApiError && error.fatal);
@@ -230,9 +230,9 @@ test("article client builds URLs, keeps the token out of errors and stops on inv
   assert.equal(client.articleUrl("42"), "https://x.test/ArticleDetail?id=42");
 });
 
-function listClient(pages: ArticleListItem[][]) {
+function listClient(pages: ArticleListItem[][], total = pages.flat().length) {
   const requested: number[] = [];
-  return { requested, client: { list: async (page: number) => { requested.push(page); return pages[page - 1] ?? []; } } };
+  return { requested, client: { list: async (page: number) => { requested.push(page); return { items: pages[page - 1] ?? [], total }; } } };
 }
 const items = (from: number, count: number, updateTime = 1): ArticleListItem[] => Array.from({ length: count }, (_, index) => ({ _key: String(from + index), updateTime }));
 
@@ -268,17 +268,20 @@ test("syncArticles skips unchanged pinned items, stops after quiet pages and res
     fresh.set(item._key, 1);
   };
   run = listClient(pages);
-  let result = await syncArticles({ ...base, known: fresh, limit: 6, process, client: run.client, state, saveState: async (next) => { state = next; } });
+  const progress: Array<{ processed: number; failed: number }> = [];
+  let result = await syncArticles({ ...base, known: fresh, limit: 6, process, client: run.client, state, saveState: async (next) => { state = next; }, onProgress: (next) => { progress.push(next); } });
   assert.equal(result.limitReached, true);
+  assert.equal(progress.length, 6, "progress is reported after failures too");
+  assert.deepEqual(progress.at(-1), { processed: 5, failed: 1 });
   assert.deepEqual(result.failures.map((failure) => failure.articleKey), ["2"]);
-  assert.deepEqual(state, { backfillPage: 3, retryKeys: ["2"] });
+  assert.deepEqual(state, { backfillPage: 3, retryKeys: ["2"], remoteTotal: 15 });
 
   run = listClient(pages);
   result = await syncArticles({ ...base, known: fresh, limit: 100, process, client: run.client, state, saveState: async (next) => { state = next; } });
   assert.equal(result.limitReached, false);
   assert.deepEqual(processed, ["pinned", "1", "3", "4", "5", "2", "6", "7", "8", "9", "10", "11", "12", "13", "14"]);
-  assert.deepEqual(state, { backfillDone: true });
-  assert.deepEqual(saved, { backfillDone: true });
+  assert.deepEqual(state, { backfillDone: true, remoteTotal: 15 });
+  assert.deepEqual(saved, { backfillDone: true, remoteTotal: 15 });
 });
 
 test("syncArticles aborts on fatal API errors and still saves progress", async () => {
@@ -289,5 +292,5 @@ test("syncArticles aborts on fatal API errors and still saves progress", async (
     process: async (item) => { if (item._key === "2") throw new ArticleApiError("token 无效", true); },
     saveState: async (next) => { state = next; },
   }), /token 无效/);
-  assert.deepEqual(state, {});
+  assert.deepEqual(state, { remoteTotal: 3 });
 });

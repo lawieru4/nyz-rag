@@ -16,7 +16,7 @@ import { toast } from "@nyz-rag/ui/lib/toast";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import { client, errorMessage, loadKnowledge, sources, tasks, type Source, type Task } from "../workspace";
+import { client, errorMessage, loadKnowledge, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
 
 defineProps<{ title: string }>();
 
@@ -24,14 +24,19 @@ const emptyForm = () => ({ name: "", url: "", frequency: "每天" });
 const dialogOpen = ref(false);
 const form = ref(emptyForm());
 
-// 进入页面时重新加载，避免显示登录时缓存的旧列表；每分钟刷新一次相对时间。
+// 进入页面时重新加载，避免显示登录时缓存的旧列表，之后由服务端推送同步进度；每分钟刷新一次相对时间。
 const now = ref(Date.now());
 let clock: ReturnType<typeof setInterval> | undefined;
+let unwatch: (() => void) | undefined;
 onMounted(() => {
   loadKnowledge().catch(() => { toast.error("数据源加载失败，请检查 API 服务"); });
+  unwatch = watchKnowledge();
   clock = setInterval(() => { now.value = Date.now(); }, 60_000);
 });
-onUnmounted(() => clearInterval(clock));
+onUnmounted(() => {
+  unwatch?.();
+  clearInterval(clock);
+});
 
 /** 最近一次同步完成的数据源，以及距今的时间（值 + 单位）。 */
 const lastSync = computed(() => {
@@ -42,12 +47,30 @@ const lastSync = computed(() => {
   return { value, unit, hint: latest.name };
 });
 
+const remoteTotal = computed(() => {
+  const known = sources.value.filter((source) => source.remoteTotal !== null);
+  return known.length ? known.reduce((total, source) => total + source.remoteTotal!, 0) : null;
+});
+
 const summary = computed<Array<{ label: string; value: number | string; unit?: string; hint: string; icon: Component }>>(() => [
   { label: "数据源", value: sources.value.length, hint: "已配置来源", icon: Database },
-  { label: "收录文章", value: sources.value.reduce((total, source) => total + source.pages, 0), hint: "来自全部数据源", icon: FileText },
+  {
+    label: "已入库文章", value: sources.value.reduce((total, source) => total + source.pages, 0).toLocaleString(), icon: FileText,
+    hint: remoteTotal.value === null ? "同步后显示接口文章总数" : `接口共 ${remoteTotal.value.toLocaleString()} 篇`,
+  },
   { label: "执行中任务", value: tasks.value.filter((task) => task.status === "运行中").length, hint: "队列与抓取进度", icon: RefreshCw },
   { label: "最近同步", ...lastSync.value, icon: Clock },
 ]);
+
+/** 入库进度：已入库 / 接口总数，以及首次全量同步是否完成。 */
+function coverage(source: Source) {
+  if (source.remoteTotal === null) return { percent: null, hint: source.syncedAt || source.pages ? "接口总数将在下次同步时获取" : "尚未同步" };
+  return {
+    percent: source.remoteTotal ? Math.min(100, Math.round(source.pages / source.remoteTotal * 100)) : 100,
+    hint: source.backfillDone ? "已完成全量同步" : `全量同步未完成，约剩 ${Math.max(0, source.remoteTotal - source.pages).toLocaleString()} 篇`,
+  };
+}
+const sourceRows = computed(() => sources.value.map((source) => ({ source, coverage: coverage(source) })));
 
 const taskState = {
   已完成: { icon: Check, class: "bg-success-soft text-success", progress: "完成", result: "同步完成" },
@@ -55,6 +78,21 @@ const taskState = {
   失败: { icon: TriangleAlert, class: "bg-destructive/10 text-destructive", progress: "失败", result: "同步失败" },
   等待中: { icon: LoaderCircle, class: "bg-muted text-muted-foreground", progress: "排队中", result: "等待 Worker" },
 } satisfies Record<Task["status"], unknown>;
+
+/** 运行中显示「已处理 / 单次上限」；进度条按已处理篇数计算，结束后为 100%。 */
+function taskProgress(task: Task) {
+  const handled = task.processedCount + task.failedCount;
+  if (task.status === "运行中") {
+    if (!task.articleLimit) return { value: 0, label: "准备中" };
+    return { value: Math.min(100, Math.round(handled / task.articleLimit * 100)), label: `${handled} / ${task.articleLimit} 篇` };
+  }
+  // 升级前的任务没有计数（没有 articleLimit）。
+  if (task.status === "已完成") return { value: 100, label: !task.articleLimit ? "完成" : handled ? `完成 · ${task.processedCount} 篇` : "完成 · 无更新" };
+  return { value: task.progress, label: taskState[task.status].progress };
+}
+
+// 已有排队或运行中任务的数据源不能再次同步（服务端同样会拒绝）。
+const syncingSources = computed(() => new Set(tasks.value.filter((task) => task.status === "等待中" || task.status === "运行中").map((task) => task.sourceId)));
 
 // nyzdata 接口 token：全局一个，只能设置或清除，后台不显示已保存的值。
 const tokenStatus = ref<SecretSettingStatus | null>(null);
@@ -178,9 +216,9 @@ async function startCrawl(source: Source) {
     <div class="mb-3"><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置 nyzdata 文章接口，并管理同步计划</p></div>
     <Card class="gap-0 overflow-hidden py-0">
       <Table class="min-w-[750px]">
-        <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>同步频率</TableHead><TableHead>文章数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
+        <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>同步频率</TableHead><TableHead title="已入库文章数 / 最近一次同步时接口返回的文章总数">已入库 / 接口总数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
         <TableBody>
-          <TableRow v-for="source in sources" :key="source.id" class="text-xs text-muted-foreground">
+          <TableRow v-for="{ source, coverage } in sourceRows" :key="source.id" class="text-xs text-muted-foreground">
             <TableCell class="py-3 pl-4">
               <div class="flex items-center gap-2.5">
                 <span class="grid size-7 place-items-center rounded-md border bg-secondary font-mono text-xs text-link">A</span>
@@ -188,12 +226,18 @@ async function startCrawl(source: Source) {
               </div>
             </TableCell>
             <TableCell>{{ source.frequency }}</TableCell>
-            <TableCell class="tabular-nums">{{ source.pages }}</TableCell>
+            <TableCell>
+              <div class="grid w-52 gap-1.5">
+                <span class="tabular-nums"><b class="font-semibold text-foreground">{{ source.pages.toLocaleString() }}</b> / {{ source.remoteTotal?.toLocaleString() ?? "—" }}<span v-if="coverage.percent !== null" class="ml-1.5 text-[11px]">{{ coverage.percent }}%</span></span>
+                <Progress v-if="coverage.percent !== null" :model-value="coverage.percent" class="h-1" />
+                <small class="text-[11px]">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
+              </div>
+            </TableCell>
             <TableCell><StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge></TableCell>
             <TableCell>{{ source.updated }}</TableCell>
             <TableCell>
               <div class="flex justify-end gap-0.5">
-                <Button variant="ghost" size="icon-sm" title="立即同步" aria-label="立即同步" @click="startCrawl(source)"><RefreshCw /></Button>
+                <Button variant="ghost" size="icon-sm" :title="syncingSources.has(source.id) ? '同步进行中' : '立即同步'" aria-label="立即同步" :disabled="syncingSources.has(source.id)" @click="startCrawl(source)"><RefreshCw :class="syncingSources.has(source.id) && 'animate-spin'" /></Button>
                 <Button variant="ghost" size="icon-sm" title="暂停或启用" aria-label="暂停或启用" @click="toggleSource(source)"><Pause v-if="source.status === '运行中'" /><Play v-else /></Button>
               </div>
             </TableCell>
@@ -213,16 +257,16 @@ async function startCrawl(source: Source) {
           <b class="truncate text-xs font-semibold">{{ task.source }} <span class="ml-1.5 font-mono text-[10px] font-normal text-muted-foreground/70">{{ task.id }}</span></b>
           <small class="truncate text-[11px] text-muted-foreground">{{ task.error || task.started }}</small>
         </div>
-        <div class="flex max-w-68 flex-1 items-center gap-2.5">
-          <Progress :model-value="task.progress" class="h-1" />
-          <small class="min-w-10 text-[11px] text-muted-foreground">{{ task.status === '运行中' ? `${task.progress}%` : taskState[task.status].progress }}</small>
+        <div class="flex max-w-80 flex-1 items-center gap-2.5">
+          <Progress :model-value="taskProgress(task).value" class="h-1" />
+          <small class="min-w-24 text-[11px] whitespace-nowrap text-muted-foreground tabular-nums">{{ taskProgress(task).label }}</small>
         </div>
-        <span class="ml-auto w-32 text-[11px] text-muted-foreground max-md:hidden">{{ taskState[task.status].result }}</span>
+        <span class="ml-auto w-32 text-[11px] text-muted-foreground max-md:hidden">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
       </div>
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>
   </section>
-  <footer class="flex items-center gap-2 px-0.5 py-3 text-[11px] text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，接口 Token 在上方统一配置。</footer>
+  <footer class="flex items-center gap-2 px-0.5 py-3 text-[11px] text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，单次同步有篇数上限，首次全量同步需多次执行；接口总数取自最近一次同步，无正文（如 VIP）的文章会计入失败。</footer>
 
   <Dialog v-model:open="tokenDialogOpen">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">

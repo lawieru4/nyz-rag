@@ -32,16 +32,16 @@ const metadataSearchVector = (metadata: SearchableMetadata | null) => sql`array_
 
 // ---- 数据源与采集任务 ----
 
-const { syncState: _syncState, ...sourceTableColumns } = getTableColumns(dataSources);
 const sourceColumns = {
-  ...sourceTableColumns,
+  ...getTableColumns(dataSources),
   documentCount: sql<number>`(SELECT count(*)::int FROM ${documents} WHERE ${documents.sourceId} = ${outer("data_sources", "id")} AND ${documents.status} = 'ready')`,
 };
 
-type SourceRow = Omit<typeof dataSources.$inferSelect, "syncState"> & { documentCount: number };
+type SourceRow = typeof dataSources.$inferSelect & { documentCount: number };
 const toSource = (row: SourceRow): DataSourceRecord => ({
   id: row.id, name: row.name, url: row.url, kind: row.kind, frequency: row.frequency, status: row.status,
-  documentCount: row.documentCount, updatedAt: iso(row.syncedAt) ?? null,
+  documentCount: row.documentCount, remoteTotal: row.syncState.remoteTotal ?? null, backfillDone: row.syncState.backfillDone === true,
+  failedCount: row.syncState.retryKeys?.length ?? 0, updatedAt: iso(row.syncedAt) ?? null,
 });
 
 export async function listSources(db: Executor = getDb()): Promise<DataSourceRecord[]> {
@@ -78,7 +78,8 @@ export async function markSourceSynced(id: string, db: Executor = getDb()): Prom
 }
 
 const toTask = (row: typeof crawlTasks.$inferSelect): CrawlTaskRecord => compact<CrawlTaskRecord>({
-  id: row.id, sourceId: row.sourceId, sourceName: row.sourceName, status: row.status, progress: row.progress, createdAt: iso(row.createdAt)!, error: row.error,
+  id: row.id, sourceId: row.sourceId, sourceName: row.sourceName, status: row.status, progress: row.progress,
+  processedCount: row.processedCount, failedCount: row.failedCount, articleLimit: row.articleLimit, createdAt: iso(row.createdAt)!, error: row.error,
 });
 
 export async function listTasks(limit = 100, db: Executor = getDb()): Promise<CrawlTaskRecord[]> {
@@ -98,7 +99,7 @@ export async function createTask(source: DataSourceRecord, db: Executor = getDb(
 }
 
 /** 未传入的字段保持不变；`error: null` 清除错误。 */
-export async function updateTask(id: string, patch: { status?: CrawlTaskRecord["status"]; progress?: number; error?: string | null }, db: Executor = getDb()): Promise<void> {
+export async function updateTask(id: string, patch: Partial<Pick<CrawlTaskRecord, "status" | "progress" | "processedCount" | "failedCount" | "articleLimit">> & { error?: string | null }, db: Executor = getDb()): Promise<void> {
   await db.update(crawlTasks).set(patch).where(eq(crawlTasks.id, id));
 }
 

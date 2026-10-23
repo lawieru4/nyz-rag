@@ -43,7 +43,8 @@
  */
 
 import type { FastifyError, FastifyInstance, FastifyPluginAsync } from "fastify";
-import { AdmissionError, getStats, listSources, listTasks } from "@nyz-rag/processing";
+import { AdmissionError, getStats } from "@nyz-rag/processing";
+import { loadOverview } from "./knowledge-events.js";
 import { routeSchemas } from "./schemas.js";
 
 // ─── Re-exported utilities (preserve existing public API) ─────────────────────
@@ -137,8 +138,5 @@ export const commonRoutes: FastifyPluginAsync = async (app) => {
     return { stats: await getStats() };
   });
 
-  app.get("/api/admin/knowledge", async () => {
-    const [sources, tasks, stats] = await Promise.all([listSources(), listTasks(), getStats()]);
-    return { sources, tasks, stats };
-  });
+  app.get("/api/admin/knowledge", loadOverview);
 };

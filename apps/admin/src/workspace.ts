@@ -1,10 +1,14 @@
 import { ref } from "vue";
+import type { KnowledgeOverview } from "@nyz-rag/types";
 import { AdminApiClient, ApiError } from "./adminClient";
 
 export { ApiError };
 
-export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string; syncedAt: string | null };
-export type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number; started: string; error?: string };
+export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; remoteTotal: number | null; backfillDone: boolean; failedCount: number; updated: string; syncedAt: string | null };
+export type Task = {
+  id: string; sourceId: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number;
+  processedCount: number; failedCount: number; articleLimit?: number; started: string; error?: string;
+};
 
 export const client = new AdminApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
 export const pageSize = 10;
@@ -13,13 +17,38 @@ export const pageSize = 10;
 export const sources = ref<Source[]>([]);
 export const tasks = ref<Task[]>([]);
 
-export async function loadKnowledge() {
-  const data = await client.request<{
-    sources: Array<{ id: string; name: string; url: string; kind: string; frequency: string; status: Source["status"]; documentCount: number; updatedAt: string | null }>;
-    tasks: Array<{ id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string; error?: string }>;
-  }>("/api/admin/knowledge");
+function applyKnowledge(data: KnowledgeOverview) {
   sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, syncedAt: source.updatedAt, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
-  tasks.value = data.tasks.map((task) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString(), error: task.error }));
+  tasks.value = data.tasks.map(({ sourceName, createdAt, ...task }) => ({ ...task, source: sourceName, started: new Date(createdAt).toLocaleString() }));
+}
+
+export async function loadKnowledge() {
+  applyKnowledge(await client.request<KnowledgeOverview>("/api/admin/knowledge"));
+}
+
+/**
+ * 订阅数据源与同步任务的实时推送（SSE），返回取消订阅函数。
+ * 服务端定期断开连接，浏览器自动重连；连接被拒绝（如登录失效）时改用普通请求，由 401 处理切回登录页，稍后再重连。
+ */
+export function watchKnowledge(): () => void {
+  let source: EventSource | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  const connect = () => {
+    source = new EventSource(`${client.baseUrl}/api/admin/knowledge/events`, { withCredentials: true });
+    source.addEventListener("overview", (event) => applyKnowledge(JSON.parse((event as MessageEvent<string>).data)));
+    source.onerror = () => {
+      if (source?.readyState !== EventSource.CLOSED || stopped) return;
+      loadKnowledge().catch(() => {});
+      retry = setTimeout(connect, 10_000);
+    };
+  };
+  connect();
+  return () => {
+    stopped = true;
+    clearTimeout(retry);
+    source?.close();
+  };
 }
 
 export function resetKnowledge() {

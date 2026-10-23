@@ -666,7 +666,7 @@ test("POST /api/admin/sources — valid body → 200", async () => {
   const app = buildTestApp();
   app.post("/api/admin/sources", async () => ({
     id: UUID, name: "src", url: "https://example.com", kind: "文章 API",
-    frequency: "", status: "运行中", documentCount: 0, updatedAt: null,
+    frequency: "", status: "运行中", documentCount: 0, remoteTotal: null, backfillDone: false, failedCount: 0, updatedAt: null,
   }));
   await app.ready();
 
@@ -675,6 +675,16 @@ test("POST /api/admin/sources — valid body → 200", async () => {
     payload: { name: "src", url: "https://example.com", kind: "文章 API", frequency: "daily" },
   });
   assertOk(res);
+});
+
+test("POST /api/admin/sources/:id/sync — a queued task without articleLimit serializes", async () => {
+  const app = buildTestApp();
+  const task = { id: "CR-00000001", sourceId: UUID, sourceName: "src", status: "等待中", progress: 0, processedCount: 0, failedCount: 0, createdAt: new Date(0).toISOString() };
+  app.post("/api/admin/sources/:id/sync", async () => task);
+  await app.ready();
+
+  const res = await app.inject({ method: "POST", url: `/api/admin/sources/${UUID}/sync` });
+  assertOk(res, (body) => assert.deepEqual(body, task));
 });
 
 test("PATCH /api/admin/sources/:id — invalid status → 400", async () => {
@@ -693,7 +703,7 @@ test("PATCH /api/admin/sources/:id — valid status → 200", async () => {
   const app = buildTestApp();
   app.patch("/api/admin/sources/:id", async () => ({
     id: UUID, name: "src", url: "https://example.com", kind: "文章 API",
-    frequency: "", status: "已暂停", documentCount: 0, updatedAt: null,
+    frequency: "", status: "已暂停", documentCount: 0, remoteTotal: null, backfillDone: false, failedCount: 0, updatedAt: null,
   }));
   await app.ready();
 

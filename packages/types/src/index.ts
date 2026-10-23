@@ -372,7 +372,14 @@ export interface DataSourceRecord {
   kind: "文章 API";
   frequency: string;
   status: "运行中" | "已暂停";
+  /** 已入库的文章数（含内容重复的文章）。 */
   documentCount: number;
+  /** 最近一次同步时接口返回的文章总数；尚未同步过为 null。 */
+  remoteTotal: number | null;
+  /** 首次全量回填是否已完成；未完成时下次同步从断点继续。 */
+  backfillDone: boolean;
+  /** 上次同步失败、等待下次重试的文章数。 */
+  failedCount: number;
   updatedAt: string | null;
 }
 
@@ -382,6 +389,12 @@ export interface CrawlTaskRecord {
   sourceName: string;
   status: "等待中" | "运行中" | "已完成" | "失败";
   progress: number;
+  /** 本次同步已成功处理的文章数。 */
+  processedCount: number;
+  /** 本次同步失败（下次重试）的文章数。 */
+  failedCount: number;
+  /** 单次同步最多处理的文章数，Worker 开始执行后才有值。 */
+  articleLimit?: number;
   createdAt: string;
   error?: string;
 }
@@ -393,6 +406,8 @@ export interface ArticleSourceSyncState {
   backfillDone?: boolean;
   /** 上次同步失败、下次优先重试的文章。 */
   retryKeys?: string[];
+  /** 最近一次同步时接口返回的文章总数。 */
+  remoteTotal?: number;
 }
 
 export interface KnowledgeStats {

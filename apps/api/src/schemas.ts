@@ -611,9 +611,12 @@ const dataSourceRecordSchema = {
     frequency: { type: "string" },
     status: { type: "string", enum: ["运行中", "已暂停"] },
     documentCount: { type: "number" },
+    remoteTotal: { type: "number", nullable: true },
+    backfillDone: { type: "boolean" },
+    failedCount: { type: "number" },
     updatedAt: { type: "string", nullable: true },
   },
-  required: ["id", "name", "url", "kind", "frequency", "status", "documentCount"],
+  required: ["id", "name", "url", "kind", "frequency", "status", "documentCount", "remoteTotal", "backfillDone", "failedCount"],
   additionalProperties: false,
 } as const;
 
@@ -776,10 +779,13 @@ const crawlTaskRecordSchema = {
     sourceName: { type: "string" },
     status: { type: "string", enum: ["等待中", "运行中", "已完成", "失败"] },
     progress: { type: "number" },
+    processedCount: { type: "number" },
+    failedCount: { type: "number" },
+    articleLimit: { type: "number" },
     createdAt: { type: "string" },
     error: { type: "string" },
   },
-  required: ["id", "sourceId", "sourceName", "status", "progress", "createdAt"],
+  required: ["id", "sourceId", "sourceName", "status", "progress", "processedCount", "failedCount", "createdAt"],
   additionalProperties: false,
 } as const;
 
@@ -1009,6 +1015,11 @@ export const routeSchemas: Record<string, RouteSchema> = {
   },
   "GET /api/admin/knowledge": {
     response: knowledgeOverviewResponseSchema,
+  },
+
+  // SSE：`overview` 事件的数据与 GET /api/admin/knowledge 相同，内容变化时推送。
+  "GET /api/admin/knowledge/events": {
+    response: errorResponses,
   },
 
   // ── Chat ────────────────────────────────────────────────────────────────────
