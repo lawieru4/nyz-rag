@@ -42,6 +42,10 @@ export const crawlTasks = pgTable("crawl_tasks", {
   sourceName: text().notNull(),
   status: text().$type<CrawlTaskRecord["status"]>().notNull(),
   progress: integer().notNull().default(0),
+  /** 本次已处理（成功）与失败的文章数，以及单次同步上限。 */
+  processedCount: integer().notNull().default(0),
+  failedCount: integer().notNull().default(0),
+  articleLimit: integer(),
   error: text(),
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [

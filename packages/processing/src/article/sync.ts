@@ -18,7 +18,8 @@ export interface ArticleSyncOptions {
   saveState: (state: ArticleSourceSyncState) => Promise<void>;
   /** 每次请求之间的等待。 */
   pause: () => Promise<void>;
-  onProgress?: (processed: number) => Promise<void> | void;
+  /** 每篇文章处理完（成功或失败）后调用。 */
+  onProgress?: (progress: { processed: number; failed: number }) => Promise<void> | void;
 }
 
 export interface ArticleSyncResult {
@@ -51,12 +52,12 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
     try {
       await paced(() => options.process(item));
       result.processed += 1;
-      await options.onProgress?.(result.processed);
     } catch (error) {
       if (error instanceof ArticleApiError && error.fatal) throw error;
       result.failures.push({ articleKey: item._key, error: errorText(error) });
       failedKeys.add(item._key);
     }
+    await options.onProgress?.({ processed: result.processed, failed: result.failures.length });
     return true;
   }
   const changed = (item: ArticleListItem) => !known.has(item._key) || (item.updateTime !== undefined && known.get(item._key) !== item.updateTime);
@@ -69,8 +70,10 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
     let quietPages = 0;
     let jumped = false;
     while (true) {
-      const items = await paced(() => options.client.list(page, perPage));
+      const { items, total } = await paced(() => options.client.list(page, perPage));
       result.pages += 1;
+      // 第 1 页的总数代表接口当前的文章规模，供管理端对比已入库数量。
+      if (page === 1 && total !== undefined) state.remoteTotal = total;
       if (!items.length) { state.backfillDone = true; delete state.backfillPage; break; }
       let pageChanged = false;
       for (const item of items) {

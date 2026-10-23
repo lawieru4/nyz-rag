@@ -10,7 +10,7 @@ export * from "./chunking.js";
 export { articleDocumentUpdate, prepareDocument } from "./prepare.js";
 export { contentFingerprint, DEDUP_MIN_LENGTH, isDedupCandidate, normalizeUrl } from "./dedup.js";
 export { processDocument, type ProcessDocumentResult } from "./process.js";
-export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleListItem } from "./article/client.js";
+export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleListItem, type ArticleListPage } from "./article/client.js";
 export { parseArticle, PARSER_VERSION, type ArticleBlock, type ArticleDetail, type ParsedArticle } from "./article/parse.js";
 export { syncArticles, type ArticleSyncOptions, type ArticleSyncResult } from "./article/sync.js";
 export * from "./repository.js";
