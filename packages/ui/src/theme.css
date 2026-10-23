@@ -1,0 +1,103 @@
+/*
+ * shadcn-vue 主题变量，由各应用在 `@import "tailwindcss"` 之后引入。
+ * 配色沿用原有界面：深墨绿主色、浅橄榄强调色、暖灰边框；admin 在自己的样式表里覆盖少量变量。
+ */
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.375rem;
+  --background: #f7f8f6;
+  --foreground: #222a27;
+  --card: #ffffff;
+  --card-foreground: #222a27;
+  --popover: #ffffff;
+  --popover-foreground: #222a27;
+  --primary: #28332d;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5e8;
+  --secondary-foreground: #3f4b39;
+  --muted: #f0f2ef;
+  --muted-foreground: #737d76;
+  --accent: #eff3e8;
+  --accent-foreground: #33451d;
+  --destructive: #a5473a;
+  --border: #e1e6dd;
+  --input: #dfe4dc;
+  --ring: #9aac79;
+  /* 品牌色（Logo 方块）与语义色 */
+  --brand: #dff16e;
+  --brand-foreground: #28311c;
+  --brand-soft: #eff5d9;
+  --success: #628348;
+  --success-soft: #eef4e6;
+  --warning: #8a6a2f;
+  --warning-soft: #fbf3e6;
+  --link: #687a43;
+  /* admin 深色侧边栏 */
+  --sidebar: #202a26;
+  --sidebar-foreground: #aeb9b2;
+  --sidebar-primary: #c9e07b;
+  --sidebar-primary-foreground: #29341e;
+  --sidebar-accent: #35423b;
+  --sidebar-accent-foreground: #f2f5ef;
+  --sidebar-border: #3b4640;
+}
+
+@theme inline {
+  --font-sans: "DM Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-link: var(--link);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply min-h-screen bg-background font-sans text-foreground antialiased;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}

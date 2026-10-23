@@ -12,7 +12,7 @@ pnpm dev                 # 先构建 processing，再并行启动 api / web / wo
 pnpm --filter @nyz-rag/admin dev
 pnpm build               # pnpm -r build
 pnpm typecheck           # 先构建 processing，再 pnpm -r typecheck
-pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|build|typecheck
+pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev|build|typecheck
 ```
 
 - 测试均使用 Node 内置 test runner + tsx：`pnpm --filter @nyz-rag/processing test`、`pnpm --filter @nyz-rag/api test`（契约测试，用 Fastify inject 和注入的假队列，不需要数据库/Redis）、`pnpm --filter @nyz-rag/api-client test`。
@@ -20,7 +20,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|bu
 - 集成测试 `test/pipeline.test.ts` 默认跳过；设置 `NYZ_INTEGRATION_TEST=1` 并提供 `DATABASE_URL`、`REDIS_URL` 启用。它用 tsx 直接拉起 API 和 Worker 源码，使用临时 PostgreSQL schema（连接串 `options=-c search_path=<schema>,public`，结束后删除）、唯一队列名和本地模拟 Embedding 服务。
 - 数据库（Drizzle）：修改 `packages/processing/src/schema.ts` 后运行 `pnpm db:generate` 生成迁移（会去掉外键里写死的 `"public".`，使表可建在任意 schema）；`pnpm db:migrate` 手动执行迁移（API/Worker 启动时也会自动执行）；`pnpm db:import-snapshot [路径]` 把旧 JSON 快照和 `document_vectors` 导入新表，可重复执行；`pnpm db:reindex-search` 按当前词项规则重建全部切片与文档元数据的关键词检索词项（修改 `search-terms.ts` 后执行）。
 - 没有配置 lint。`turbo.json` 存在但根脚本未使用 Turborepo。
-- `@nyz-rag/processing` 通过 `dist/` 导出：单独启动/类型检查 API 或 Worker 前须先 `pnpm --filter @nyz-rag/processing build`，修改 processing 后也要重新构建。`@nyz-rag/types` 直接导出 `src/index.ts`，无需构建。
+- `@nyz-rag/processing` 通过 `dist/` 导出：单独启动/类型检查 API 或 Worker 前须先 `pnpm --filter @nyz-rag/processing build`，修改 processing 后也要重新构建。`@nyz-rag/types`、`@nyz-rag/api-client`、`@nyz-rag/ui` 直接导出源码，无需构建。
 - 容器方式：`docker compose up -d --build --wait`（只启动 api/worker/web/admin）。不要同时运行本机 Worker 和容器 Worker。
 
 ## 架构
@@ -57,7 +57,8 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client> dev|bu
   - `embedding.ts`：OpenAI 兼容 `/embeddings`，32 条一批。`selectEmbeddingProvider` 选唯一“启用 + 默认 + 有 embeddingModel”的 provider（数据库唯一索引保证最多一个默认）；provider 记录只保存密钥的**环境变量名**，运行时从 `process.env` 读取，密钥值不入库。
 - `packages/types`：前后端共享的接口类型（`DocumentSummary` 为列表项、`DocumentRecord` 为含正文和切片的详情、`KnowledgeOverview` 等），以 `@nyz-rag/types` 引用。新增/修改接口时先改这里。
 - `packages/api-client`：前端共享的 fetch 客户端（直接导出 `src/index.ts`，无需构建）。`request<T>` 把 `{ error }` 响应转为 `ApiError`；`stream` 解析 SSE（跳过心跳），未收到 `done` 即结束时调用 `onIncomplete`，读取中被中止时静默返回。
-- `apps/web`、`apps/admin`：Vue 3 + Vite，各自基本是单个 `src/App.vue`，通过 `@nyz-rag/api-client` 访问 API。admin 使用 `src/adminClient.ts`（携带 Cookie、附加 CSRF 头，401 时切回 `AdminLogin.vue`）。`VITE_API_URL` 为 API 地址；Docker 构建中 `VITE_API_URL` 为空，由 Nginx 将同源 `/api/` 代理到 api:3000。
+- `packages/ui`：shadcn-vue 组件（reka-ui + Tailwind CSS v4），直接导出源码，无需构建：`@nyz-rag/ui/components/<name>`、`@nyz-rag/ui/lib/utils`（`cn`）、`@nyz-rag/ui/lib/toast`、`@nyz-rag/ui/confirm`（`confirm()` 返回 Promise，替代 `window.confirm`，页面需挂载一个 `<ConfirmDialog />`）、`@nyz-rag/ui/theme.css`（主题变量，配色沿用原界面）。新增组件用 `pnpm --filter @nyz-rag/ui add-component <name...>`：它调用 shadcn-vue CLI 后把 `@/` 别名改为相对路径、换行统一为 LF，并移除 CLI 误装的 `cn` 包；不要直接运行 CLI。生成的组件可以按需修改（如 Badge 的 `success`/`muted`/`brand` 变体、中文无障碍文案）。
+- `apps/web`、`apps/admin`：Vue 3 + Vite + Tailwind（`@tailwindcss/vite`），界面组件一律用 `@nyz-rag/ui`，样式写 Tailwind 类，`src/style.css` 只引入 Tailwind/主题并保留少量无法用类表达的样式（文章 Markdown 正文、流式光标等）；应用样式表须 `@source` 扫描 `packages/ui/src`。图标用 `@lucide/vue`（`lucide-vue-next` 已弃用）。提示用 toast，确认用 `confirm()`。reka-ui 的 `SelectItem` 不接受空字符串，admin 的“全部”筛选经 `components/FilterSelect.vue` 用哨兵值转换。通过 `@nyz-rag/api-client` 访问 API。web：`App.vue`（问答、会话、账号）、`AccountDialog.vue`、`components/ArticleView.vue`（公开文章页，Markdown 由 `markdown.ts` 解析）。admin：`App.vue` 负责登录态与布局，各模块在 `views/*`（离开模块即卸载、状态随之清空，再次点击当前模块会重新加载），共用的客户端与数据源列表在 `workspace.ts`；`src/adminClient.ts` 携带 Cookie、附加 CSRF 头，401 时切回 `AdminLogin.vue`。`VITE_API_URL` 为 API 地址；Docker 构建中 `VITE_API_URL` 为空，由 Nginx 将同源 `/api/` 代理到 api:3000。
 - 会话（`chat_sessions`）与问答（`chat_messages`）按 `user_id` 或 `visitor_hash` 归属（至多其一；会话中的问答跟随会话归属，单次问答取提问者），两者都为空的是用户体系上线前的历史数据，只在管理端可见。追问时最近 3 轮问答作为历史送入模型（去掉旧引用编号），检索只用当前问题（未做问题改写）。问答记录的召回片段与得分存于 `message_chunks`。部分状态值是中文字面量（如任务状态 `等待中`/`运行中`/`已完成`/`失败`、来源类型 `网页站点`），修改时保持一致。
 
 ## 环境与基础设施
