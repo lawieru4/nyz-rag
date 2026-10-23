@@ -1006,11 +1006,20 @@ export async function listChatMessages(filter: { query?: string; rating?: string
   return { logs: rows.map(toChatLog), total };
 }
 
+// 用户端的来源另附该文章被送入模型的片段摘录（按召回顺序）。两层子查询都有同名列，内层用别名、外层用 outer() 限定。
+const messageSourcesWithExcerptsColumn = sql<ChatSessionMessage["sources"]>`COALESCE((
+    SELECT json_agg(json_strip_nulls(json_build_object('documentId', ${messageSources.documentId}, 'title', ${messageSources.title}, 'url', ${messageSources.url},
+      'repostSource', ${messageSources.repostSource}, 'excerpts', COALESCE((
+        SELECT json_agg(json_build_object('sectionPath', mc.section_path, 'text', mc.excerpt) ORDER BY mc.position)
+        FROM ${messageChunks} AS mc WHERE mc.message_id = ${outer("message_sources", "message_id")} AND mc.document_id = ${outer("message_sources", "document_id")}
+      ), '[]'))) ORDER BY ${messageSources.position})
+    FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")}), '[]')`;
+
 /** 会话中仍有效的问答，按时间正序。 */
 export async function listSessionMessages(sessionId: string, db: Executor = getDb()): Promise<ChatSessionMessage[]> {
   const rows = await db.select({
     id: chatMessages.id, question: chatMessages.question, answer: chatMessages.answer, answerMode: chatMessages.answerMode, rating: chatMessages.rating,
-    createdAt: chatMessages.createdAt, sources: messageSourcesColumn,
+    createdAt: chatMessages.createdAt, sources: messageSourcesWithExcerptsColumn,
   }).from(chatMessages).where(and(eq(chatMessages.sessionId, sessionId), isNull(chatMessages.supersededAt))).orderBy(asc(chatMessages.createdAt), asc(chatMessages.id));
   return rows.map((row) => ({ ...row, createdAt: iso(row.createdAt)! }));
 }

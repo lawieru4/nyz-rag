@@ -147,7 +147,10 @@ test("answer context groups citations by article and respects the length limit",
   ];
   const context = buildAnswerContext(chunks, 100);
   assert.deepEqual(context.chunks.map((chunk) => [chunk.chunkId, chunk.citation]), [["a", 1], ["c", 1]], "chunks that do not fit are skipped");
-  assert.deepEqual(context.sources, [{ documentId: "doc-1", title: "文章一", url: "https://example.test/a", repostSource: "某公众号" }]);
+  assert.deepEqual(context.sources, [{
+    documentId: "doc-1", title: "文章一", url: "https://example.test/a", repostSource: "某公众号",
+    excerpts: [{ sectionPath: ["结论"], text: "甲".repeat(40) }, { sectionPath: [], text: "丙".repeat(30) }],
+  }], "sources carry the excerpts of their chunks in relevance order");
   assert.equal(buildAnswerContext([{ ...hit("x", 0), content: "长".repeat(300) }], 100).chunks[0].content.length, 100, "the first chunk is truncated");
 
   const [system, user] = buildChatMessages("", "如何提升寿命？", context);

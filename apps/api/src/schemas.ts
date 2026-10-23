@@ -79,6 +79,15 @@ const chatSourceSchema = {
     title: { type: "string" },
     url: { type: "string" },
     repostSource: { type: "string" },
+    excerpts: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { sectionPath: { type: "array", items: { type: "string" } }, text: { type: "string" } },
+        required: ["sectionPath", "text"],
+        additionalProperties: false,
+      },
+    },
   },
   required: ["documentId", "title", "url"],
   additionalProperties: false,
