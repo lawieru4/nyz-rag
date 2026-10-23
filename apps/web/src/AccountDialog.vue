@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import type { UserAccount, UserSessionResponse } from "@nyz-rag/types";
+import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
+import { Button } from "@nyz-rag/ui/components/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
+import { Input } from "@nyz-rag/ui/components/input";
+import { Label } from "@nyz-rag/ui/components/label";
 import { ApiError, client } from "./webClient";
 
 export type AccountMode = "login" | "register" | "forgot" | "password";
@@ -101,79 +106,60 @@ async function submit() {
 </script>
 
 <template>
-  <div class="account-backdrop" @click.self="emit('close')">
-    <section class="account-dialog" role="dialog" aria-modal="true" aria-labelledby="account-title">
-      <header>
-        <div><p class="eyebrow">NYZ ACCOUNT</p><h2 id="account-title">{{ titles[mode] }}</h2></div>
-        <button class="account-close" aria-label="关闭" @click="emit('close')">×</button>
-      </header>
-      <p v-if="mode === 'login' || mode === 'register'" class="account-hint">不登录也可以提问，会话仅保存在当前浏览器；登录后当前浏览器中的会话会归入账号，可在其他设备查看。</p>
-      <p v-else-if="mode === 'forgot'" class="account-hint">重置密码后，其他设备上的登录将失效。</p>
+  <Dialog :open="true" @update:open="(open) => { if (!open) emit('close'); }">
+    <DialogContent class="max-h-[calc(100vh-2.5rem)] overflow-y-auto sm:max-w-100">
+      <DialogHeader>
+        <p class="eyebrow mb-1">NYZ ACCOUNT</p>
+        <DialogTitle>{{ titles[mode] }}</DialogTitle>
+        <DialogDescription v-if="mode === 'login' || mode === 'register'" class="text-xs leading-relaxed">不登录也可以提问，会话仅保存在当前浏览器；登录后当前浏览器中的会话会归入账号，可在其他设备查看。</DialogDescription>
+        <DialogDescription v-else-if="mode === 'forgot'" class="text-xs leading-relaxed">重置密码后，其他设备上的登录将失效。</DialogDescription>
+        <DialogDescription v-else class="sr-only">修改当前账号的登录密码</DialogDescription>
+      </DialogHeader>
 
-      <form class="account-form" novalidate @submit.prevent="submit">
-        <div v-if="error" class="account-error" role="alert">{{ error }}</div>
-        <div v-else-if="info" class="account-info" role="status">{{ info }}</div>
+      <form class="grid gap-3.5" novalidate @submit.prevent="submit">
+        <Alert v-if="error" variant="destructive" role="alert" class="bg-destructive/5 py-2"><AlertDescription>{{ error }}</AlertDescription></Alert>
+        <Alert v-else-if="info" role="status" class="border-transparent bg-secondary py-2 text-secondary-foreground"><AlertDescription class="text-secondary-foreground">{{ info }}</AlertDescription></Alert>
 
-        <label v-if="mode !== 'password'">邮箱
-          <input v-model="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" :disabled="busy" />
-        </label>
-        <label v-if="needsCode">验证码
-          <span class="code-row">
-            <input v-model="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字" :disabled="busy" />
-            <button type="button" class="code-button" :disabled="sending || cooldown > 0 || busy" @click="sendCode">{{ sending ? '发送中…' : cooldown ? `${cooldown} 秒后重发` : '发送验证码' }}</button>
-          </span>
-        </label>
-        <label v-if="mode === 'login'">密码
-          <input v-model="password" type="password" autocomplete="current-password" maxlength="1024" :disabled="busy" />
-        </label>
-        <label v-if="mode === 'password'">当前密码
-          <input v-model="currentPassword" type="password" autocomplete="current-password" maxlength="1024" :disabled="busy" />
-        </label>
+        <div v-if="mode !== 'password'" class="grid gap-1.5">
+          <Label for="account-email">邮箱</Label>
+          <Input id="account-email" v-model="email" type="email" autocomplete="email" maxlength="254" placeholder="name@example.com" :disabled="busy" />
+        </div>
+        <div v-if="needsCode" class="grid gap-1.5">
+          <Label for="account-code">验证码</Label>
+          <div class="flex gap-2">
+            <Input id="account-code" v-model="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字" :disabled="busy" />
+            <Button type="button" variant="secondary" class="flex-none" :disabled="sending || cooldown > 0 || busy" @click="sendCode">{{ sending ? '发送中…' : cooldown ? `${cooldown} 秒后重发` : '发送验证码' }}</Button>
+          </div>
+        </div>
+        <div v-if="mode === 'login'" class="grid gap-1.5">
+          <Label for="account-password">密码</Label>
+          <Input id="account-password" v-model="password" type="password" autocomplete="current-password" maxlength="1024" :disabled="busy" />
+        </div>
+        <div v-if="mode === 'password'" class="grid gap-1.5">
+          <Label for="account-current-password">当前密码</Label>
+          <Input id="account-current-password" v-model="currentPassword" type="password" autocomplete="current-password" maxlength="1024" :disabled="busy" />
+        </div>
         <template v-if="mode !== 'login'">
-          <label>{{ newPasswordLabel }}
-            <input v-model="password" type="password" autocomplete="new-password" maxlength="128" placeholder="8～128 个字符" :disabled="busy" />
-          </label>
-          <label>确认密码
-            <input v-model="confirmPassword" type="password" autocomplete="new-password" maxlength="128" :disabled="busy" />
-          </label>
+          <div class="grid gap-1.5">
+            <Label for="account-new-password">{{ newPasswordLabel }}</Label>
+            <Input id="account-new-password" v-model="password" type="password" autocomplete="new-password" maxlength="128" placeholder="8～128 个字符" :disabled="busy" />
+          </div>
+          <div class="grid gap-1.5">
+            <Label for="account-confirm-password">确认密码</Label>
+            <Input id="account-confirm-password" v-model="confirmPassword" type="password" autocomplete="new-password" maxlength="128" :disabled="busy" />
+          </div>
         </template>
 
-        <button type="submit" class="account-submit" :disabled="busy">{{ busy ? '请稍候…' : { login: '登录', register: '注册并登录', forgot: '重置密码并登录', password: '保存新密码' }[mode] }}</button>
+        <Button type="submit" class="mt-1 h-10" :disabled="busy">{{ busy ? '请稍候…' : { login: '登录', register: '注册并登录', forgot: '重置密码并登录', password: '保存新密码' }[mode] }}</Button>
       </form>
 
-      <footer v-if="mode !== 'password'" class="account-links">
+      <footer v-if="mode !== 'password'" class="flex justify-between gap-2.5 border-t pt-3">
         <template v-if="mode === 'login'">
-          <button type="button" @click="emit('update:mode', 'forgot')">忘记密码？</button>
-          <button type="button" @click="emit('update:mode', 'register')">没有账号？注册</button>
+          <Button type="button" variant="link" size="sm" class="h-auto px-0 text-link" @click="emit('update:mode', 'forgot')">忘记密码？</Button>
+          <Button type="button" variant="link" size="sm" class="h-auto px-0 text-link" @click="emit('update:mode', 'register')">没有账号？注册</Button>
         </template>
-        <button v-else type="button" @click="emit('update:mode', 'login')">← 返回登录</button>
+        <Button v-else type="button" variant="link" size="sm" class="h-auto px-0 text-link" @click="emit('update:mode', 'login')">← 返回登录</Button>
       </footer>
-    </section>
-  </div>
+    </DialogContent>
+  </Dialog>
 </template>
-
-<style scoped>
-.account-backdrop{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:20px;background:#1f2a2366}
-.account-dialog{width:min(400px,100%);max-height:calc(100vh - 40px);overflow:auto;border:1px solid #e1e6dd;border-radius:9px;background:#fff;padding:22px 24px 18px;box-shadow:0 18px 50px #1c26182b}
-.account-dialog header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-.account-dialog .eyebrow{margin-bottom:6px}
-.account-dialog h2{margin:0;color:#27312b;font-size:19px;font-weight:600}
-.account-close{border:0;background:none;color:#8d968f;font-size:22px;line-height:1;cursor:pointer}
-.account-hint{margin:10px 0 0;color:#7b857e;font-size:11px;line-height:1.6}
-.account-form{display:grid;gap:13px;margin-top:16px}
-.account-form label{display:grid;gap:6px;color:#4f5a53;font-size:12px;font-weight:500}
-.account-form input{width:100%;min-width:0;height:38px;border:1px solid #dfe4dc;border-radius:5px;background:#fff;padding:0 11px;color:#26302a;font:13px inherit}
-.account-form input:focus{outline:2px solid #9aac79;outline-offset:1px}
-.account-form input:disabled{background:#f6f7f5}
-.code-row{display:flex;gap:8px}
-.code-button{flex:none;height:38px;border:1px solid #cdd6c4;border-radius:5px;background:#f5f8ef;color:#46533e;padding:0 11px;font:12px inherit;cursor:pointer}
-.code-button:disabled{opacity:.55;cursor:default}
-.account-submit{height:40px;margin-top:4px;border:0;border-radius:6px;background:#28332d;color:#fff;font:13px inherit;cursor:pointer}
-.account-submit:disabled{opacity:.55;cursor:default}
-.account-error,.account-info{padding:8px 10px;border-radius:5px;font-size:12px;line-height:1.5}
-.account-error{background:#fbefeb;color:#8a3b2f}
-.account-info{background:#f1f5e8;color:#566645}
-.account-links{display:flex;justify-content:space-between;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid #edf0eb}
-.account-links button{border:0;background:none;padding:0;color:#687a43;font:12px inherit;cursor:pointer}
-.account-links button:hover{text-decoration:underline}
-</style>

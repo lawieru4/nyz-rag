@@ -1,5 +1,11 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { LoaderCircle } from "@lucide/vue";
+import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
+import { Button } from "@nyz-rag/ui/components/button";
+import { Card } from "@nyz-rag/ui/components/card";
+import { Input } from "@nyz-rag/ui/components/input";
+import { Label } from "@nyz-rag/ui/components/label";
 
 const props = defineProps<{
   error?: string;
@@ -20,215 +26,32 @@ function handleSubmit() {
 </script>
 
 <template>
-  <div class="login-shell">
-    <div class="login-card">
-      <div class="login-brand">
-        <span class="brand-mark">N</span>
+  <div class="flex min-h-screen items-center justify-center p-4">
+    <Card class="w-full max-w-100 gap-0 px-9 pt-10 pb-9">
+      <div class="mb-9 flex items-center gap-3">
+        <span class="grid size-9 flex-none place-items-center rounded-lg bg-sidebar-primary text-base font-bold text-sidebar-primary-foreground">N</span>
         <div>
-          <span class="brand-name">NYZ <b>KNOWLEDGE OPS</b></span>
-          <span class="brand-sub">管理后台</span>
+          <span class="block text-sm font-bold">NYZ <b class="mt-0.5 block font-mono text-[9px] font-medium text-muted-foreground">KNOWLEDGE OPS</b></span>
+          <span class="block text-[10px] text-muted-foreground">管理后台</span>
         </div>
       </div>
 
-      <form class="login-form" @submit.prevent="handleSubmit" novalidate>
-        <h1 class="login-title">登录</h1>
-
-        <div v-if="error" class="login-error" role="alert" aria-live="assertive">
-          {{ error }}
+      <form class="grid gap-4" novalidate @submit.prevent="handleSubmit">
+        <h1 class="text-xl font-semibold">登录</h1>
+        <Alert v-if="error" variant="destructive" role="alert" aria-live="assertive"><AlertDescription>{{ error }}</AlertDescription></Alert>
+        <div class="grid gap-2">
+          <Label for="login-username">用户名</Label>
+          <Input id="login-username" v-model="username" type="text" name="username" autocomplete="username" required :disabled="busy" placeholder="请输入用户名" aria-required="true" />
         </div>
-
-        <label class="login-label">
-          <span>用户名</span>
-          <input
-            v-model="username"
-            type="text"
-            name="username"
-            autocomplete="username"
-            required
-            :disabled="busy"
-            placeholder="请输入用户名"
-            aria-required="true"
-          />
-        </label>
-
-        <label class="login-label">
-          <span>密码</span>
-          <input
-            v-model="password"
-            type="password"
-            name="password"
-            autocomplete="current-password"
-            required
-            :disabled="busy"
-            placeholder="请输入密码"
-            aria-required="true"
-          />
-        </label>
-
-        <button type="submit" class="login-submit" :disabled="busy" :aria-busy="busy">
-          <span v-if="busy" class="login-spinner" aria-hidden="true">↻</span>
+        <div class="grid gap-2">
+          <Label for="login-password">密码</Label>
+          <Input id="login-password" v-model="password" type="password" name="password" autocomplete="current-password" required :disabled="busy" placeholder="请输入密码" aria-required="true" />
+        </div>
+        <Button type="submit" class="mt-1 h-10" :disabled="busy" :aria-busy="busy">
+          <LoaderCircle v-if="busy" class="animate-spin" aria-hidden="true" />
           {{ busy ? "验证中…" : "登录" }}
-        </button>
+        </Button>
       </form>
-    </div>
+    </Card>
   </div>
 </template>
-
-<style scoped>
-.login-shell {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f4f6f3;
-  padding: 16px;
-}
-
-.login-card {
-  width: 100%;
-  max-width: 400px;
-  background: #fff;
-  border: 1px solid #dfe5df;
-  border-radius: 10px;
-  padding: 40px 36px 36px;
-  box-shadow: 0 2px 12px rgba(32, 42, 38, 0.07);
-}
-
-.login-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 36px;
-}
-
-.brand-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: #c9e07b;
-  color: #29341e;
-  display: grid;
-  place-items: center;
-  font-size: 16px;
-  font-weight: 700;
-  flex: none;
-}
-
-.brand-name {
-  display: block;
-  font-size: 14px;
-  font-weight: 700;
-  color: #202a26;
-}
-
-.brand-name b {
-  color: #89958e;
-  font-family: "DM Mono", monospace;
-  font-weight: 500;
-  font-size: 9px;
-  display: block;
-  margin-top: 3px;
-}
-
-.brand-sub {
-  display: block;
-  font-size: 10px;
-  color: #97a59d;
-  font-family: "DM Mono", monospace;
-  margin-top: 2px;
-}
-
-.login-title {
-  margin: 0 0 22px;
-  font-size: 20px;
-  font-weight: 700;
-  color: #1f2c24;
-}
-
-.login-form {
-  display: grid;
-  gap: 16px;
-}
-
-.login-error {
-  padding: 10px 14px;
-  border-radius: 5px;
-  background: #fdf2f1;
-  border: 1px solid #f0c8c2;
-  color: #9b4638;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.login-label {
-  display: grid;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #536057;
-}
-
-.login-label input {
-  height: 40px;
-  padding: 0 12px;
-  border: 1px solid #dfe5df;
-  border-radius: 5px;
-  background: #f9fbf8;
-  color: #1f2c24;
-  font-size: 13px;
-  transition: border-color 0.15s;
-}
-
-.login-label input:focus {
-  outline: none;
-  border-color: #8ab87a;
-  background: #fff;
-}
-
-.login-label input:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.login-submit {
-  margin-top: 6px;
-  height: 42px;
-  background: #557c5c;
-  color: #fff;
-  border: none;
-  border-radius: 5px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  transition: background 0.15s;
-}
-
-.login-submit:hover:not(:disabled) {
-  background: #44674b;
-}
-
-.login-submit:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-
-.login-spinner {
-  display: inline-block;
-  animation: spin 1s linear infinite;
-  font-size: 16px;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (max-width: 480px) {
-  .login-card {
-    padding: 28px 20px 24px;
-  }
-}
-</style>

@@ -1,0 +1,89 @@
+<script setup lang="ts">
+import { onMounted, onUnmounted, ref } from "vue";
+import { ArrowUpRight, Search } from "@lucide/vue";
+import { Button } from "@nyz-rag/ui/components/button";
+import { Card } from "@nyz-rag/ui/components/card";
+import { Input } from "@nyz-rag/ui/components/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@nyz-rag/ui/components/table";
+import { toast } from "@nyz-rag/ui/lib/toast";
+import EmptyState from "../components/EmptyState.vue";
+import FilterSelect from "../components/FilterSelect.vue";
+import ListPager from "../components/ListPager.vue";
+import PageHeading from "../components/PageHeading.vue";
+import StatusBadge from "../components/StatusBadge.vue";
+import { client, pageSize } from "../workspace";
+import ChatLogSheet from "./ChatLogSheet.vue";
+import { chatLogOwner, ratingLabel, type ChatLog } from "./chat-logs";
+
+const logs = ref<ChatLog[]>([]);
+const total = ref(0);
+const query = ref("");
+const rating = ref("");
+const page = ref(1);
+const loading = ref(false);
+const selected = ref<ChatLog | null>(null);
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function loadChatLogs() {
+  loading.value = true;
+  const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize) });
+  if (query.value.trim()) params.set("query", query.value.trim());
+  if (rating.value) params.set("rating", rating.value);
+  try {
+    const data = await client.request<{ logs: ChatLog[]; total: number }>(`/api/admin/chat-logs?${params}`);
+    logs.value = data.logs;
+    total.value = data.total;
+  } catch {
+    toast.error("问答记录加载失败，请检查 API 服务");
+  } finally {
+    loading.value = false;
+  }
+}
+onMounted(loadChatLogs);
+onUnmounted(() => clearTimeout(searchTimer));
+
+function search() {
+  page.value = 1;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void loadChatLogs(), 250);
+}
+
+function filter() {
+  page.value = 1;
+  void loadChatLogs();
+}
+</script>
+
+<template>
+  <PageHeading eyebrow="CONVERSATION AUDIT" title="问答记录" subtitle="查看用户提问、模型回答、引用来源与评价">
+    <span class="font-mono text-xs text-muted-foreground">{{ total }} 条记录</span>
+  </PageHeading>
+  <Card class="min-h-96 gap-0 overflow-hidden py-0">
+    <div class="flex flex-wrap gap-2.5 border-b px-4 py-3.5">
+      <label class="relative min-w-0 basis-full sm:basis-auto sm:flex-1">
+        <Search class="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+        <Input v-model="query" class="pl-8" placeholder="搜索问题、回答、来源或用户邮箱" aria-label="搜索问答记录" @input="search" />
+      </label>
+      <FilterSelect v-model="rating" label="筛选评价" all-label="全部评价" :options="[{ value: 'rated', label: '已评价' }, { value: 'unrated', label: '未评价' }]" @update:model-value="filter" />
+    </div>
+    <Table class="min-w-[750px]">
+      <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">用户提问</TableHead><TableHead>提问人</TableHead><TableHead>引用来源</TableHead><TableHead>评价</TableHead><TableHead>时间</TableHead><TableHead /></TableRow></TableHeader>
+      <TableBody>
+        <TableRow v-for="log in logs" :key="log.id" class="text-xs text-muted-foreground">
+          <TableCell class="py-3 pl-4">
+            <button class="grid max-w-96 gap-1 text-left" @click="selected = log"><b class="truncate text-xs text-foreground hover:underline">{{ log.question }}</b><small class="truncate text-[11px]">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small></button>
+          </TableCell>
+          <TableCell>{{ chatLogOwner(log) }}</TableCell>
+          <TableCell class="max-w-64 truncate">{{ log.sources.length ? log.sources.map((source) => source.title).join('、') : '无引用' }}</TableCell>
+          <TableCell><StatusBadge :on="log.rating === 'positive'">{{ ratingLabel(log.rating) }}</StatusBadge></TableCell>
+          <TableCell>{{ new Date(log.createdAt).toLocaleString() }}</TableCell>
+          <TableCell><div class="flex justify-end"><Button variant="ghost" size="icon-sm" title="查看详情" aria-label="查看详情" @click="selected = log"><ArrowUpRight /></Button></div></TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
+    <EmptyState v-if="loading && !logs.length">正在加载问答记录…</EmptyState>
+    <EmptyState v-else-if="!logs.length">没有符合条件的问答记录</EmptyState>
+    <ListPager v-model:page="page" :total="total" unit="条" :disabled="loading" class="mt-auto" @update:page="loadChatLogs" />
+  </Card>
+  <ChatLogSheet :log="selected" @close="selected = null" />
+</template>
