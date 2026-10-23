@@ -65,13 +65,13 @@ pnpm dev
 - 文章详情：`GET /api/documents/:id` 仅返回已就绪文档的公开字段；用户端引用可打开 `/#/documents/:id`，保留问答页面状态。
 - 检索范围：搜索、单次问答与 SSE 请求均可附带 `filters`，例如 `{ "publishedFrom": "2026-01-01", "publishedTo": "2026-10-21", "categories": ["科研"], "tags": ["钠电"], "scenarios": ["储能"], "sourceId": "..." }`。日期按 UTC 整日包含首尾；各列表精确匹配、列表内 OR、字段间 AND，空列表不限制。筛选用于当前请求（重新生成亦使用当前筛选），不绑定或持久化到会话。
 
-网页采集、nyzdata 文章 API 增量同步、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通，用户端支持多轮会话、流式输出、停止生成、重新生成与复制回答；模块进度见 [模块清单](docs/module-status.md)。
+nyzdata 文章 API 增量同步（数据源只支持文章接口，已移除网页站点采集）、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通，用户端支持多轮会话、流式输出、停止生成、重新生成与复制回答；模块进度见 [模块清单](docs/module-status.md)。
 
 API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。问答使用同一默认供应商的 Chat 模型（温度与最大 Token 在模型配置中设置），未配置或调用失败时直接摘录原文片段；填写 Rerank 模型并在知识库中开启重排序后，召回结果会先经过重排序。检索参数（召回数量、相似度阈值、最大上下文、回答提示词）取最近创建的知识库，请求也可通过 `knowledgeBaseId` 指定。
 
-接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 写在 `.env` 的 `NYZ_ARTICLE_TOKEN`，只有 Worker 读取。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200）。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
+接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 写在 `.env` 的 `NYZ_ARTICLE_TOKEN`，只有 Worker 读取。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200），请求间隔与超时由 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS` 设置。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
 
-元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。关键词检索的词项随切片生成；从旧版本升级时，Worker 启动会自动为已有切片补齐，修改词项规则后运行 `pnpm db:reindex-search` 全量重建。从旧版 JSON 快照升级时执行一次 `pnpm db:import-snapshot [快照绝对路径]`（默认读取 `NYZ_STORE_PATH` 或 `.nyz-data/knowledge.json`），会同时迁移旧 `document_vectors` 表中的向量；可重复执行，已存在的记录会跳过。确认无误后可由管理员删除 `document_vectors` 表。
+元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。关键词检索的词项随切片生成；从旧版本升级时，Worker 启动会自动为已有切片补齐，修改词项规则后运行 `pnpm db:reindex-search` 全量重建。迁移 `0011` 删除网页站点来源及其文档（以及没有原始文章 JSON 的文档）；原本是这些文档重复项的文章会标记为处理失败，需在文档管理中「重新处理」。
 
 迁移 `0005` 为 384、512、768、1024、1536、2000 维向量建立 HNSW 部分表达式索引，其他维度继续精确检索（`vector` HNSW 上限为 2000 维）。HNSW 为近似召回，过滤后候选不足时自动精确回退。已有较大语料首次建索引会延长启动并阻塞切片写入，宜在维护窗口先运行 `pnpm db:migrate`；迁移连接不受普通查询的 10 秒超时限制。本轮只验证了索引执行路径和正确性，未作全量速度或召回率承诺。
 

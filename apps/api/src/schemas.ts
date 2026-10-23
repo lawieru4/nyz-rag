@@ -257,7 +257,7 @@ const documentSummarySchema = {
     createdAt: { type: "string" },
     updatedAt: { type: "string" },
   },
-  required: ["id", "sourceId", "title", "url", "canonicalUrl", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
+  required: ["id", "sourceId", "title", "url", "canonicalUrl", "externalId", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
   additionalProperties: false,
 } as const;
 
@@ -373,7 +373,6 @@ const documentRecordSchema = {
     ...documentSummarySchema.properties,
     content: { type: "string" },
     markdown: { type: "string" },
-    rawHtml: { type: "string" },
     metadata: articleMetadataSchema,
     chunks: { type: "array", items: documentChunkRecordSchema },
     primary: documentReferenceSchema,
@@ -531,7 +530,7 @@ const dataSourceRecordSchema = {
     id: { type: "string" },
     name: { type: "string" },
     url: { type: "string" },
-    kind: { type: "string", enum: ["文章 API", "网页站点"] },
+    kind: { type: "string", enum: ["文章 API"] },
     frequency: { type: "string" },
     status: { type: "string", enum: ["运行中", "已暂停"] },
     documentCount: { type: "number" },
@@ -546,7 +545,7 @@ const createSourceBodySchema = {
   properties: {
     name: nonBlankString,
     url: nonBlankString,
-    kind: { type: "string", enum: ["文章 API", "网页站点"] },
+    kind: { type: "string", enum: ["文章 API"] },
     frequency: { type: "string" },
   },
   required: ["name", "url", "kind"],

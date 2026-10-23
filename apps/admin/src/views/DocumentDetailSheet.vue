@@ -75,7 +75,6 @@ const emit = defineEmits<{
           </ul>
         </DetailSection>
         <DetailSection v-if="document.markdown" title="查看完整 Markdown"><pre class="document-text">{{ document.markdown }}</pre></DetailSection>
-        <DetailSection v-if="document.rawHtml" title="查看原始 HTML"><pre class="document-text">{{ document.rawHtml }}</pre></DetailSection>
       </div>
       <SheetFooter class="flex-row flex-wrap justify-end border-t">
         <Button variant="outline" @click="emit('close')">关闭</Button>

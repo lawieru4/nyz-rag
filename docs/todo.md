@@ -4,6 +4,15 @@
 
 建议顺序：一 → 四 → 三，二和五（认证）可以穿插进行（第二阶段已完成）。样本评估表明，现有采集和清洗还无法接入 nyzdata 数据源，检索与问答依赖第四阶段产出的结构化数据，所以第四阶段提前到第三阶段之前。标注「依赖」的条目需先确认后再安装。
 
+## 范围调整（2026-10-23）
+
+- **只通过文章接口获取数据**：移除网页站点采集，数据源只保留 nyzdata 文章 API。
+- **只对正文做 RAG**：暂不处理图片与 PDF 附件，相关条目移到「暂不实施」；解析器已存入 `metadata` 的附件、图片信息保留，不参与检索。
+- **当前优先级**：
+  1. ~~移除网页站点来源（第四阶段）~~，已完成；
+  2. 真实问题评估集与基线，方案见 [evaluation-plan.md](evaluation-plan.md)（第三阶段）；
+  3. 章节父块 + 语义子块切片，方案见 [chunking-design.md](chunking-design.md)，以评估基线验收（第四阶段）。
+
 ## 样本评估结论（200 篇，2026-10-21）
 
 详见 [nyzdata 文章样本评估](nyz-article-evaluation.md)。两批各 100 篇的指标基本一致，结论稳定。
@@ -27,8 +36,8 @@
 - 混合检索（化学式、期刊、机构、中英人名）；
 - 元数据过滤（场景为固定词表，关键词为长尾）；
 - 摘要级召回；
-- PDF 附件（21 篇）；
-- 图片信息（996 张中只有 21% 有图注），优先级低；
+- PDF 附件（21 篇），已调整为暂不实施；
+- 图片信息（996 张中只有 21% 有图注），已调整为暂不实施；
 - 转载来源标注与使用授权确认。
 
 **评估局限**：代理测试的问题取自原文，现有算法也有 90% 以上的命中率，区分不出方案好坏。需要用带标注的真实问题评估集复测。
@@ -46,13 +55,13 @@
 - [x] 表结构：`data_sources`、`crawl_tasks`、`documents`、`document_chunks`、`knowledge_bases`、`chat_messages`、`message_sources`、`model_providers`（迁移由 `pnpm db:generate` 生成到 `packages/processing/migrations`）
 - [x] `document_chunks.embedding` 承载向量，替代独立的 `document_vectors` 表；保留 `provider_id`、`model`、`dimensions`
 - [x] 迁移目录（`packages/processing/migrations`，随包发布便于容器内执行）与 `pnpm db:generate` / `pnpm db:migrate`；API/Worker 启动时自动执行，咨询锁防并发
-- [x] 一次性导入脚本 `pnpm db:import-snapshot`：`.nyz-data/knowledge.json` + `document_vectors` → 新表，可重复执行
+- [x] 一次性导入脚本 `pnpm db:import-snapshot`：`.nyz-data/knowledge.json` + `document_vectors` → 新表，可重复执行（旧快照只含网页数据，已随网页来源移除）
 - [x] `readSnapshot` / `updateSnapshot` 替换为按实体的 repository（`packages/processing/src/repository.ts`），API 与 Worker 改用数据库事务
 - [x] 切片替换与向量清除在同一事务；向量回写用 `processing_version` + 行锁校验切片未变化
 - [x] 问答记录与文档列表改为数据库分页与筛选；`/api/knowledge` 不再返回全部文档
 - [x] 移除 `proper-lockfile`、`NYZ_STORE_PATH` 与 `.nyz-data` 挂载；同步更新 `docker-compose.yml`、`.env.example`、README、`AGENTS.md`、`CLAUDE.md`
 - [x] 集成测试改用临时 schema（`search_path`），结束后删除
-- [x] 本地旧 `document_vectors` 表（0 行）已删除，`.env` 已移除 `NYZ_STORE_PATH`；其他已有数据的环境需先执行 `pnpm db:import-snapshot` 核对后再删除该表
+- [x] 本地旧 `document_vectors` 表（0 行）已删除，`.env` 已移除 `NYZ_STORE_PATH`；其他环境的旧 `document_vectors` 表只含网页数据，可由管理员直接删除
 
 ## 二、API 结构整理
 
@@ -74,7 +83,16 @@
 - [x] 元数据加权：关键词、项目名称、负责人、承担单位的词项写入 `documents.metadata_search_vector`（GIN）。只命中元数据的文档另行召回（最多 20 篇，每篇取一个切片），不占用正文候选；按 IDF × 字段权重（名称/负责人 1.0、单位 0.8、关键词 0.5）加分，同一词项只取最高权重；每篇文档只给最佳切片加一次，常见词项不加分。标题中提取的机构与期刊（全称 + 缩写）以 0.5 权重加入（标题已在切片上下文中计过一次）
 - [x] 回答引用同时标注 nyzdata 文章与原始转载源（`sources[].repostSource`，来自 `metadata.sourceMeta`）
 - [x] 文章衍生的合成检索评估集：`packages/processing/test/evaluation/retrieval-dataset.json` 含 50 条问题、稳定文章 ID、相关性等级与证据摘录；`pnpm evaluate:retrieval` 提供离线及数据库关键词基线，输出 Recall@K、MRR、nDCG@K 和语料缺失统计。不代表真实用户或人工复核标注，不用于宣称混合检索质量
-- [ ] 建立 50 条以上带标注的真实问题评估集，作为切片与检索调整的回归基线；现有合成集仍需收集真实问题、人工复核并补充多文章及分级相关性标注
+- [ ] 真实问题评估集与基线（方案见 [evaluation-plan.md](evaluation-plan.md)），作为切片与检索调整的回归基线；现有合成集保留为冒烟测试，不与真实集合并计算指标
+  - [ ] 前置：真实 token 全量同步并完成向量化，固定评估用知识库参数
+  - [ ] 评估命令 `--mode=hybrid`：调用真实 `retrieve()`，支持逐路消融，输出文章级指标与 Evidence Hit@K（证据原文覆盖，不依赖切片 ID）、上下文精度，按题型分组
+  - [ ] 运行结果保存（语料版本、参数、逐题召回）与 `evaluate:compare` 对比
+  - [ ] 数据集 schemaVersion 2（题型、来源、多轮历史、过滤条件、可回答性、dev/test 划分、多段证据、0 分判定），兼容 v1
+  - [ ] `eval_questions` / `eval_judgments` 表与候选池生成（多种检索配置 top-10 合并）；管理端前先用表格导入导出过渡
+  - [ ] 管理端「评估集」模块：问答记录加入评估集（脱敏编辑）、候选池标注、双人标注与裁决、导出冻结版本
+  - [ ] 第一版 ≥ 80 条（真实提问 + 业务人员盲写，按题型配比），20% 双人标注，κ ≥ 0.6；产出 `real-v1` 与基线运行记录
+  - [ ] 回答层评估：引用正确率、拒答正确率、LLM 评审忠实度（人工抽检校准）
+- [ ] 问题改写：追问时结合历史把问题改写为独立问题后再检索，失败时用原问题；以评估集中的多轮追问题验收
 - [x] 混合召回（向量/关键词各 20 条）、RRF 合并去重（前 30 条）、可选 Rerank，取知识库 `topK` 条送入模型；向量检索或 Rerank 失败时降级。问题改写未做
 - [x] Prompt 组装：知识库回答提示词 + 引用规则，参考资料按文章编号分组，按上下文最大长度截取
 - [x] 会话接口：`POST /api/chat/sessions`、`GET /api/chat/sessions`、`GET /api/chat/sessions/:id/messages`，另有 `DELETE /api/chat/sessions/:id`。会话尚无用户归属（随第五阶段用户登录处理）
@@ -91,29 +109,35 @@
 - [x] 文首元信息（作者/转载源/关键词/场景，`[[双链]]`）与项目导读信息（项目名称/负责人/承担单位/关键词）提取为结构化字段，不进入检索正文与切片正文。分别存于 `metadata.sourceMeta` / `metadata.projectMeta`，完整 Markdown 保留原始字段；项目关键词加入切片上下文，管理端详情 API 保留项目字段。引用已标注原始转载源（见第三阶段）。解析器 v4 对文首连续字段块保守识别，不推断机构或负责人，不单独拆解嵌在名称中的项目编号；历史文档需执行「重新处理」后生效
 - [x] 误用标题（超长、以句末或冒号结尾）降级为段落，标题文字计入切片；从标题解析机构与期刊（解析器 v5，`article/title.ts`，存于 `metadata.titleMeta`）。期刊只认词典并须紧挨标题头部末尾，识别出期刊才提取机构，机构须为「纯汉字机构名 + 人名」的完整项，其余忽略；历史文档需「重新处理」后生效
 - [x] 列表接口增量同步：按 `updateTime` 判断变化，置顶文章不参与停止判断，连续 `NYZ_ARTICLE_OVERLAP_PAGES` 页无变化才停止；单次上限 `NYZ_ARTICLE_SYNC_LIMIT`，回填进度与失败文章记录在 `data_sources.sync_state`，下次继续；`invalidToken`、401/403 中止同步，无正文（VIP/无权限）的文章记为失败
-- [ ] 近似去重（MinHash 等）：同一论文的多版改写只保留一篇或合并
-- [ ] PDF 附件解析（样本中 21 篇报告导读、项目导读的完整内容在附件中）
+- [x] 移除网页站点来源（2026-10-23）：删除 Worker 网页抓取、`chunkText`、`canonicalUrlFromHtml`、`CRAWL_MAX_PAGES` 与旧快照导入命令，请求间隔/超时改名为 `NYZ_ARTICLE_REQUEST_*`；迁移 `0011` 删除网页来源及其文档、删除 `raw_html` 列，`raw_json`/`external_id` 必填，来源类型只允许 `文章 API`（原为网页文档重复项的文章置为处理失败，需重新处理）；API、管理端与测试同步。`normalizeUrl` 与正文指纹去重保留
+- [ ] 近似去重（MinHash 等）：同一论文的多版改写只保留一篇或合并。样本中只有 1 对，优先级低
 - [ ] 与数据提供方确认转载内容的使用授权（样本中 85.5% 转载自微信公众号并经 AI 改写）
 - [x] 保存原始 JSON（`documents.raw_json`）与 `parser_version`；「重新处理」用当前解析器重新解析和切片，无需再次请求接口
 - [x] 文档补充字段：`canonical_url`、`author`、`category`、`published_at`、`content_hash`、`parse_status`、`parse_error` 等。（已加 `external_id`、`canonical_url`、`author`、`category`、`tags`、`published_at`、`source_updated_at`、`content_hash`、`duplicate_of`、`markdown`、`metadata`；解析状态复用 `processing_status`/`processing_error`）
 - [x] 去重：URL 规范化、canonical URL、正文指纹（`content_hash`）。跨来源重复保留为重复文档（`duplicate_of` 指向最早入库的主文档，不切片、不向量化、不参与检索），管理端展示其他来源；主文档变化或删除时由重复文档接替；按指纹咨询锁处理并发。标题 + 发布时间去重未做
-- [ ] 网页正文提取改用 Cheerio + Readability 替代正则。依赖：`cheerio`、`@mozilla/readability`（及 DOM 实现）
-- [ ] robots.txt 按 User-agent 分组完整解析 Disallow/Allow 规则
 - [x] 结构化切片（`packages/processing/src/chunking.ts`）：同章节累积约 800 字，过短章节并入下一节，表格不超过两倍目标长度时整块保留（更长按行切分并重复表头），超长段落按句切分；网页按行切分，不再折叠空白
-- [ ] 精确 Token 计数：当前为估算（中日韩字符计 1，其余约 3.5 字符计 1），精确计数需引入分词器依赖
+- [ ] 章节父块 + 语义子块切片（方案见 [chunking-design.md](chunking-design.md)）：章节为父块（短章节并入上级、长章节按下级标题或块边界拆分），1～3 个连续内容块为子块；子块召回、按父块聚合放入上下文；新增 `document_sections`、`chunker_version`；修正短章节切片章节路径错误。须在评估基线就绪后实施并按基线验收
 - [x] 向量化前为 chunk 添加上下文前缀（文章标题、章节、前 8 个关键词），存于 `document_chunks.context`；保存 `section_path`、`content_type`。节点范围未保存
-- [ ] Worker 拆分为独立阶段任务（采集 → 解析 → 切片 → 向量化），各阶段可单独重试
-- [ ] 图片与附件元数据单独保存（`document_assets`），默认不参与 Embedding
+- [ ] Worker 拆分为独立阶段任务（采集 → 解析 → 切片 → 向量化），各阶段可单独重试。Worker 并发为 1 且「重新处理」可从 `raw_json` 重跑，优先级低
 
 ## 五、认证与生产化
 
 - [x] `/api/admin/*` 增加管理员认证（单管理员账号登录，Redis 会话 Cookie）
-- [ ] 用户登录、历史会话、反馈记录
-- [ ] Redis 限流：IP、用户、模型接口
-- [ ] 角色权限、审计日志
-- [ ] 文档同步分布式锁（`document-lock:{documentId}`）
-- [ ] 成本统计、监控告警、数据备份
+- [x] 用户登录、历史会话、反馈记录：邮箱验证码注册/登录/找回密码，会话、问答与反馈按账号或匿名访客归属（`apps/api/src/user-auth.ts`、`users.ts`）
+- [x] Redis 限流：IP、用户、问答频率与并发，以及模型调用准入（`apps/api/src/rate-limit.ts`、`packages/processing/src/admission.ts`）
+- [ ] 角色权限（进行中：超级管理员与普通管理员账号，超级管理员管理其他管理员）
+- [ ] 审计日志
+- [x] 文档处理互斥：改用 PostgreSQL 会话级咨询锁（`withDocumentWork` / `lockDocument`，键 `nyz-rag:document:<id>`），未采用 Redis 锁。锁随数据库连接释放，Worker 崩溃不残留，无需 TTL 与续期，并与行锁、`processing_version` 校验在同一系统内；持锁期间占用一个连接，提高 Worker 并发时需相应调大连接池
+- [ ] 成本统计（问答记录已有 Token 用量，可按天/模型汇总）、监控告警、数据备份
 
 ## 暂不实施
 
 NestJS 整体重写、Qdrant/Milvus、MinIO/对象存储、Kubernetes、Prometheus/Grafana。待数据量或运维需求出现后再评估。
+
+按 2026-10-23 范围调整，以下条目暂不实施：
+
+- PDF 附件解析（样本中 21 篇报告导读、项目导读的完整内容在附件中）
+- 图片与附件元数据单独保存（`document_assets`）及图片信息检索
+- 网页采集相关：Cheerio + Readability 正文提取、robots.txt 按 User-agent 完整解析（随网页来源一并移除）
+- 精确 Token 计数（需引入分词器依赖；切片按字数控制，估算值够用）
+- 基于 Embedding 的语义切分、LLM 生成切片上下文（Contextual Retrieval），待评估集证明收益后再评估

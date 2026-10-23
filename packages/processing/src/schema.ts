@@ -31,7 +31,8 @@ export const dataSources = pgTable("data_sources", {
   createdAt: timestamptz().notNull().defaultNow(),
   syncedAt: timestamptz(),
 }, (table) => [
-  check("data_sources_kind_check", sql`${table.kind} IN ('文章 API', '网页站点')`),
+  // 只接入 nyzdata 文章接口。
+  check("data_sources_kind_check", sql`${table.kind} = '文章 API'`),
   check("data_sources_status_check", sql`${table.status} IN ('运行中', '已暂停')`),
 ]);
 
@@ -53,15 +54,14 @@ export const documents = pgTable("documents", {
   id: text().primaryKey(),
   sourceId: text().notNull().references(() => dataSources.id, { onDelete: "cascade" }),
   title: text().notNull(),
-  // 规范化后的抓取地址（引用与「打开原文」使用）。
+  // 规范化后的文章地址（引用与「打开原文」使用）。
   url: text().notNull(),
-  // 规范地址：网页声明的 canonical（规范化后）或抓取地址，同一来源内按它识别同一篇文档。
+  // 规范地址，与 url 相同，同一来源内唯一。
   canonicalUrl: text().notNull(),
   content: text().notNull().default(""),
-  rawHtml: text(),
-  // 文章 API 来源：来源标识、原始详情 JSON（解析器升级时据此重新解析）与解析结果。
-  externalId: text(),
-  rawJson: jsonb(),
+  // 来源标识（articleKey）、原始详情 JSON（解析器升级时据此重新解析）与解析结果。
+  externalId: text().notNull(),
+  rawJson: jsonb().notNull(),
   sourceUpdatedAt: timestamptz(),
   markdown: text(),
   author: text(),
@@ -86,7 +86,7 @@ export const documents = pgTable("documents", {
   embeddingModel: text(),
   embeddingDimensions: integer(),
   embeddingChunkCount: integer().notNull().default(0),
-  // 文章级向量（标题 + 摘要），与切片向量同一次写入，模型与维度沿用 embedding_model / embedding_dimensions；没有摘要的文档为空。
+  // 文章级向量（标题 + 摘要），与切片向量同一次写入，模型与维度沿用 embedding_model / embedding_dimensions；没有摘要的文章为空。
   summaryEmbedding: vector(),
   embeddingError: text(),
   embeddingUpdatedAt: timestamptz(),

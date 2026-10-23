@@ -1,4 +1,4 @@
-// 文档去重的纯逻辑：URL 规范化、canonical 地址提取与正文指纹。
+// 文档去重的纯逻辑：URL 规范化与正文指纹。
 import { createHash } from "node:crypto";
 
 // 只去掉明确的跟踪参数；其余参数可能决定页面内容（分页、ID 等），一律保留。
@@ -20,26 +20,6 @@ export function normalizeUrl(value: string, base?: string): string | null {
   params.sort((a, b) => { const [x, y] = [paramName(a), paramName(b)]; return x < y ? -1 : x > y ? 1 : 0; });
   url.search = params.join("&");
   return url.toString();
-}
-
-/**
- * 页面声明的 canonical 地址（规范化后），没有或无效时返回 null。
- * 非首页指向站点首页的 canonical 多为站点配置错误，忽略，否则所有页面会被合并为一篇。
- */
-export function canonicalUrlFromHtml(html: string, pageUrl: string): string | null {
-  const head = html.match(/<head\b[\s\S]*?<\/head>/i)?.[0] ?? html;
-  for (const [tag] of head.matchAll(/<link\b[^>]*>/gi)) {
-    const rel = tag.match(/\brel\s*=\s*(["'])(.*?)\1/i)?.[2] ?? tag.match(/\brel\s*=\s*([^\s"'>]+)/i)?.[1];
-    if (!rel?.toLowerCase().split(/\s+/).includes("canonical")) continue;
-    const href = tag.match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2] ?? tag.match(/\bhref\s*=\s*([^\s"'>]+)/i)?.[1];
-    const canonical = href ? normalizeUrl(href.replace(/&amp;/gi, "&"), pageUrl) : null;
-    if (!canonical) return null;
-    const page = new URL(pageUrl);
-    const target = new URL(canonical);
-    if (target.pathname === "/" && !target.search && (page.pathname !== "/" || page.search)) return null;
-    return canonical;
-  }
-  return null;
 }
 
 // 正文过短（如「加载中」占位页、无权限提示）时不判定重复，避免无关文档被合并。

@@ -3,7 +3,7 @@ import test from "node:test";
 import { ArticleApiError, createArticleClient, type ArticleListItem } from "../src/article/client.js";
 import { PARSER_VERSION, parseArticle, type ArticleDetail } from "../src/article/parse.js";
 import { syncArticles } from "../src/article/sync.js";
-import { articleQuestions, chunkArticle, chunkBlocks, chunkText, embeddingInput, estimateTokens } from "../src/chunking.js";
+import { articleQuestions, chunkArticle, chunkBlocks, embeddingInput, estimateTokens } from "../src/chunking.js";
 import { prepareDocument } from "../src/prepare.js";
 
 const text = (value: string, marks?: Array<{ type: string; attrs?: Record<string, unknown> }>) => ({ type: "text", text: value, ...(marks ? { marks } : {}) });
@@ -70,7 +70,7 @@ test("article chunks exclude meta, related, reference and questions and carry co
   assert.ok(embeddingInput(chunks[0]).startsWith(chunks[0].context));
   assert.deepEqual(articleQuestions(article), ["界面层如何抑制副反应？", "如何放大到工业级？"]);
 
-  const update = prepareDocument("doc", { title: "", content: "", rawJson: sample }).update;
+  const update = prepareDocument("doc", { rawJson: sample }).update;
   assert.equal(update.title, "清华大学某团队EES｜固态电池新进展");
   assert.doesNotMatch(update.content, /qwen3\.6-plus/);
   assert.equal(update.metadata?.followUpQuestions.length, 2);
@@ -102,14 +102,14 @@ test("project intro paragraphs become metadata without entering body chunks", ()
   assert.ok(article.blocks.slice(0, 4).every((block) => block.role === "meta"));
   assert.match(article.markdown, /项目负责人/, "full Markdown remains available for source inspection");
   assert.doesNotMatch(article.plainText, /\[\[/);
-  const { update, chunks } = prepareDocument("project", { title: "old", content: "old", rawJson });
+  const { update, chunks } = prepareDocument("project", { rawJson });
   assert.equal(update.parserVersion, PARSER_VERSION);
   assert.deepEqual(update.metadata?.projectMeta, article.projectMeta);
   assert.doesNotMatch(update.content, /项目名称|项目负责人|承担单位|关键词|bat230/);
   assert.match(update.content, /开发高能量密度电池/);
   assert.doesNotMatch(chunks.map((chunk) => chunk.content).join("\n"), /A\. Smith|National Lab|关键词/);
   assert.match(chunks[0].context, /关键词：锂硫电池、聚合物，复合电解质/);
-  assert.deepEqual(prepareDocument("project", { title: "", content: "", rawJson }), { update, chunks });
+  assert.deepEqual(prepareDocument("project", { rawJson }), { update, chunks });
 });
 
 test("project intro supports multiline blocks, ASCII colons and plain keywords", () => {
@@ -151,12 +151,12 @@ test("project extraction preserves ambiguous or non-intro body text", () => {
 test("article title metadata is stored without changing title, content or chunk context", () => {
   const title = "浙江大学范修林、上海交通大学邓涛AM：三阴离子协同溶剂化重塑双电层";
   const rawJson = detail([paragraph(text("有效正文"))], { title });
-  const { update, chunks } = prepareDocument("title", { title: "", content: "", rawJson });
+  const { update, chunks } = prepareDocument("title", { rawJson });
   assert.deepEqual(update.metadata?.titleMeta, { journal: "Advanced Materials", journalAbbreviation: "AM", institutions: ["浙江大学", "上海交通大学"] });
   assert.equal(update.title, title);
   assert.equal(update.content, "有效正文");
   assert.ok(chunks[0].context.startsWith(`文章：${title}`));
-  assert.equal(prepareDocument("plain", { title: "", content: "", rawJson: detail([paragraph(text("正文"))], { title: "电芯寿命衰减的机理" }) }).update.metadata?.titleMeta, null);
+  assert.equal(prepareDocument("plain", { rawJson: detail([paragraph(text("正文"))], { title: "电芯寿命衰减的机理" }) }).update.metadata?.titleMeta, null);
 });
 
 test("project and repost metadata coexist and merge keyword context without duplicates", () => {
@@ -167,7 +167,7 @@ test("project and repost metadata coexist and merge keyword context without dupl
     paragraph(text("关键词：[[电池]]、[[硫正极]]")),
     paragraph(text("有效正文")),
   ]);
-  const { update, chunks } = prepareDocument("project", { title: "", content: "", rawJson });
+  const { update, chunks } = prepareDocument("project", { rawJson });
   assert.equal(update.metadata?.sourceMeta?.repostSource, "原始来源");
   assert.equal(update.metadata?.projectMeta?.institution, "研究院");
   assert.equal(update.content, "有效正文");
@@ -197,11 +197,7 @@ test("chunkBlocks keeps sections apart, merges short sections, keeps tables and 
   assert.ok(tableChunks.length > 1 && tableChunks.every((chunk) => chunk.content.startsWith("H1 | H2\n")), "oversized tables repeat the header");
 });
 
-test("chunkText keeps line structure for crawled pages", () => {
-  const chunks = chunkText("w", "Page", "First line.\n\nSecond   line.");
-  assert.equal(chunks.length, 1);
-  assert.equal(chunks[0].content, "First line.\nSecond line.");
-  assert.equal(chunks[0].context, "文章：Page");
+test("estimateTokens counts CJK characters individually and other text by length", () => {
   assert.equal(estimateTokens("中文abc defg"), 2 + 2);
 });
 

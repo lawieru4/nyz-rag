@@ -607,17 +607,29 @@ test("POST /api/admin/sources — invalid kind → 400", async () => {
   assertError(res, 400);
 });
 
+test("POST /api/admin/sources — web site sources are no longer accepted → 400", async () => {
+  const app = buildTestApp();
+  app.post("/api/admin/sources", async () => ({}));
+  await app.ready();
+
+  const res = await app.inject({
+    method: "POST", url: "/api/admin/sources",
+    payload: { name: "test", url: "https://example.com", kind: "网页站点" },
+  });
+  assertError(res, 400);
+});
+
 test("POST /api/admin/sources — valid body → 200", async () => {
   const app = buildTestApp();
   app.post("/api/admin/sources", async () => ({
-    id: UUID, name: "src", url: "https://example.com", kind: "网页站点",
+    id: UUID, name: "src", url: "https://example.com", kind: "文章 API",
     frequency: "", status: "运行中", documentCount: 0, updatedAt: null,
   }));
   await app.ready();
 
   const res = await app.inject({
     method: "POST", url: "/api/admin/sources",
-    payload: { name: "src", url: "https://example.com", kind: "网页站点", frequency: "daily" },
+    payload: { name: "src", url: "https://example.com", kind: "文章 API", frequency: "daily" },
   });
   assertOk(res);
 });
@@ -637,7 +649,7 @@ test("PATCH /api/admin/sources/:id — invalid status → 400", async () => {
 test("PATCH /api/admin/sources/:id — valid status → 200", async () => {
   const app = buildTestApp();
   app.patch("/api/admin/sources/:id", async () => ({
-    id: UUID, name: "src", url: "https://example.com", kind: "网页站点",
+    id: UUID, name: "src", url: "https://example.com", kind: "文章 API",
     frequency: "", status: "已暂停", documentCount: 0, updatedAt: null,
   }));
   await app.ready();
@@ -683,6 +695,7 @@ test("GET /api/admin/documents/:id — response serializer preserves nested meta
     title: "Test",
     url: "https://example.com",
     canonicalUrl: "https://example.com/",
+    externalId: "a1",
     tags: ["tag1"],
     status: "ready",
     processingStatus: "chunked",

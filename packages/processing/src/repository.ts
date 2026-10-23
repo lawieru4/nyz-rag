@@ -114,13 +114,13 @@ export async function getStats(db: Executor = getDb()): Promise<KnowledgeStats> 
 // ---- 文档与切片 ----
 
 // 列表不读取正文、原始内容与解析结果等大字段。
-const { content: _content, rawHtml: _rawHtml, rawJson: _rawJson, markdown: _markdown, metadata: _metadata, ...documentColumns } = getTableColumns(documents);
+const { content: _content, rawJson: _rawJson, markdown: _markdown, metadata: _metadata, ...documentColumns } = getTableColumns(documents);
 const summaryColumns = {
   ...documentColumns,
   chunkCount: sql<number>`(SELECT count(*)::int FROM ${documentChunks} WHERE ${documentChunks.documentId} = ${outer("documents", "id")})`,
 };
 
-type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawHtml" | "rawJson" | "markdown" | "metadata"> & { chunkCount: number };
+type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawJson" | "markdown" | "metadata"> & { chunkCount: number };
 const toSummary = (row: SummaryRow): DocumentSummary => compact<DocumentSummary>({
   id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, canonicalUrl: row.canonicalUrl, externalId: row.externalId, author: row.author, category: row.category,
   tags: row.tags, publishedAt: iso(row.publishedAt) ?? null, parserVersion: row.parserVersion, status: row.status,
@@ -163,7 +163,7 @@ export async function getDocumentSummary(id: string, db: Executor = getDb()): Pr
 const referenceColumns = { id: documents.id, sourceId: documents.sourceId, title: documents.title, url: documents.url };
 
 export async function getDocument(id: string, db: Executor = getDb()): Promise<DocumentRecord | null> {
-  const [row] = await db.select({ ...summaryColumns, content: documents.content, rawHtml: documents.rawHtml, markdown: documents.markdown, metadata: documents.metadata })
+  const [row] = await db.select({ ...summaryColumns, content: documents.content, markdown: documents.markdown, metadata: documents.metadata })
     .from(documents).where(eq(documents.id, id));
   if (!row) return null;
   const [chunks, [primary], duplicates] = await Promise.all([
@@ -172,7 +172,7 @@ export async function getDocument(id: string, db: Executor = getDb()): Promise<D
     db.select(referenceColumns).from(documents).where(eq(documents.duplicateOf, id)).orderBy(asc(documents.createdAt), asc(documents.id)),
   ]);
   return compact<DocumentRecord>({
-    ...toSummary(row), content: row.content, markdown: row.markdown, rawHtml: row.rawHtml, metadata: row.metadata, chunks, primary: primary ?? null, duplicates,
+    ...toSummary(row), content: row.content, markdown: row.markdown, metadata: row.metadata, chunks, primary: primary ?? null, duplicates,
   });
 }
 
@@ -200,8 +200,8 @@ export async function lockDocument(tx: Executor, id: string) {
 
 /** 读取重新清洗切片所需的原始内容；调用前应先用 lockDocument 锁定。 */
 export async function getProcessingInput(tx: Executor, id: string) {
-  const [row] = await tx.select({ title: documents.title, content: documents.content, rawJson: documents.rawJson }).from(documents).where(eq(documents.id, id));
-  return row ? { title: row.title, content: row.content, rawJson: row.rawJson as ArticleDetail | null } : null;
+  const [row] = await tx.select({ rawJson: documents.rawJson }).from(documents).where(eq(documents.id, id));
+  return row ? { rawJson: row.rawJson as ArticleDetail } : null;
 }
 
 /** 文章级向量化输入（标题 + 摘要）；没有摘要的文档返回 null。 */
@@ -210,53 +210,44 @@ export async function getSummaryInput(id: string, db: Executor = getDb()): Promi
   return row ? summaryEmbeddingInput(row.title, row.summary) : null;
 }
 
-/** 文章 API 来源已入库的文章：articleKey → 来源 updateTime（毫秒），用于增量同步。 */
+/** 来源已入库的文章：articleKey → 来源 updateTime（毫秒），用于增量同步。 */
 export async function listArticleVersions(sourceId: string, db: Executor = getDb()): Promise<Map<string, number | null>> {
   const rows = await db.select({ externalId: documents.externalId, sourceUpdatedAt: documents.sourceUpdatedAt })
-    .from(documents).where(and(eq(documents.sourceId, sourceId), isNotNull(documents.externalId)));
-  return new Map(rows.map((row) => [row.externalId!, row.sourceUpdatedAt?.getTime() ?? null]));
+    .from(documents).where(eq(documents.sourceId, sourceId));
+  return new Map(rows.map((row) => [row.externalId, row.sourceUpdatedAt?.getTime() ?? null]));
 }
 
 export interface UpsertDocumentInput {
   sourceId: string;
+  /** 来源标识（articleKey），同一来源内按它识别同一篇文章。 */
+  externalId: string;
   url: string;
-  /** 规范地址，默认与 url 相同；没有 externalId 的文档按它识别同一篇。 */
-  canonicalUrl?: string;
   title: string;
   content: string;
-  rawHtml?: string;
-  externalId?: string;
-  rawJson?: ArticleDetail;
+  rawJson: ArticleDetail;
   sourceUpdatedAt?: Date | null;
   status: DocumentStatus;
 }
 
-/** 有 externalId（文章 API）时按来源标识更新，否则按规范地址；地址随之更新。并发写入同一篇时由唯一约束串行化。 */
+/** 按来源标识更新，地址随之更新。并发写入同一篇时由唯一约束串行化。 */
 export async function upsertDocument(tx: Executor, input: UpsertDocumentInput): Promise<string> {
   const values = {
-    url: input.url, canonicalUrl: input.canonicalUrl ?? input.url, title: input.title, content: input.content, rawHtml: input.rawHtml ?? null,
-    externalId: input.externalId ?? null, rawJson: input.rawJson ?? null, sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
+    url: input.url, canonicalUrl: input.url, title: input.title, content: input.content,
+    externalId: input.externalId, rawJson: input.rawJson, sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
   };
   const [row] = await tx.insert(documents)
     .values({ id: randomUUID(), sourceId: input.sourceId, ...values })
-    .onConflictDoUpdate({ target: input.externalId ? [documents.sourceId, documents.externalId] : [documents.sourceId, documents.canonicalUrl], set: { ...values, updatedAt: sql`now()` } })
+    .onConflictDoUpdate({ target: [documents.sourceId, documents.externalId], set: { ...values, updatedAt: sql`now()` } })
     .returning({ id: documents.id });
   // Roll back the upsert if an embedding owner holds the document across transactions.
   await lockDocumentWork(tx, row.id);
   return row.id;
 }
 
-/** 来源内按规范地址查找文档（网页采集判断 canonical 是否可信）。 */
-export async function findDocumentByCanonicalUrl(tx: Executor, sourceId: string, canonicalUrl: string) {
-  const [row] = await tx.select({ id: documents.id, url: documents.url, contentHash: documents.contentHash })
-    .from(documents).where(and(eq(documents.sourceId, sourceId), eq(documents.canonicalUrl, canonicalUrl)));
-  return row ?? null;
-}
-
 // 文章级向量的模型与维度沿用文档的向量信息，因此随之清除；切片向量自带模型与维度，向量化失败时保留。
 const resetEmbedding = { embeddingProviderId: null, embeddingModel: null, embeddingDimensions: null, embeddingChunkCount: 0, summaryEmbedding: null };
 
-/** 清洗结果：正文必填；文章来源同时更新解析出的字段。 */
+/** 清洗结果：正文必填，其余为解析出的字段。 */
 export interface DocumentContentUpdate {
   content: string;
   title?: string;
@@ -359,7 +350,7 @@ export async function reindexChunkSearchTerms(afterId: string, batchSize: number
   return rows.at(-1)?.id ?? null;
 }
 
-/** 按当前规则重新生成一批文档的元数据检索词项，用法同 reindexChunkSearchTerms；没有元数据的文档（网页）跳过。 */
+/** 按当前规则重新生成一批文档的元数据检索词项，用法同 reindexChunkSearchTerms；尚未处理（没有元数据）的文档跳过。 */
 export async function reindexDocumentMetadataTerms(afterId: string, batchSize: number, options: { onlyMissing?: boolean } = {}, db: Executor = getDb()): Promise<string | null> {
   const rows = await db.select({ id: documents.id, metadata: documents.metadata }).from(documents)
     .where(and(sql`${documents.id} > ${afterId}`, isNotNull(documents.metadata), options.onlyMissing ? sql`${documents.metadataSearchVector} = ''::tsvector` : undefined))

@@ -18,7 +18,7 @@ import { client, errorMessage, loadKnowledge, sources, tasks, type Source, type 
 defineProps<{ title: string }>();
 const emit = defineEmits<{ (e: "navigate", module: string): void }>();
 
-const emptyForm = () => ({ name: "", url: "", kind: "文章 API", frequency: "每天" });
+const emptyForm = () => ({ name: "", url: "", frequency: "每天" });
 const dialogOpen = ref(false);
 const form = ref(emptyForm());
 const summary = computed<Array<{ label: string; value: number; unit?: string; hint: string; icon: Component }>>(() => [
@@ -29,9 +29,9 @@ const summary = computed<Array<{ label: string; value: number; unit?: string; hi
 ]);
 
 const taskState = {
-  已完成: { icon: Check, class: "bg-success-soft text-success", progress: "完成", result: "采集完成" },
-  运行中: { icon: RefreshCw, class: "bg-secondary text-link", progress: "", result: "正在采集页面" },
-  失败: { icon: TriangleAlert, class: "bg-destructive/10 text-destructive", progress: "失败", result: "采集失败" },
+  已完成: { icon: Check, class: "bg-success-soft text-success", progress: "完成", result: "同步完成" },
+  运行中: { icon: RefreshCw, class: "bg-secondary text-link", progress: "", result: "正在同步文章" },
+  失败: { icon: TriangleAlert, class: "bg-destructive/10 text-destructive", progress: "失败", result: "同步失败" },
   等待中: { icon: LoaderCircle, class: "bg-muted text-muted-foreground", progress: "排队中", result: "等待 Worker" },
 } satisfies Record<Task["status"], unknown>;
 
@@ -51,7 +51,7 @@ async function addSource() {
     return;
   }
   try {
-    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url }) });
+    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url, kind: "文章 API" }) });
     await loadKnowledge();
     form.value = emptyForm();
     dialogOpen.value = false;
@@ -99,21 +99,20 @@ async function startCrawl(source: Source) {
 
   <section class="mb-7">
     <div class="mb-3 flex items-center justify-between">
-      <div><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置文章接口或站点，并管理同步计划</p></div>
+      <div><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置 nyzdata 文章接口，并管理同步计划</p></div>
       <Button variant="link" size="sm" class="text-link" @click="emit('navigate', '数据源')">查看全部 <ArrowUpRight /></Button>
     </div>
     <Card class="gap-0 overflow-hidden py-0">
       <Table class="min-w-[750px]">
-        <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>类型</TableHead><TableHead>同步频率</TableHead><TableHead>文章数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
+        <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>同步频率</TableHead><TableHead>文章数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
         <TableBody>
           <TableRow v-for="source in sources" :key="source.id" class="text-xs text-muted-foreground">
             <TableCell class="py-3 pl-4">
               <div class="flex items-center gap-2.5">
-                <span class="grid size-7 place-items-center rounded-md border bg-secondary font-mono text-xs text-link">{{ source.kind === '文章 API' ? 'A' : 'W' }}</span>
+                <span class="grid size-7 place-items-center rounded-md border bg-secondary font-mono text-xs text-link">A</span>
                 <span class="grid gap-1"><b class="text-xs font-semibold text-foreground">{{ source.name }}</b><small class="max-w-80 truncate text-[11px]">{{ source.url }}</small></span>
               </div>
             </TableCell>
-            <TableCell>{{ source.kind }}</TableCell>
             <TableCell>{{ source.frequency }}</TableCell>
             <TableCell class="tabular-nums">{{ source.pages }}</TableCell>
             <TableCell><StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge></TableCell>
@@ -154,7 +153,7 @@ async function startCrawl(source: Source) {
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>
   </section>
-  <footer class="flex items-center gap-2 px-0.5 py-3 text-[11px] text-muted-foreground"><Info class="size-3.5 flex-none" />网页站点按 robots.txt 与请求间隔限制采集；文章 API 来源按 updateTime 增量同步，token 由 Worker 环境变量提供。</footer>
+  <footer class="flex items-center gap-2 px-0.5 py-3 text-[11px] text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，token 由 Worker 环境变量提供。</footer>
 
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
@@ -163,19 +162,13 @@ async function startCrawl(source: Source) {
         <DialogTitle>添加数据源</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="addSource">
-        <div class="grid gap-2"><Label for="source-name">数据源名称</Label><Input id="source-name" v-model="form.name" autofocus placeholder="例如：产品帮助中心" required /></div>
-        <div class="grid gap-2"><Label for="source-url">来源地址</Label><Input id="source-url" v-model="form.url" type="url" :placeholder="form.kind === '文章 API' ? 'https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=…' : 'https://example.com'" required /></div>
-        <div class="grid grid-cols-2 gap-3">
-          <div class="grid gap-2">
-            <Label for="source-kind">来源类型</Label>
-            <Select v-model="form.kind"><SelectTrigger id="source-kind" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="kind in ['文章 API', '网页站点']" :key="kind" :value="kind">{{ kind }}</SelectItem></SelectContent></Select>
-          </div>
-          <div class="grid gap-2">
-            <Label for="source-frequency">同步频率</Label>
-            <Select v-model="form.frequency"><SelectTrigger id="source-frequency" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="frequency in ['每小时', '每 6 小时', '每天', '手动']" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent></Select>
-          </div>
+        <div class="grid gap-2"><Label for="source-name">数据源名称</Label><Input id="source-name" v-model="form.name" autofocus placeholder="例如：NYZ 储能文章" required /></div>
+        <div class="grid gap-2"><Label for="source-url">来源地址</Label><Input id="source-url" v-model="form.url" type="url" placeholder="https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=…" required /></div>
+        <div class="grid gap-2">
+          <Label for="source-frequency">同步频率</Label>
+          <Select v-model="form.frequency"><SelectTrigger id="source-frequency" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="frequency in ['每小时', '每 6 小时', '每天', '手动']" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent></Select>
         </div>
-        <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权和抓取规则后再启动。文章 API 填写文章列表接口地址（不含 token），token 在 Worker 环境变量 NYZ_ARTICLE_TOKEN 中配置。</p>
+        <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权后再启动。来源地址填写 nyzdata 文章列表接口（不含 token），token 在 Worker 环境变量 NYZ_ARTICLE_TOKEN 中配置。</p>
         <DialogFooter>
           <Button type="button" variant="outline" @click="dialogOpen = false">取消</Button>
           <Button type="submit">添加来源</Button>

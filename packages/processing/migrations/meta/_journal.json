@@ -78,6 +78,13 @@
       "when": 1792719000000,
       "tag": "0010_admin_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792721136844,
+      "tag": "0011_article_only_sources",
+      "breakpoints": true
     }
   ]
 }
