@@ -559,10 +559,10 @@ test("PUT /api/admin/model-settings/:capability — validates the capability and
 
   const valid = { providerId: UUID, model: "deepseek-ai/DeepSeek-V3" };
   assertError(await app.inject({ method: "PUT", url: "/api/admin/model-settings/vision", payload: valid }), 400);
-  for (const invalid of [{ providerId: BAD_ID }, { model: " " }, { model: "x".repeat(201) }, { temperature: 5 }, { maxTokens: 10.5 }, { extra: 1 }]) {
+  for (const invalid of [{ providerId: BAD_ID }, { model: " " }, { model: "x".repeat(201) }, { temperature: 5 }, { maxTokens: 10.5 }, { maxTokens: 1048577 }, { extra: 1 }]) {
     assertError(await app.inject({ method: "PUT", url: "/api/admin/model-settings/chat", payload: { ...valid, ...invalid } }), 400);
   }
-  const res = await app.inject({ method: "PUT", url: "/api/admin/model-settings/chat", payload: { ...valid, temperature: 0.7, maxTokens: 512 } });
+  const res = await app.inject({ method: "PUT", url: "/api/admin/model-settings/chat", payload: { ...valid, temperature: 0.7, maxTokens: 131072 } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().extra, undefined);
 });
