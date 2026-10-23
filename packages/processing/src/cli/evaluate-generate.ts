@@ -40,7 +40,7 @@ const samplePath = join(workDir, "sample.json");
 const itemsPath = join(workDir, "items.jsonl");
 
 const CRITERION_LABELS: Record<ReviewCriterion, string> = {
-  standalone: "不能独立理解", supported: "证据不足以支持答案", faithful: "答案有编造或过度推断", specific: "答案不明确", distinctive: "属于通识而非文章特有内容", natural: "不像真实提问",
+  standalone: "不能独立理解", supported: "证据不足以支持答案", faithful: "答案有编造或过度推断", specific: "答案不明确", distinctive: "同主题的其他文章也能回答或属于通识", natural: "不像真实提问",
 };
 
 interface SampleFile {
@@ -81,7 +81,7 @@ interface AttemptRecord {
 async function loadCorpus(): Promise<{ articles: CorpusArticle[]; snapshot: CorpusSnapshot }> {
   const rows = await getDb().select({
     articleKey: documents.externalId, title: documents.title, category: documents.category, content: documents.content, metadata: documents.metadata,
-    contentHash: documents.contentHash, parserVersion: documents.parserVersion, embeddingStatus: documents.embeddingStatus, embeddingModel: documents.embeddingModel,
+    contentHash: documents.contentHash, publishedAt: documents.publishedAt, parserVersion: documents.parserVersion, embeddingStatus: documents.embeddingStatus, embeddingModel: documents.embeddingModel,
   }).from(documents).where(and(eq(documents.status, "ready"), isNull(documents.duplicateOf)));
   const parserVersions: Record<string, number> = {};
   const models = new Map<string, number>();
@@ -95,7 +95,7 @@ async function loadCorpus(): Promise<{ articles: CorpusArticle[]; snapshot: Corp
   }
   const embeddingModel = [...models].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
   return {
-    articles: rows.map((row) => ({ articleKey: row.articleKey, title: row.title, category: row.category, content: row.content, metadata: row.metadata as ArticleMetadata | null, contentHash: row.contentHash })),
+    articles: rows.map((row) => ({ articleKey: row.articleKey, title: row.title, category: row.category, content: row.content, metadata: row.metadata as ArticleMetadata | null, contentHash: row.contentHash, publishedAt: row.publishedAt })),
     snapshot: {
       documents: rows.length,
       fingerprint: corpusFingerprint(rows),
@@ -234,7 +234,7 @@ async function generate(sample: SampleFile, articles: Map<string, CorpusArticle>
           // 审核输出无法解析是审核模型的问题，记为 error，下次运行重新审核同一篇文章。
           record.review = parseReview(parseModelJson(reviewText));
           if (!record.review.passed) {
-            const failed = REVIEW_CRITERIA.filter((key) => !record.review!.criteria[key]).map((key) => CRITERION_LABELS[key]);
+            const failed = REVIEW_CRITERIA.filter((key) => !record.review!.criteria[key]).map((key) => `${CRITERION_LABELS[key]}（${record.review!.scores[key] ?? "无"} 分）`);
             record.failures.push(`审核未通过：${failed.join("、")}${record.review.reason ? `。${record.review.reason}` : ""}`);
           }
         }
@@ -275,6 +275,9 @@ async function writeReport(sample: SampleFile, scope: SampleFile["articles"], at
   const failureCategories: Record<string, number> = {};
   const reviewFailures: Record<string, number> = {};
   const approvedBy: Record<string, number> = {};
+  // 已通过题目的各项审核平均分，用于观察审核口径是否过松。
+  const scoreTotals: Record<string, number> = {};
+  const scoreCounts: Record<string, number> = {};
   const overlap: Record<string, number> = { "<0.4": 0, "0.4-0.6": 0, ">=0.6": 0 };
   const usage = { generate: { promptTokens: 0, completionTokens: 0 }, review: { promptTokens: 0, completionTokens: 0 } };
   let errors = 0;
@@ -303,7 +306,14 @@ async function writeReport(sample: SampleFile, scope: SampleFile["articles"], at
       if (generated.type !== target.type) fallbackToFact += 1;
       const value = final.lexicalOverlap ?? 0;
       count(overlap, value < 0.4 ? "<0.4" : value < 0.6 ? "0.4-0.6" : ">=0.6");
-      preview.push(`- 问题：${generated.question}`, `- 答案：${generated.answer}`, ...generated.evidence.map((text) => `- 证据：${text}`), `- 词面重叠 ${value}，第 ${final.attempt} 次通过`, "");
+      const scores = final.review?.scores;
+      if (scores) for (const key of REVIEW_CRITERIA) if (scores[key] !== null) { scoreTotals[key] = (scoreTotals[key] ?? 0) + scores[key]!; count(scoreCounts, key); }
+      preview.push(
+        `- 问题：${generated.question}`, `- 答案：${generated.answer}`, ...generated.evidence.map((text) => `- 证据：${text}`), `- 词面重叠 ${value}，第 ${final.attempt} 次通过`,
+        ...(scores ? [`- 审核得分：${REVIEW_CRITERIA.map((key) => `${key} ${scores[key] ?? "-"}`).join(" / ")}`] : []),
+        ...(final.review?.analysis ? [`- 审核分析：${final.review.analysis}`] : []),
+        "",
+      );
     } else {
       preview.push(`- 最后一次问题：${final.generated?.question ?? "（无法解析）"}`, ...final.failures.map((failure) => `- ${failure}`), "");
     }
@@ -314,7 +324,9 @@ async function writeReport(sample: SampleFile, scope: SampleFile["articles"], at
     name: sample.name, scope: scope.length, promptVersion: SYNTHETIC_PROMPT_VERSION, statuses,
     passRate: finished ? Math.round((approved / finished) * 1000) / 1000 : null,
     averageAttemptsForApproved: approved ? Math.round((approvedAttempts / approved) * 100) / 100 : null,
-    fallbackToFact, approvedBy, overlap, failureCategories, reviewFailures, callErrors: errors, usage,
+    fallbackToFact, approvedBy, overlap, failureCategories, reviewFailures,
+    approvedReviewScores: Object.fromEntries(Object.entries(scoreTotals).map(([key, total]) => [key, Math.round((total / scoreCounts[key]!) * 100) / 100])),
+    callErrors: errors, usage,
   };
   await writeFile(join(workDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(join(workDir, "preview.md"), `${preview.join("\n")}\n`);
