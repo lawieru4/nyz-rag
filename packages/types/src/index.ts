@@ -6,6 +6,33 @@ export interface AdminLoginRequest {
 export interface AdminSession {
   username: string;
   expiresAt: string;
+  admin: AdminAccount;
+}
+
+export interface AdminAccount {
+  id: string;
+  email: string;
+  nickname: string;
+  isSuper: boolean;
+  disabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAdminRequest {
+  email: string;
+  nickname: string;
+  password: string;
+}
+
+export interface UpdateAdminProfileRequest {
+  email: string;
+  nickname: string;
+}
+
+export interface ChangeAdminPasswordRequest {
+  currentPassword: string;
+  newPassword: string;
 }
 
 /** 用户端账号（邮箱注册）。未登录访客由浏览器 Cookie 识别，没有账号记录。 */

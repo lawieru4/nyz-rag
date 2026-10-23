@@ -6,13 +6,13 @@ import { contentFingerprint } from "./dedup.js";
 import type { ChunkHit } from "./rag.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
-  AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
+  AdminAccount, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
+import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -946,4 +946,115 @@ export async function listSessionMessages(sessionId: string, db: Executor = getD
 /** 只能评价自己的问答；他人的与不存在的问答一样返回 false。 */
 export async function rateChatMessage(id: string, rating: ChatFeedbackRating, owner: ChatOwner, db: Executor = getDb()): Promise<boolean> {
   return (await db.update(chatMessages).set({ rating }).where(and(eq(chatMessages.id, id), ownedBy(chatMessages, owner))).returning({ id: chatMessages.id })).length > 0;
+}
+
+// ---- 管理员账号 ----
+
+/** 管理员登录校验用的账号字段，含密码哈希，只在 API 内使用。 */
+export interface AdminCredentials {
+  id: string;
+  email: string;
+  nickname: string;
+  isSuper: boolean;
+  passwordHash: string;
+  sessionVersion: number;
+  disabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const adminCredentialColumns = {
+  id: adminAccounts.id, email: adminAccounts.email, nickname: adminAccounts.nickname, isSuper: adminAccounts.isSuper,
+  passwordHash: adminAccounts.passwordHash, sessionVersion: adminAccounts.sessionVersion,
+  disabledAt: adminAccounts.disabledAt, createdAt: adminAccounts.createdAt, updatedAt: adminAccounts.updatedAt,
+};
+type AdminCredentialRow = { id: string; email: string; nickname: string; isSuper: boolean; passwordHash: string; sessionVersion: number; disabledAt: Date | null; createdAt: Date; updatedAt: Date };
+const toAdminCredentials = ({ disabledAt, createdAt, updatedAt, ...row }: AdminCredentialRow): AdminCredentials =>
+  ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+
+const toAdminAccount = ({ passwordHash: _ph, sessionVersion: _sv, disabledAt, createdAt, updatedAt, ...row }: AdminCredentialRow): AdminAccount =>
+  ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+
+/** email 须为小写规范形式。by id 或 by email。 */
+export async function getAdminCredentials(by: { id: string } | { email: string }, db: Executor = getDb()): Promise<AdminCredentials | null> {
+  const [row] = await db.select(adminCredentialColumns).from(adminAccounts)
+    .where("id" in by ? eq(adminAccounts.id, by.id) : eq(adminAccounts.email, by.email));
+  return row ? toAdminCredentials(row) : null;
+}
+
+/** 列出所有管理员账号（不含密码哈希），按创建时间倒序。 */
+export async function listAdminAccounts(db: Executor = getDb()): Promise<AdminAccount[]> {
+  const rows = await db.select(adminCredentialColumns).from(adminAccounts).orderBy(asc(adminAccounts.createdAt), asc(adminAccounts.id));
+  return rows.map(toAdminAccount);
+}
+
+/** 创建管理员账号；邮箱已存在时返回 null。 */
+export async function createAdminAccount(
+  input: { email: string; nickname: string; passwordHash: string; isSuper?: boolean },
+  db: Executor = getDb(),
+): Promise<AdminAccount | null> {
+  const [row] = await db.insert(adminAccounts)
+    .values({ id: randomUUID(), email: input.email, nickname: input.nickname, passwordHash: input.passwordHash, isSuper: input.isSuper ?? false })
+    .onConflictDoNothing({ target: adminAccounts.email })
+    .returning(adminCredentialColumns);
+  return row ? toAdminAccount(row) : null;
+}
+
+/**
+  * 种子：仅在没有超级管理员时创建初始账号，防止并发双重创建。
+ * 返回已有或新建的超级管理员；若已有账号则不改动任何数据。
+ */
+export async function seedSuperAdmin(
+  input: { email: string; nickname: string; passwordHash: string },
+): Promise<{ created: boolean; id: string }> {
+  return withTransaction(async (db) => {
+    await db.execute(sql`SELECT pg_advisory_xact_lock(4637202)`);
+    const existing = await db.select({ id: adminAccounts.id }).from(adminAccounts)
+      .where(eq(adminAccounts.isSuper, true)).limit(1);
+    if (existing.length) return { created: false, id: existing[0]!.id };
+    const [row] = await db.insert(adminAccounts)
+      .values({ id: randomUUID(), email: input.email, nickname: input.nickname, passwordHash: input.passwordHash, isSuper: true })
+      .onConflictDoNothing({ target: adminAccounts.email })
+      .returning({ id: adminAccounts.id });
+    if (row) return { created: true, id: row.id };
+    throw new Error("Bootstrap administrator email is already in use");
+  });
+}
+
+/** 修改密码并使该账号已签发的会话全部失效，返回新的会话版本；账号不存在时返回 null。 */
+export async function updateAdminPassword(id: string, passwordHash: string, db: Executor = getDb()): Promise<number | null> {
+  const [row] = await db.update(adminAccounts)
+    .set({ passwordHash, sessionVersion: sql`${adminAccounts.sessionVersion} + 1`, updatedAt: sql`now()` })
+    .where(eq(adminAccounts.id, id)).returning({ sessionVersion: adminAccounts.sessionVersion });
+  return row?.sessionVersion ?? null;
+}
+
+/** 更新邮箱与昵称；返回更新后的账号；账号不存在时返回 null。邮箱冲突返回 null。 */
+export async function updateAdminProfile(
+  id: string,
+  input: { email: string; nickname: string },
+  db: Executor = getDb(),
+): Promise<AdminAccount | null> {
+  try {
+    const [row] = await db.update(adminAccounts)
+      .set({ email: input.email, nickname: input.nickname, updatedAt: sql`now()` })
+      .where(eq(adminAccounts.id, id)).returning(adminCredentialColumns);
+    return row ? toAdminAccount(row) : null;
+  } catch (error) {
+    const cause = error as { code?: string; cause?: { code?: string } };
+    if (cause.code === "23505" || cause.cause?.code === "23505") return null;
+    throw error;
+  }
+}
+
+/** 停用/启用管理员账号；停用时使会话失效。超级管理员禁止停用。账号不存在时返回 null。 */
+export async function setAdminDisabled(id: string, disabled: boolean, db: Executor = getDb()): Promise<AdminAccount | null> {
+  const [existing] = await db.select({ isSuper: adminAccounts.isSuper }).from(adminAccounts).where(eq(adminAccounts.id, id));
+  if (!existing) return null;
+  if (existing.isSuper && disabled) throw new Error("super admin cannot be disabled");
+  const [row] = await db.update(adminAccounts).set(disabled
+    ? { disabledAt: sql`COALESCE(${adminAccounts.disabledAt}, now())`, sessionVersion: sql`${adminAccounts.sessionVersion} + 1`, updatedAt: sql`now()` }
+    : { disabledAt: null, updatedAt: sql`now()` })
+    .where(eq(adminAccounts.id, id)).returning(adminCredentialColumns);
+  return row ? toAdminAccount(row) : null;
 }

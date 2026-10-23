@@ -1,20 +1,44 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { AdminLoginRequest, AdminSession } from "@nyz-rag/types";
+import type { AdminLoginRequest, AdminSession, AdminAccount, ChangeAdminPasswordRequest, UpdateAdminProfileRequest } from "@nyz-rag/types";
+import {
+  getAdminCredentials, updateAdminPassword, updateAdminProfile, createAdminAccount, listAdminAccounts, setAdminDisabled,
+  type AdminCredentials,
+} from "@nyz-rag/processing";
 import { cookieToken, createAuthStore, digest, type AuthStore } from "./auth-store.js";
+import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
 
 const COOKIE = "nyz_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_SECONDS = 15 * 60;
 
 export interface AdminAuthConfig {
-  username: string;
-  password: string;
+  /** Legacy login alias for the initial super administrator. */
+  legacyUsername: string;
+  bootstrapEmail?: string;
   origins: string[];
   secureCookie: boolean;
 }
 
 export type AdminAuthStore = AuthStore;
+
+export interface AdminRepository {
+  getAdminCredentials(by: { id: string } | { email: string }): Promise<AdminCredentials | null>;
+  updateAdminPassword(id: string, passwordHash: string): Promise<number | null>;
+  updateAdminProfile(id: string, input: { email: string; nickname: string }): Promise<AdminAccount | null>;
+  createAdminAccount: typeof createAdminAccount;
+  listAdminAccounts: typeof listAdminAccounts;
+  setAdminDisabled: typeof setAdminDisabled;
+}
+
+export const databaseAdmins: AdminRepository = {
+  getAdminCredentials: (by) => getAdminCredentials(by),
+  updateAdminPassword: (id, hash) => updateAdminPassword(id, hash),
+  updateAdminProfile: (id, input) => updateAdminProfile(id, input),
+  createAdminAccount,
+  listAdminAccounts,
+  setAdminDisabled,
+};
 
 export function adminAuthConfig(): AdminAuthConfig {
   const origins = (process.env.ADMIN_ORIGINS ?? `http://localhost:${process.env.ADMIN_PORT ?? "5176"},http://127.0.0.1:${process.env.ADMIN_PORT ?? "5176"}`)
@@ -25,11 +49,13 @@ export function adminAuthConfig(): AdminAuthConfig {
       throw new Error("ADMIN_ORIGINS must contain exact http(s) origins without paths");
     }
   }
-  const password = process.env.ADMIN_PASSWORD ?? "";
-  const username = process.env.ADMIN_USERNAME ?? "admin";
-  if (!username.trim() || username.length > 128) {
+  // Legacy env username alias (kept for deployments that predate DB-persisted admins).
+  const legacyUsername = process.env.ADMIN_USERNAME ?? "admin";
+  if (!legacyUsername.trim() || legacyUsername.length > 128) {
     throw new Error("ADMIN_USERNAME must contain 1 to 128 characters and cannot be blank");
   }
+  // ADMIN_PASSWORD is still validated if set — it seeds the initial super admin.
+  const password = process.env.ADMIN_PASSWORD ?? "";
   if (password && (password.length < 16 || password.length > 1024)) {
     throw new Error("ADMIN_PASSWORD must contain 16 to 1024 characters");
   }
@@ -38,8 +64,8 @@ export function adminAuthConfig(): AdminAuthConfig {
     throw new Error("ADMIN_COOKIE_SECURE must be true or false");
   }
   return {
-    username,
-    password,
+    legacyUsername,
+    bootstrapEmail: (process.env.ADMIN_EMAIL ?? "admin@example.com").trim().toLowerCase(),
     origins,
     secureCookie: secure === undefined ? process.env.NODE_ENV === "production" : secure === "true",
   };
@@ -49,11 +75,26 @@ export const createAdminAuthStore = (): AuthStore => createAuthStore("admin-auth
 
 const sessionToken = (request: FastifyRequest) => cookieToken(request, COOKIE);
 
-export function configureAdminAuth(app: FastifyInstance, config: AdminAuthConfig, store: AdminAuthStore, now = Date.now): void {
-  const credentialVersion = digest(JSON.stringify([config.username, config.password]));
-  const sessionKey = (token: string) => `session:${credentialVersion}:${digest(token)}`;
-  const cookie = (token: string, maxAge: number) => `${COOKIE}=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${config.secureCookie ? "; Secure" : ""}`;
-  const sessions = new WeakMap<FastifyRequest, AdminSession>();
+/** 存储在 Redis 中的会话结构。 */
+interface StoredAdminSession {
+  adminId: string;
+  version: number;
+  expiresAt: string;
+}
+
+const sessions = new WeakMap<FastifyRequest, AdminSession>();
+
+export function configureAdminAuth(
+  app: FastifyInstance,
+  config: AdminAuthConfig,
+  store: AdminAuthStore,
+  admins: AdminRepository,
+  now = Date.now,
+): void {
+  const sessionKey = (token: string) => `admin-session:${digest(token)}`;
+  const cookie = (token: string, maxAge: number) =>
+    `${COOKIE}=${token}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${config.secureCookie ? "; Secure" : ""}`;
+
   app.addHook("onClose", async () => store.close());
 
   app.addHook("onRequest", async (request, reply) => {
@@ -63,12 +104,8 @@ export function configureAdminAuth(app: FastifyInstance, config: AdminAuthConfig
     if (request.headers.origin && !config.origins.includes(request.headers.origin)) {
       return reply.code(403).send({ error: "不允许的管理端来源" });
     }
-    // A required non-simple header prevents CSRF even from same-site sibling origins.
     if (!["GET", "HEAD"].includes(request.method) && request.headers["x-nyz-admin"] !== "1") {
       return reply.code(403).send({ error: "缺少管理请求校验头" });
-    }
-    if (!config.password || !config.username) {
-      return reply.code(503).send({ error: "管理员认证尚未配置" });
     }
     try {
       if (path === "/api/admin/auth/login" && request.method === "POST") {
@@ -84,38 +121,131 @@ export function configureAdminAuth(app: FastifyInstance, config: AdminAuthConfig
       }
       const token = sessionToken(request);
       const value = token ? await store.get(sessionKey(token)) : null;
-      const session: AdminSession | null = value ? JSON.parse(value) : null;
-      if (!session || session.username !== config.username || !(Date.parse(session.expiresAt) > now())) {
+      const stored: StoredAdminSession | null = value ? JSON.parse(value) : null;
+      if (!stored || !(Date.parse(stored.expiresAt) > now())) {
         return reply.header("Set-Cookie", cookie("", 0)).code(401).send({ error: "请先登录管理员账号" });
       }
+      // 每次请求校验账号状态与会话版本，防止停用或密码修改后会话继续有效。
+      let admin: AdminCredentials | null;
+      try { admin = await admins.getAdminCredentials({ id: stored.adminId }); }
+      catch { return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" }); }
+      if (!admin || admin.disabled || admin.sessionVersion !== stored.version) {
+        return reply.header("Set-Cookie", cookie("", 0)).code(401).send({ error: "请先登录管理员账号" });
+      }
+      const session: AdminSession = {
+        username: admin.email,
+        expiresAt: stored.expiresAt,
+        admin: {
+          id: admin.id, email: admin.email, nickname: admin.nickname,
+          isSuper: admin.isSuper, disabled: admin.disabled,
+          createdAt: admin.createdAt, updatedAt: admin.updatedAt,
+        },
+      };
       sessions.set(request, session);
     } catch {
       return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
     }
   });
 
+  /**
+   * 登录：用户名字段同时接受 email 和 ADMIN_USERNAME 别名（向后兼容旧部署）。
+   * 旧别名仅映射到初始化邮箱的超级管理员，不能映射到普通管理员。
+   */
   app.post<{ Body: AdminLoginRequest }>("/api/admin/auth/login", async (request, reply) => {
-    const usernameMatches = timingSafeEqual(Buffer.from(digest(request.body.username)), Buffer.from(digest(config.username)));
-    const passwordMatches = timingSafeEqual(Buffer.from(digest(request.body.password)), Buffer.from(digest(config.password)));
-    if (!usernameMatches || !passwordMatches) return reply.code(401).send({ error: "账号或密码错误" });
-    const token = randomBytes(32).toString("hex");
-    const session: AdminSession = { username: config.username, expiresAt: new Date(now() + SESSION_SECONDS * 1000).toISOString() };
+    const { username, password } = request.body;
+    let admin: AdminCredentials | null = null;
     try {
-      const previous = sessionToken(request);
-      if (previous) await store.delete(sessionKey(previous));
-      await store.set(sessionKey(token), JSON.stringify(session), SESSION_SECONDS);
+      // 先按 email 查（规范形式）；如果输入恰好等于 legacyUsername（旧 env 别名），再按 legacyUsername 对应的邮箱查。
+      admin = await admins.getAdminCredentials({ email: username.trim().toLowerCase() });
+      if (!admin && username.trim() === config.legacyUsername) {
+        const initial = await admins.getAdminCredentials({ email: config.bootstrapEmail ?? "admin@example.com" });
+        if (initial?.isSuper) admin = initial;
+      }
     } catch {
       return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
     }
+    const hash = admin?.passwordHash ?? await dummyPasswordHash();
+    const valid = await verifyPassword(password, hash);
+    if (!admin || !valid) return reply.code(401).send({ error: "账号或密码错误" });
+    if (admin.disabled) return reply.code(403).send({ error: "账号已停用，请联系超级管理员" });
+
+    const token = randomBytes(32).toString("hex");
+    const stored: StoredAdminSession = {
+      adminId: admin.id,
+      version: admin.sessionVersion,
+      expiresAt: new Date(now() + SESSION_SECONDS * 1000).toISOString(),
+    };
+    try {
+      const previous = sessionToken(request);
+      if (previous) await store.delete(sessionKey(previous));
+      await store.set(sessionKey(token), JSON.stringify(stored), SESSION_SECONDS);
+    } catch {
+      return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
+    }
+    const session: AdminSession = {
+      username: admin.email,
+      expiresAt: stored.expiresAt,
+      admin: {
+        id: admin.id, email: admin.email, nickname: admin.nickname,
+        isSuper: admin.isSuper, disabled: admin.disabled,
+        createdAt: admin.createdAt, updatedAt: admin.updatedAt,
+      },
+    };
     return reply.header("Set-Cookie", cookie(token, SESSION_SECONDS)).send(session);
   });
+
   app.get("/api/admin/auth/session", async (request) => sessions.get(request)!);
+
   app.post("/api/admin/auth/logout", async (request, reply) => {
     try {
-      await store.delete(sessionKey(sessionToken(request)!));
+      const token = sessionToken(request);
+      if (token) await store.delete(sessionKey(token));
     } catch {
       return reply.code(503).send({ error: "退出失败，请稍后重试" });
     }
     return reply.header("Set-Cookie", cookie("", 0)).code(204).send();
   });
+
+  // ---- 当前管理员自助操作 ----
+
+  app.patch<{ Body: UpdateAdminProfileRequest }>("/api/admin/auth/profile", async (request, reply) => {
+    const session = sessions.get(request)!;
+    const email = request.body.email.trim().toLowerCase();
+    const nickname = request.body.nickname.trim();
+    if (!email || !nickname) return reply.code(400).send({ error: "邮箱与昵称不能为空" });
+    let updated: AdminAccount | null;
+    try {
+      updated = await admins.updateAdminProfile(session.admin.id, { email, nickname });
+    } catch {
+      return reply.code(503).send({ error: "服务暂不可用，请稍后重试" });
+    }
+    if (!updated) return reply.code(409).send({ error: "邮箱已被其他账号使用" });
+    const newSession: AdminSession = { ...session, username: updated.email, admin: updated };
+    return newSession;
+  });
+
+  app.post<{ Body: ChangeAdminPasswordRequest }>("/api/admin/auth/password", async (request, reply) => {
+    const session = sessions.get(request)!;
+    let current: AdminCredentials | null;
+    try { current = await admins.getAdminCredentials({ id: session.admin.id }); }
+    catch { return reply.code(503).send({ error: "服务暂不可用，请稍后重试" }); }
+    if (!current) return reply.code(401).send({ error: "账号不存在" });
+    if (!await verifyPassword(request.body.currentPassword, current.passwordHash)) {
+      return reply.code(400).send({ error: "当前密码错误" });
+    }
+    const newHash = await hashPassword(request.body.newPassword);
+    try { await admins.updateAdminPassword(current.id, newHash); }
+    catch { return reply.code(503).send({ error: "服务暂不可用，请稍后重试" }); }
+    // 使所有已签发会话失效（包括当前会话），要求重新登录。
+    const token = sessionToken(request);
+    if (token) {
+      try { await store.delete(sessionKey(token)); } catch { /* non-critical */ }
+    }
+    return reply.header("Set-Cookie", cookie("", 0)).code(204).send();
+  });
+}
+
+/** 从请求对象取出当前管理员会话（仅在认证路由后可用）。 */
+export function getAdminSession(request: FastifyRequest): AdminSession | undefined {
+  return sessions.get(request);
 }

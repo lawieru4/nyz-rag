@@ -3,7 +3,23 @@ import test from "node:test";
 import { buildTestApp as buildApp } from "./auth-helpers.js";
 import type { DocumentQueue } from "../src/queue.js";
 import { routeSchemas } from "../src/schemas.js";
-import { adminAuth, adminHeaders, memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";
+import { adminAuth, adminHeaders, memoryAdmins, memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";
+import { hashPassword } from "../src/passwords.js";
+import { randomUUID } from "node:crypto";
+
+const TEST_EMAIL = "admin@example.com";
+const TEST_PASSWORD = "test-only-password-not-for-deployment";
+
+async function makeTestAdmins() {
+  const now = new Date().toISOString();
+  const { repository } = memoryAdmins([{
+    id: randomUUID(), email: TEST_EMAIL, nickname: "admin",
+    passwordHash: await hashPassword(TEST_PASSWORD),
+    isSuper: true, sessionVersion: 0, disabled: false,
+    createdAt: now, updatedAt: now,
+  }]);
+  return repository;
+}
 
 test("the application registers all domains and rejects bad requests before accessing infrastructure", async () => {
   let closed = false;
@@ -12,7 +28,8 @@ test("the application registers all domains and rejects bad requests before acce
     hasDocumentJob: unexpected, hasSourceJob: unexpected, enqueueDocument: unexpected, enqueueSource: unexpected,
     close: async () => { closed = true; },
   };
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
+  const admins = await makeTestAdmins();
+  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins, userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
   try {
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200);
@@ -23,7 +40,7 @@ test("the application registers all domains and rejects bad requests before acce
       ["GET", "/api/admin/knowledge-bases"], ["GET", "/api/admin/model-providers"], ["GET", "/api/admin/chat-logs"],
     ] as const) assert.ok(app.hasRoute({ method, url }), `${method} ${url}`);
 
-    const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: adminAuth.username, password: adminAuth.password } });
+    const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: TEST_EMAIL, password: TEST_PASSWORD } });
     assert.equal(login.statusCode, 200, login.body);
     const cookie = String(login.headers["set-cookie"]).split(";")[0]!;
     for (const url of ["/api/chat", "/api/search", "/api/admin/sources", "/api/admin/knowledge-bases", "/api/admin/model-providers", "/api/chat/sessions/session/stream"]) {
@@ -47,7 +64,7 @@ test("every application route has a schema entry and every schema entry has a ro
   const queue: DocumentQueue = {
     hasDocumentJob: async () => false, hasSourceJob: async () => false, enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
   };
-  const app = buildApp({ queue });
+  const app = buildApp({ queue, admins: memoryAdmins().repository });
   const routes = new Set<string>();
   app.addHook("onRoute", (route) => {
     for (const method of [route.method].flat()) if (method !== "HEAD" && method !== "OPTIONS") routes.add(`${method} ${route.url}`);

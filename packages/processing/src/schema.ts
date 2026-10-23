@@ -183,6 +183,22 @@ export const modelProviders = pgTable("model_providers", {
   check("model_providers_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
 ]);
 
+// 管理员账号：由超级管理员（或 seed）创建；email 存小写形式；isSuper 仅首个 seed 账号为 true。
+export const adminAccounts = pgTable("admin_accounts", {
+  id: text().primaryKey(),
+  email: text().notNull(),
+  nickname: text().notNull(),
+  passwordHash: text().notNull(),
+  isSuper: boolean().notNull().default(false),
+  // 修改密码或停用时加一，使已签发的会话全部失效。
+  sessionVersion: integer().notNull().default(0),
+  disabledAt: timestamptz(),
+  createdAt: timestamptz().notNull().defaultNow(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("admin_accounts_email_idx").on(table.email),
+]);
+
 // 用户端账号：邮箱经验证码验证后才创建，email 存小写形式。
 export const users = pgTable("users", {
   id: text().primaryKey(),

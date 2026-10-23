@@ -1,6 +1,7 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { createRedisAdmissionLimiter, type AdmissionLimiter } from "@nyz-rag/processing";
+import { adminAccountRoutes } from "./admin-accounts.js";
 import { chatRoutes } from "./chat.js";
 import { commonRoutes, configureCommon } from "./common.js";
 import { crawlTaskRoutes } from "./crawl-tasks.js";
@@ -11,7 +12,7 @@ import { createMailer, type Mailer } from "./mailer.js";
 import { modelProviderRoutes } from "./model-providers.js";
 import { createDocumentQueue, type DocumentQueue } from "./queue.js";
 import { searchRoutes } from "./search.js";
-import { adminAuthConfig, configureAdminAuth, createAdminAuthStore, type AdminAuthConfig } from "./admin-auth.js";
+import { adminAuthConfig, configureAdminAuth, createAdminAuthStore, databaseAdmins, type AdminAuthConfig, type AdminRepository } from "./admin-auth.js";
 import { createAuthStore, type AuthStore } from "./auth-store.js";
 import { configureUserAuth, databaseUsers, userAuthConfig, type UserAuthConfig, type UserRepository } from "./user-auth.js";
 import { userRoutes } from "./users.js";
@@ -19,7 +20,7 @@ import { configureRateLimits, rateLimitConfig, trustedProxies } from "./rate-lim
 
 export function buildApp(options: {
   logger?: FastifyServerOptions["logger"]; queue?: DocumentQueue;
-  adminAuth?: AdminAuthConfig; authStore?: AuthStore;
+  adminAuth?: AdminAuthConfig; authStore?: AuthStore; admins?: AdminRepository;
   userAuth?: UserAuthConfig; userAuthStore?: AuthStore; mailer?: Mailer | null; users?: UserRepository;
   limiter?: AdmissionLimiter; rateLimits?: ReturnType<typeof rateLimitConfig>;
 } = {}) {
@@ -40,7 +41,7 @@ export function buildApp(options: {
   });
   app.after(() => {
     configureRateLimits(app, options.limiter ?? createRedisAdmissionLimiter(), limits);
-    configureAdminAuth(app, auth, options.authStore ?? createAdminAuthStore());
+    configureAdminAuth(app, auth, options.authStore ?? createAdminAuthStore(), options.admins ?? databaseAdmins);
     configureUserAuth(app, {
       config: userAuth,
       store: options.userAuthStore ?? createAuthStore("user-auth"),
@@ -57,5 +58,6 @@ export function buildApp(options: {
   app.register(knowledgeBaseRoutes);
   app.register(modelProviderRoutes);
   app.register(userRoutes);
+  app.register(adminAccountRoutes, { admins: options.admins ?? databaseAdmins });
   return app;
 }

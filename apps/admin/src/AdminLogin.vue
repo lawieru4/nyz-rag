@@ -40,8 +40,8 @@ function handleSubmit() {
         <h1 class="text-xl font-semibold">登录</h1>
         <Alert v-if="error" variant="destructive" role="alert" aria-live="assertive"><AlertDescription>{{ error }}</AlertDescription></Alert>
         <div class="grid gap-2">
-          <Label for="login-username">用户名</Label>
-          <Input id="login-username" v-model="username" type="text" name="username" autocomplete="username" required :disabled="busy" placeholder="请输入用户名" aria-required="true" />
+          <Label for="login-username">邮箱 / 初始账号</Label>
+          <Input id="login-username" v-model="username" type="text" name="username" autocomplete="username" required :disabled="busy" placeholder="请输入邮箱或初始账号" aria-required="true" />
         </div>
         <div class="grid gap-2">
           <Label for="login-password">密码</Label>
