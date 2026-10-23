@@ -552,7 +552,7 @@ const saveModelSettingBodySchema = {
     providerId: uuidParam,
     model: { ...nonBlankString, maxLength: 200 },
     temperature: { type: "number", minimum: 0, maximum: 2 },
-    maxTokens: { type: "integer", minimum: 1, maximum: 32768 },
+    maxTokens: { type: "integer", minimum: 1, maximum: 1048576 },
   },
   required: ["providerId", "model"],
   additionalProperties: false,

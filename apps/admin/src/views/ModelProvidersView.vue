@@ -232,7 +232,7 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
             <span class="font-mono text-xs break-all">{{ settings[capability.id]!.model }}</span>
             <Badge variant="muted">{{ providerById(settings[capability.id]!.providerId)?.name ?? '未知供应商' }}</Badge>
             <Badge v-if="providerById(settings[capability.id]!.providerId)?.enabled === false" variant="destructive">供应商已停用</Badge>
-            <span v-if="capability.id === 'chat'" class="text-xs text-muted-foreground">温度 {{ settings.chat!.temperature }} · 最大 Token {{ settings.chat!.maxTokens }}</span>
+            <span v-if="capability.id === 'chat'" class="text-xs text-muted-foreground">温度 {{ settings.chat!.temperature }} · 最大输出 {{ settings.chat!.maxTokens }} Token</span>
           </template>
           <Badge v-else variant="muted">未配置</Badge>
         </div>
@@ -301,7 +301,8 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
         </div>
         <div v-if="settingCapability.id === 'chat'" class="grid grid-cols-2 gap-3">
           <div class="grid gap-2"><Label for="ms-temperature">温度</Label><Input id="ms-temperature" v-model.number="settingForm.temperature" type="number" min="0" max="2" step="0.1" required /></div>
-          <div class="grid gap-2"><Label for="ms-max-tokens">最大 Token</Label><Input id="ms-max-tokens" v-model.number="settingForm.maxTokens" type="number" min="1" max="32768" step="1" required /></div>
+          <div class="grid gap-2"><Label for="ms-max-tokens">最大输出 Token</Label><Input id="ms-max-tokens" v-model.number="settingForm.maxTokens" type="number" min="1" max="1048576" step="1" required /></div>
+          <p class="col-span-2 text-xs leading-relaxed text-muted-foreground">最大输出 Token 是单次回答的长度上限（max_tokens），不是上下文窗口；不要超过模型的最大输出长度，否则调用会失败并退回原文摘录。问答回答一般 1024～4096 足够。</p>
         </div>
         <p v-if="settingCapability.id === 'embedding'" class="text-xs leading-relaxed text-muted-foreground">更换 Embedding 模型后，已向量化的文档需要重新向量化。</p>
         <DialogFooter>

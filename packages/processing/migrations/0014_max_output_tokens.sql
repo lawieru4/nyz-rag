@@ -1,0 +1,2 @@
+ALTER TABLE "model_settings" DROP CONSTRAINT "model_settings_max_tokens_check";--> statement-breakpoint
+ALTER TABLE "model_settings" ADD CONSTRAINT "model_settings_max_tokens_check" CHECK ("model_settings"."max_tokens" BETWEEN 1 AND 1048576);

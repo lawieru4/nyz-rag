@@ -99,6 +99,13 @@
       "when": 1792725612848,
       "tag": "0013_model_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792727562832,
+      "tag": "0014_max_output_tokens",
+      "breakpoints": true
     }
   ]
 }

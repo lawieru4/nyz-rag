@@ -186,7 +186,7 @@ export const modelSettings = pgTable("model_settings", {
   check("model_settings_capability_check", sql`${table.capability} IN ('chat', 'embedding', 'rerank')`),
   check("model_settings_model_check", sql`btrim(${table.model}) <> ''`),
   check("model_settings_temperature_check", sql`${table.temperature} BETWEEN 0 AND 2`),
-  check("model_settings_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
+  check("model_settings_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 1048576`),
 ]);
 
 // 后台配置的全局密钥（如 nyzdata 文章接口 token），只存 secrets.ts 加密后的密文。
