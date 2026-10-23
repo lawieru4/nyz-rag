@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { ArrowUpRight, ChevronRight, Copy, Info, LogOut, MessageSquareText, Plus, RefreshCw, Settings, Sparkles, Square, ThumbsDown, ThumbsUp, X, KeyRound } from "@lucide/vue";
+import { ArrowUpRight, Copy, KeyRound, LogOut, Menu, RefreshCw, SlidersHorizontal, Sparkles, Square, SquarePen, ThumbsDown, ThumbsUp, X } from "@lucide/vue";
 import type {
-  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamRequest, RetrievalFilters,
-  UserAccount, UserSessionResponse,
+  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamRequest, KnowledgeStats,
+  RetrievalFilters, UserAccount, UserSessionResponse,
 } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@nyz-rag/ui/components/collapsible";
@@ -11,7 +11,7 @@ import { confirm, ConfirmDialog } from "@nyz-rag/ui/confirm";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@nyz-rag/ui/components/dropdown-menu";
 import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
-import { Separator } from "@nyz-rag/ui/components/separator";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@nyz-rag/ui/components/sheet";
 import { Textarea } from "@nyz-rag/ui/components/textarea";
 import { Toaster } from "@nyz-rag/ui/components/sonner";
 import { TooltipProvider } from "@nyz-rag/ui/components/tooltip";
@@ -19,6 +19,9 @@ import { toast } from "@nyz-rag/ui/lib/toast";
 import AccountDialog, { type AccountMode } from "./AccountDialog.vue";
 import ArticleView from "./components/ArticleView.vue";
 import IconButton from "./components/IconButton.vue";
+import AnswerMarkdown from "./components/AnswerMarkdown.vue";
+import SessionSidebar from "./components/SessionSidebar.vue";
+import SourcePanel from "./components/SourcePanel.vue";
 import { client } from "./webClient";
 
 interface Turn {
@@ -41,9 +44,11 @@ const accountMode = ref<AccountMode | null>(null);
 const accountNotice = ref("");
 const question = ref("");
 const busy = ref(false);
-const sourcesCount = ref(0);
-const documentsCount = ref(0);
-const lastUpdated = ref<string | null>(null);
+/** 知识库统计；null 表示尚未加载成功。 */
+const stats = ref<KnowledgeStats | null>(null);
+const statsError = ref(false);
+const STATS_REFRESH_MS = 60_000;
+let statsTimer: ReturnType<typeof setInterval> | undefined;
 const sessions = ref<ChatSessionRecord[]>([]);
 const sessionId = ref<string | null>(null);
 const turns = ref<Turn[]>([]);
@@ -57,6 +62,14 @@ const categoriesText = ref("");
 const tagsText = ref("");
 const scenariosText = ref("");
 let controller: AbortController | null = null;
+/** 窄屏下的会话抽屉。 */
+const sidebarOpen = ref(false);
+const filtersOpen = ref(false);
+/** 正在查看引用来源的问答轮次与引用编号；宽屏时作为第三栏，否则以抽屉显示。 */
+const citing = ref<{ turn: number; citation: number | null } | null>(null);
+const wideQuery = window.matchMedia("(min-width: 1280px)");
+const wide = ref(wideQuery.matches);
+function onWideChange(event: MediaQueryListEvent) { wide.value = event.matches; }
 
 const activeFilterCount = computed(() => [dateFrom.value, dateTo.value, categoriesText.value, tagsText.value, scenariosText.value].filter(Boolean).length);
 const filterFields = [
@@ -67,7 +80,6 @@ const filterFields = [
   { id: "filter-scenarios", label: "场景", model: scenariosText, type: "text", aria: "场景筛选" },
 ];
 
-function documentHref(id: string) { return `#/documents/${encodeURIComponent(id)}`; }
 function listValues(text: string) { return [...new Set(text.split(",").map((value) => value.trim()).filter(Boolean))]; }
 function currentFilters(): RetrievalFilters | undefined {
   const filters: RetrievalFilters = {};
@@ -88,6 +100,17 @@ function syncArticleRoute() {
 function clearFilters() { dateFrom.value = ""; dateTo.value = ""; categoriesText.value = ""; tagsText.value = ""; scenariosText.value = ""; }
 
 const lastTurn = computed(() => turns.value.at(-1));
+const citedTurn = computed(() => citing.value ? turns.value[citing.value.turn] : undefined);
+const sourceSheetOpen = computed({
+  get: () => !!citedTurn.value && !wide.value,
+  set: (open) => { if (!open) citing.value = null; },
+});
+function openSources(turn: number, citation: number | null) { citing.value = { turn, citation }; }
+const sessionTitle = computed(() => sessions.value.find((session) => session.id === sessionId.value)?.title || turns.value[0]?.question || "");
+const sidebarProps = computed(() => ({
+  sessions: sessions.value, sessionId: sessionId.value, sessionError: sessionError.value, busy: busy.value,
+  user: user.value, stats: stats.value, statsError: statsError.value,
+}));
 const answerCaption = (turn: Turn) => turn.streaming
   ? (turn.answer ? "正在生成…" : "正在检索知识库…")
   : turn.answerMode === "generated" ? "由模型依据知识库生成，[n] 对应引用来源" : turn.answerMode === "extractive" ? "知识库原文摘录" : "";
@@ -104,17 +127,32 @@ onMounted(async () => {
   void loadSessions();
   const saved = localStorage.getItem(SESSION_KEY);
   if (saved) void openSession(saved);
-  try {
-    const data = await api<{ stats: { sources: number; documents: number; lastUpdated: string | null } }>("/api/knowledge");
-    sourcesCount.value = data.stats.sources;
-    documentsCount.value = data.stats.documents;
-    lastUpdated.value = data.stats.lastUpdated;
-  } catch { /* 状态面板保持默认值 */ }
+  // 统计会随管理端同步变化：页面可见时定时刷新，切回页面时立即刷新。
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  wideQuery.addEventListener("change", onWideChange);
+  statsTimer = setInterval(() => { if (!document.hidden) void loadStats(); }, STATS_REFRESH_MS);
+  void loadStats();
 });
 
 onUnmounted(() => {
   window.removeEventListener("hashchange", syncArticleRoute);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
+  wideQuery.removeEventListener("change", onWideChange);
+  clearInterval(statsTimer);
 });
+
+async function loadStats() {
+  try {
+    stats.value = (await api<{ stats: KnowledgeStats }>("/api/knowledge")).stats;
+    statsError.value = false;
+  } catch {
+    statsError.value = true;
+  }
+}
+
+function onVisibilityChange() {
+  if (!document.hidden) void loadStats();
+}
 
 async function loadSessions() {
   try {
@@ -129,6 +167,7 @@ async function openSession(id: string) {
   try {
     const data = await api<ChatSessionMessagesResponse>(`/api/chat/sessions/${id}/messages`);
     sessionId.value = id;
+    citing.value = null;
     turns.value = data.messages.map((message) => ({ ...message }));
     localStorage.setItem(SESSION_KEY, id);
     await scrollToEnd();
@@ -141,8 +180,15 @@ async function openSession(id: string) {
 function newSession() {
   if (busy.value) return;
   sessionId.value = null;
+  citing.value = null;
   turns.value = [];
   localStorage.removeItem(SESSION_KEY);
+}
+
+/** 抽屉中的操作：先关闭抽屉再执行。 */
+function closeSidebar(action: () => unknown) {
+  sidebarOpen.value = false;
+  void action();
 }
 
 function openAccount(mode: AccountMode) {
@@ -296,11 +342,14 @@ function useSuggestion(text: string) {
 
 <template>
   <TooltipProvider :delay-duration="300">
-    <main class="min-h-screen">
-      <header class="flex h-16 items-center justify-between border-b bg-card px-8 max-sm:h-14 max-sm:px-4">
-        <a class="flex items-center gap-2.5 text-sm font-bold max-sm:text-[13px]" href="#/" aria-label="NYZ RAG 首页"><span class="grid size-7 place-items-center rounded-md bg-brand text-[15px] text-brand-foreground">N</span><span>NYZ <b class="font-medium text-muted-foreground">知识问答</b></span></a>
-        <div class="flex items-center gap-4.5 max-sm:gap-2.5">
-          <div class="flex items-center gap-2 text-xs text-muted-foreground max-sm:hidden"><span class="size-1.75 rounded-full bg-[#82ad55]" />文章知识库</div>
+    <main class="min-h-dvh">
+      <header class="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b bg-card/90 px-5 backdrop-blur max-sm:px-3">
+        <div class="flex min-w-0 items-center gap-1.5">
+          <IconButton v-if="articleId === null" label="历史会话" class="lg:hidden" @click="sidebarOpen = true"><Menu /></IconButton>
+          <a class="flex items-center gap-2.5 text-sm font-bold max-sm:text-[13px]" href="#/" aria-label="NYZ RAG 首页"><span class="grid size-7 place-items-center rounded-md bg-brand text-[15px] text-brand-foreground">N</span><span>NYZ <b class="font-medium text-muted-foreground">知识问答</b></span></a>
+        </div>
+        <div class="flex items-center gap-2">
+          <IconButton v-if="articleId === null" label="新对话" class="lg:hidden" :disabled="busy" @click="newSession"><SquarePen /></IconButton>
           <DropdownMenu v-if="user">
             <DropdownMenuTrigger as-child>
               <Button variant="outline" class="h-8 max-w-55 gap-2 pr-2.5 pl-1 text-xs font-normal max-sm:pr-1">
@@ -323,38 +372,57 @@ function useSuggestion(text: string) {
 
       <ArticleView v-if="articleId !== null" :id="articleId" />
 
-      <section v-show="articleId === null" class="grid min-h-[calc(100vh-4rem)] grid-cols-[64px_minmax(420px,1fr)_280px] max-lg:grid-cols-[54px_minmax(0,1fr)] max-sm:min-h-[calc(100vh-3.5rem)] max-sm:grid-cols-1">
-        <aside class="flex flex-col items-center gap-2 border-r bg-card py-4.5 max-sm:hidden" aria-label="主导航">
-          <IconButton label="问答" class="bg-brand-soft text-accent-foreground hover:bg-brand-soft"><MessageSquareText /></IconButton>
-          <IconButton label="新会话" :disabled="busy" @click="newSession"><Plus /></IconButton>
-          <IconButton label="设置" class="mt-auto"><Settings /></IconButton>
+      <div v-show="articleId === null" :class="['lg:grid', citedTurn && wide ? 'lg:grid-cols-[264px_minmax(0,1fr)_380px]' : 'lg:grid-cols-[264px_minmax(0,1fr)]']">
+        <aside class="sticky top-14 h-[calc(100dvh-3.5rem)] border-r bg-[#fbfcfa] max-lg:hidden">
+          <SessionSidebar v-bind="sidebarProps" @new="newSession" @open="openSession" @remove="removeSession" @login="openAccount('login')" />
         </aside>
+        <Sheet v-model:open="sidebarOpen">
+          <SheetContent side="left" class="w-72 gap-0 bg-[#fbfcfa] p-0 pt-10">
+            <SheetTitle class="sr-only">历史会话</SheetTitle>
+            <SheetDescription class="sr-only">切换或删除历史会话，查看知识库状态</SheetDescription>
+            <SessionSidebar
+              v-bind="sidebarProps"
+              @new="closeSidebar(newSession)" @open="(id) => closeSidebar(() => openSession(id))"
+              @remove="removeSession" @login="closeSidebar(() => openAccount('login'))"
+            />
+          </SheetContent>
+        </Sheet>
 
-        <section class="mx-auto flex w-full max-w-225 flex-col px-[clamp(28px,7vw,108px)] pt-21 pb-7 max-lg:px-[clamp(22px,6vw,64px)] max-lg:pt-14 max-sm:px-4 max-sm:pt-8">
-          <div v-if="!turns.length" class="mb-8">
+        <section :class="['mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-200 flex-col px-8 max-sm:px-4', turns.length ? 'pt-8' : 'justify-center pt-12 pb-[12vh] max-sm:pt-8']">
+          <div v-if="!turns.length" class="mb-7">
             <p class="eyebrow mb-4">NYZ ARTICLE INTELLIGENCE</p>
             <h1 class="text-[34px] leading-[1.35] font-semibold max-sm:text-[28px]">从文章中，<span class="text-[#788648]">找到答案。</span></h1>
             <p class="mt-3 text-sm text-muted-foreground">向知识库提问，回答将基于已收录的文章内容。</p>
           </div>
-          <div v-else class="mb-4.5 flex items-center justify-between gap-3">
-            <strong class="truncate text-[15px] font-semibold">{{ sessions.find((session) => session.id === sessionId)?.title || turns[0].question }}</strong>
-            <Button variant="outline" size="sm" class="flex-none text-xs" :disabled="busy" @click="newSession"><Plus /> 新会话</Button>
-          </div>
+          <h1 v-else class="mb-5 truncate text-[15px] font-semibold">{{ sessionTitle }}</h1>
 
-          <div v-if="turns.length" ref="thread" class="mb-5.5 grid gap-5.5">
-            <article v-for="(turn, index) in turns" :key="turn.id ?? `pending-${index}`" class="grid gap-2.5">
+          <div v-if="turns.length" ref="thread" class="grid gap-6 pb-6">
+            <article v-for="(turn, index) in turns" :key="turn.id ?? `pending-${index}`" class="grid scroll-mb-48 gap-2.5">
               <p class="max-w-[85%] justify-self-end rounded-lg rounded-br-sm bg-primary px-3.5 py-2.5 text-[13px] leading-[1.7] break-words whitespace-pre-wrap text-primary-foreground">{{ turn.question }}</p>
               <section class="rounded-lg border bg-card p-4.5" aria-live="polite">
                 <div class="flex items-center gap-2.5">
                   <span class="grid size-7 place-items-center rounded-md bg-brand-soft text-[#566b2f]"><Sparkles class="size-4" /></span>
                   <div><strong class="block text-xs">回答</strong><small class="mt-0.5 block text-[11px] text-muted-foreground">{{ answerCaption(turn) }}</small></div>
                 </div>
-                <p v-if="turn.answer || turn.streaming" :class="['my-4 text-[13px] leading-[1.8] whitespace-pre-wrap text-[#4c5750]', turn.streaming && 'streaming-cursor']">{{ turn.answer }}</p>
+                <AnswerMarkdown
+                  v-if="turn.answer" :text="turn.answer" :source-count="turn.sources.length" :streaming="turn.streaming"
+                  :active-citation="citing?.turn === index ? citing.citation : null" @cite="(citation) => openSources(index, citation)"
+                />
+                <p v-else-if="turn.streaming" class="streaming-cursor my-4 text-[13px]" />
                 <p v-if="turn.notice" class="mt-3 rounded-md bg-warning-soft px-2.5 py-2 text-[11px] text-warning">{{ turn.notice }}</p>
-                <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="flex flex-wrap gap-x-3 gap-y-2 border-t pt-3 text-[11px] text-muted-foreground">
-                  <span>引用来源</span>
-                  <a v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" :href="documentHref(source.documentId)" class="inline-flex items-center gap-0.5 hover:text-link hover:underline">[{{ sourceIndex + 1 }}] {{ source.title }}{{ source.repostSource ? `（转载自 ${source.repostSource}）` : '' }} <ArrowUpRight class="size-3" /></a>
-                  <span v-if="!turn.sources.length" class="text-muted-foreground/70">暂无匹配文章</span>
+                <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="border-t pt-3 text-[11px] text-muted-foreground">
+                  <div class="mb-2 flex items-center justify-between">
+                    <span>引用来源<span v-if="turn.sources.length" class="font-mono"> · {{ turn.sources.length }}</span></span>
+                    <Button v-if="turn.sources.length" variant="link" size="xs" class="h-auto p-0 text-[11px] font-normal text-link" @click="openSources(index, null)">查看原文片段</Button>
+                  </div>
+                  <div v-if="turn.sources.length" class="flex flex-wrap gap-1.5">
+                    <button
+                      v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" type="button"
+                      :class="['inline-flex max-w-full items-center gap-1.5 rounded-md border bg-background py-1 pr-2.5 pl-1 text-left hover:border-ring hover:text-foreground', citing?.turn === index && citing.citation === sourceIndex + 1 && 'border-ring text-foreground']"
+                      :title="source.title" @click="openSources(index, sourceIndex + 1)"
+                    ><span class="citation m-0 flex-none">{{ sourceIndex + 1 }}</span><span class="truncate">{{ source.title }}</span></button>
+                  </div>
+                  <span v-else class="text-muted-foreground/70">暂无匹配文章</span>
                 </div>
                 <div v-if="!turn.streaming" class="mt-3.5 flex flex-wrap items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
                   <Button v-if="turn.answer" variant="outline" size="xs" @click="copy(turn)"><Copy />{{ turn.copied ? '已复制' : '复制' }}</Button>
@@ -369,65 +437,68 @@ function useSuggestion(text: string) {
             </article>
           </div>
 
-          <form class="rounded-lg border bg-card px-4.5 pt-4 pb-3 shadow-[0_3px_12px_#202b1410] max-sm:p-3.5" @submit.prevent="ask">
-            <Label for="question" class="text-xs font-semibold">{{ turns.length ? '继续提问' : '你的问题' }}</Label>
-            <Textarea id="question" v-model="question" rows="3" class="mt-2 min-h-18 resize-y rounded-none border-0 px-0 shadow-none focus-visible:ring-0 md:text-sm" placeholder="例如：文章中提到的核心观点是什么？" @keydown.meta.enter.prevent="ask" @keydown.ctrl.enter.prevent="ask" />
-            <div class="flex items-center justify-between border-t pt-2.5">
-              <span class="font-mono text-[10px] text-muted-foreground/80">Enter 换行 <i class="mx-1 not-italic">·</i> ⌘ Enter 提交</span>
-              <Button v-if="busy" type="button" size="sm" @click="stop">停止生成 <Square class="fill-current" /></Button>
-              <Button v-else type="submit" size="sm" :disabled="!question.trim()">提问 <ArrowUpRight /></Button>
-            </div>
-          </form>
-
-          <Collapsible v-slot="{ open }" class="mt-3.5 border-y py-3 text-xs text-[#47524b]">
-            <CollapsibleTrigger class="flex items-center gap-1.5 font-semibold">
-              <ChevronRight :class="['size-3.5 text-[#788648] transition-transform', open && 'rotate-90']" />检索范围
-              <span v-if="activeFilterCount" class="ml-1 text-[11px] font-normal text-[#788648]">{{ activeFilterCount }} 项已设置</span>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <div class="mt-3.5 grid grid-cols-2 gap-3 max-sm:grid-cols-1">
-                <div v-for="field in filterFields" :key="field.id" class="grid gap-1.5">
-                  <Label :for="field.id" class="text-[11px] font-normal text-muted-foreground">{{ field.label }}</Label>
-                  <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8.5 bg-card text-xs md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔的精确值' : undefined" :aria-label="field.aria" />
+          <!-- 对话中输入框固定在底部；空会话时随引导内容居中。 -->
+          <div :class="turns.length > 0 && 'sticky bottom-0 mt-auto bg-linear-to-t from-background from-75% to-transparent pt-5'">
+            <form class="rounded-lg border bg-card shadow-[0_3px_12px_#202b1410]" @submit.prevent="ask">
+              <Collapsible v-slot="{ open }" v-model:open="filtersOpen">
+                <CollapsibleContent>
+                  <div class="border-b px-4 pt-3.5 pb-3">
+                    <div class="grid grid-cols-5 gap-2.5 max-md:grid-cols-2 max-sm:grid-cols-1">
+                      <div v-for="field in filterFields" :key="field.id" class="grid gap-1">
+                        <Label :for="field.id" class="text-[11px] font-normal text-muted-foreground">{{ field.label }}</Label>
+                        <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8 bg-card text-xs md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔' : undefined" :aria-label="field.aria" />
+                      </div>
+                    </div>
+                    <p class="mt-2 text-[10px] text-muted-foreground">
+                      本次提问及重新生成将按当前检索范围筛选，分类、标签、场景需与文章中的值完全一致。
+                      <Button v-if="activeFilterCount" type="button" variant="link" class="h-auto p-0 text-[10px] text-link" @click="clearFilters">清除筛选</Button>
+                    </p>
+                  </div>
+                </CollapsibleContent>
+                <Label for="question" class="sr-only">{{ turns.length ? '继续提问' : '你的问题' }}</Label>
+                <Textarea
+                  id="question" v-model="question" :rows="turns.length ? 2 : 3"
+                  class="max-h-60 min-h-0 resize-none rounded-none border-0 bg-transparent px-4 pt-3.5 shadow-none focus-visible:ring-0 md:text-sm"
+                  :placeholder="turns.length ? '继续提问…' : '例如：文章中提到的核心观点是什么？'"
+                  @keydown.meta.enter.prevent="ask" @keydown.ctrl.enter.prevent="ask"
+                />
+                <div class="flex items-center justify-between gap-2 px-3 pb-2.5">
+                  <CollapsibleTrigger as-child>
+                    <Button type="button" variant="ghost" size="xs" :class="['text-[11px] font-normal text-muted-foreground', (open || activeFilterCount > 0) && 'bg-secondary text-[#5d6b37]']">
+                      <SlidersHorizontal />检索范围<span v-if="activeFilterCount" class="font-mono">· {{ activeFilterCount }}</span>
+                    </Button>
+                  </CollapsibleTrigger>
+                  <div class="flex items-center gap-3">
+                    <span class="font-mono text-[10px] text-muted-foreground/80 max-sm:hidden">⌘/Ctrl + Enter 提交</span>
+                    <Button v-if="busy" type="button" size="sm" @click="stop">停止生成 <Square class="fill-current" /></Button>
+                    <Button v-else type="submit" size="sm" :disabled="!question.trim()">提问 <ArrowUpRight /></Button>
+                  </div>
                 </div>
-              </div>
-              <Button v-if="activeFilterCount" type="button" variant="link" size="xs" class="mt-2.5 px-0 text-link" @click="clearFilters">清除筛选</Button>
-            </CollapsibleContent>
-          </Collapsible>
-          <p v-if="activeFilterCount" class="mt-2 text-[11px] text-muted-foreground">本次提问及重新生成将按当前检索范围筛选。</p>
+              </Collapsible>
+            </form>
+            <p class="py-2.5 text-center text-[10px] text-muted-foreground/80">回答由知识库内容生成，请结合原文核实重要信息。</p>
+          </div>
 
-          <div v-if="!turns.length" class="mt-8 grid gap-2">
+          <div v-if="!turns.length" class="mt-5 grid gap-2">
             <p class="mb-0.5 text-[11px] text-muted-foreground">试试这样提问</p>
             <Button v-for="text in ['最近收录的文章有哪些主要主题？', '帮我总结一篇文章的核心观点']" :key="text" variant="outline" class="h-auto min-h-10 justify-between bg-transparent py-2 text-left text-xs font-normal whitespace-normal text-[#505a54]" @click="useSuggestion(text)">{{ text }} <ArrowUpRight class="text-[#87934d]" /></Button>
           </div>
-          <footer class="mt-auto pt-9 text-[10px] leading-normal text-muted-foreground/80">回答由知识库内容生成，请结合原文核实重要信息。</footer>
         </section>
 
-        <aside class="border-l bg-[#fbfcfa] px-5 py-7 max-lg:hidden">
-          <div class="flex items-center justify-between text-xs font-semibold"><span>历史会话</span><Button variant="outline" size="xs" :disabled="busy" @click="newSession">新会话</Button></div>
-          <p v-if="!user" class="mt-2.5 text-[10px] leading-relaxed text-muted-foreground">未登录：会话仅保存在当前浏览器。<Button variant="link" class="h-auto p-0 text-[10px] text-link" @click="openAccount('login')">登录</Button>后可跨设备查看。</p>
-          <nav class="mt-3.5 mb-5 grid max-h-[42vh] gap-1 overflow-auto" aria-label="历史会话">
-            <div v-for="session in sessions" :key="session.id" :class="['group flex items-stretch rounded-md hover:bg-accent', session.id === sessionId && 'bg-accent']">
-              <button class="min-w-0 flex-1 px-2 py-1.5 text-left text-[#3e4842] disabled:cursor-default disabled:opacity-60" :disabled="busy" :title="session.title" @click="openSession(session.id)">
-                <span class="block truncate text-xs">{{ session.title || '新会话' }}</span>
-                <small class="mt-0.5 block font-mono text-[10px] text-muted-foreground/80">{{ session.messageCount }} 轮 · {{ new Date(session.updatedAt).toLocaleDateString() }}</small>
-              </button>
-              <IconButton label="删除会话" size="icon-sm" class="self-center text-muted-foreground/70 hover:bg-transparent hover:text-destructive" :disabled="busy" @click="removeSession(session.id)"><X /></IconButton>
-            </div>
-            <p v-if="!sessions.length" class="mx-2 my-1.5 text-[11px] text-muted-foreground/80">{{ sessionError || '暂无会话' }}</p>
-          </nav>
-          <Separator class="mb-4" />
-          <div class="flex items-center justify-between text-xs font-semibold"><span>知识库状态</span><span class="size-1.75 rounded-full bg-[#82ad55]" /></div>
-          <div class="my-3.5 flex justify-between text-[11px] text-muted-foreground"><span>收录文章</span><b class="font-mono text-xs text-foreground">{{ documentsCount }}</b></div>
-          <div class="my-3.5 flex justify-between text-[11px] text-muted-foreground"><span>数据源</span><b class="font-mono text-xs text-foreground">{{ sourcesCount }}</b></div>
-          <div class="mt-8 flex items-start gap-2 rounded-md border bg-[#f5f7ee] p-3">
-            <Info class="mt-px size-3.5 flex-none text-[#7a8951]" />
-            <p class="text-[10px] leading-relaxed text-[#7f8876]">{{ lastUpdated ? `最近更新于 ${new Date(lastUpdated).toLocaleString()}` : "等待管理端完成首次同步。" }}</p>
-          </div>
+        <aside v-if="citedTurn && wide" class="sticky top-14 h-[calc(100dvh-3.5rem)] border-l bg-[#fbfcfa]" aria-label="引用来源">
+          <SourcePanel :sources="citedTurn.sources" :active-citation="citing!.citation" :question="citedTurn.question" closable @close="citing = null" @select="(citation) => openSources(citing!.turn, citation)" />
         </aside>
-      </section>
+        <Sheet v-model:open="sourceSheetOpen">
+          <SheetContent side="right" class="w-[min(92vw,400px)] gap-0 bg-[#fbfcfa] p-0 pt-8 sm:max-w-none">
+            <SheetTitle class="sr-only">引用来源</SheetTitle>
+            <SheetDescription class="sr-only">本轮回答引用的文章与原文片段</SheetDescription>
+            <SourcePanel v-if="citedTurn" :sources="citedTurn.sources" :active-citation="citing!.citation" :question="citedTurn.question" @select="(citation) => openSources(citing!.turn, citation)" />
+          </SheetContent>
+        </Sheet>
+      </div>
     </main>
     <Toaster position="top-center" rich-colors />
     <ConfirmDialog />
   </TooltipProvider>
 </template>
+

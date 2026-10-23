@@ -11,11 +11,39 @@
     color: #7e8c52;
   }
 
-  /* 流式生成中的光标 */
-  .streaming-cursor::after {
+  /* 流式生成中的光标：跟在回答最后一个文本块（列表为最后一项）之后 */
+  .streaming-cursor::after,
+  .answer-streaming > :last-child:not(ol, ul)::after,
+  .answer-streaming > :is(ol, ul):last-child > li:last-child::after {
     content: "▍";
     color: #788648;
     animation: blink 1s steps(2) infinite;
+  }
+
+  /* 回答中的引用标记 [n] */
+  .citation {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.45em;
+    height: 1.45em;
+    margin: 0 1px;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: #eef2e4;
+    color: #5d6b37;
+    font: 500 10px/1 var(--font-mono);
+    vertical-align: 0.2em;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .citation:hover,
+  .citation-active {
+    background: var(--brand);
+    color: var(--brand-foreground);
+  }
+  .citation:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
   }
 
   /* 公开文章页的 Markdown 正文 */
