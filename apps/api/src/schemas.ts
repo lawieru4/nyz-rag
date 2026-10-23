@@ -524,7 +524,7 @@ const saveModelProviderBodySchema = {
 
 const modelCapabilityParams = {
   type: "object",
-  properties: { capability: { type: "string", enum: ["chat", "embedding", "rerank"] } },
+  properties: { capability: { type: "string", enum: ["chat", "embedding", "rerank", "review"] } },
   required: ["capability"],
   additionalProperties: false,
 } as const;
@@ -549,12 +549,13 @@ const modelSettingsResponseSchema = {
     chat: { ...modelSettingRecordSchema, nullable: true },
     embedding: { ...modelSettingRecordSchema, nullable: true },
     rerank: { ...modelSettingRecordSchema, nullable: true },
+    review: { ...modelSettingRecordSchema, nullable: true },
   },
-  required: ["chat", "embedding", "rerank"],
+  required: ["chat", "embedding", "rerank", "review"],
   additionalProperties: false,
 } as const;
 
-// temperature、maxTokens 可省略（新建取默认值，更新保持不变），只用于 Chat。
+// temperature、maxTokens 可省略（新建取默认值，更新保持不变），只用于 Chat 与审核。
 const saveModelSettingBodySchema = {
   type: "object",
   properties: {

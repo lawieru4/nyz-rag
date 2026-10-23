@@ -9,7 +9,7 @@ const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 /** 运行时使用的供应商配置：在接口记录之外带上后台保存的密钥密文（不返回给前端）。 */
 export type ModelProviderConfig = ModelProviderRecord & { apiKeyCiphertext?: string | null };
 
-/** 某项用途实际调用的模型：业务模型配置选定的供应商（已启用）与模型名；temperature / maxTokens 只用于 Chat。 */
+/** 某项用途实际调用的模型：业务模型配置选定的供应商（已启用）与模型名；temperature / maxTokens 只用于 Chat 与审核。 */
 export interface ModelSelection {
   provider: ModelProviderConfig;
   model: string;

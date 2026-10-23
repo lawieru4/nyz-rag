@@ -1,0 +1,2 @@
+ALTER TABLE "model_settings" DROP CONSTRAINT "model_settings_capability_check";--> statement-breakpoint
+ALTER TABLE "model_settings" ADD CONSTRAINT "model_settings_capability_check" CHECK ("model_settings"."capability" IN ('chat', 'embedding', 'rerank', 'review'));

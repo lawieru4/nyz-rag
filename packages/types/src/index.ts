@@ -550,10 +550,10 @@ export type SaveModelProviderRequest = Pick<ModelProviderRecord, "name" | "provi
   & Partial<Pick<ModelProviderRecord, "credentialEnv">>
   & { apiKey?: string; clearApiKey?: boolean };
 
-/** 业务模型的用途：问答生成、向量化与检索、重排序。 */
-export type ModelCapability = "chat" | "embedding" | "rerank";
+/** 业务模型的用途：问答生成、向量化与检索、重排序、审核（评估集题目审核等离线任务）。 */
+export type ModelCapability = "chat" | "embedding" | "rerank" | "review";
 
-/** 某项用途选定的供应商与模型；temperature / maxTokens 只用于 Chat。 */
+/** 某项用途选定的供应商与模型；temperature / maxTokens 只用于 Chat 与审核。 */
 export interface ModelSettingRecord {
   capability: ModelCapability;
   providerId: string;

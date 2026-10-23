@@ -28,16 +28,18 @@ const presets = [
   { id: "custom", label: "其他 OpenAI 兼容服务", provider: "OpenAI 兼容", baseUrl: "" },
 ];
 
-// 业务模型的用途；按模型名称粗分候选，分不出时给出全部，仍可手动输入任意模型名。
-const capabilities: Array<{ id: ModelCapability; label: string; description: string; placeholder: string; pattern: RegExp; exclude?: RegExp }> = [
-  { id: "chat", label: "Chat", description: "问答生成；未配置或调用失败时摘录原文片段", placeholder: "例如 deepseek-ai/DeepSeek-V3", pattern: /./, exclude: /embed|bge|m3e|bce|rerank/i },
+// 业务模型的用途；按模型名称粗分候选，分不出时给出全部，仍可手动输入任意模型名。generative 为对话模型，可设置温度与最大输出。
+const chatModelPattern = { pattern: /./, exclude: /embed|bge|m3e|bce|rerank/i };
+const capabilities: Array<{ id: ModelCapability; label: string; description: string; placeholder: string; pattern: RegExp; exclude?: RegExp; generative?: true; defaultTemperature?: number }> = [
+  { id: "chat", label: "Chat", description: "问答生成；未配置或调用失败时摘录原文片段", placeholder: "例如 deepseek-ai/DeepSeek-V3", ...chatModelPattern, generative: true },
   { id: "embedding", label: "Embedding", description: "文档向量化与向量检索；配置后新文档切片完成即自动向量化", placeholder: "例如 BAAI/bge-m3", pattern: /embed|bge|m3e|bce/i, exclude: /rerank/i },
   { id: "rerank", label: "Rerank", description: "重排序；知识库开启重排序时使用", placeholder: "例如 BAAI/bge-reranker-v2-m3", pattern: /rerank/i },
+  { id: "review", label: "审核", description: "评估集题目审核等离线任务；建议选用与 Chat 不同的模型，避免同一模型审核自己生成的内容", placeholder: "例如 Qwen/Qwen3-235B-A22B", ...chatModelPattern, generative: true, defaultTemperature: 0 },
 ];
 type Capability = (typeof capabilities)[number];
 
 const providers = ref<ModelProvider[]>([]);
-const settings = ref<ModelSettingsResponse>({ chat: null, embedding: null, rerank: null });
+const settings = ref<ModelSettingsResponse>({ chat: null, embedding: null, rerank: null, review: null });
 
 async function load() {
   try {
@@ -96,7 +98,7 @@ function editSetting(capability: Capability) {
   const current = settings.value[capability.id];
   settingCapability.value = capability;
   const providerId = current && providerById(current.providerId)?.enabled ? current.providerId : enabledProviders.value[0]?.id ?? "";
-  settingForm.value = { providerId, model: current?.model ?? "", temperature: current?.temperature ?? 0.3, maxTokens: current?.maxTokens ?? 1024 };
+  settingForm.value = { providerId, model: current?.model ?? "", temperature: current?.temperature ?? capability.defaultTemperature ?? 0.3, maxTokens: current?.maxTokens ?? 1024 };
   settingOpen.value = true;
   void loadModels();
 }
@@ -112,7 +114,7 @@ async function saveSetting() {
   const previous = settings.value[capability.id];
   if (capability.id === "embedding" && previous && previous.model !== model.trim()
     && !await confirm({ title: "更换 Embedding 模型", description: "更换后，已向量化的文档需要重新向量化；在此之前向量检索只会使用同一模型的文档。确定更换？", confirmText: "更换" })) return;
-  const body = { providerId, model: model.trim(), ...(capability.id === "chat" ? { temperature, maxTokens } : {}) };
+  const body = { providerId, model: model.trim(), ...(capability.generative ? { temperature, maxTokens } : {}) };
   try {
     await client.request<ModelSettingRecord>(`/api/admin/model-settings/${capability.id}`, { method: "PUT", headers: json, body: JSON.stringify(body) });
     await load();
@@ -232,7 +234,7 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
             <span class="font-mono text-xs break-all">{{ settings[capability.id]!.model }}</span>
             <Badge variant="muted">{{ providerById(settings[capability.id]!.providerId)?.name ?? '未知供应商' }}</Badge>
             <Badge v-if="providerById(settings[capability.id]!.providerId)?.enabled === false" variant="destructive">供应商已停用</Badge>
-            <span v-if="capability.id === 'chat'" class="text-xs text-muted-foreground">温度 {{ settings.chat!.temperature }} · 最大输出 {{ settings.chat!.maxTokens }} Token</span>
+            <span v-if="capability.generative" class="text-xs text-muted-foreground">温度 {{ settings[capability.id]!.temperature }} · 最大输出 {{ settings[capability.id]!.maxTokens }} Token</span>
           </template>
           <Badge v-else variant="muted">未配置</Badge>
         </div>
@@ -299,10 +301,11 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
           </div>
           <p v-else-if="modelCandidates.length" class="text-xs text-muted-foreground">没有匹配的模型，将使用输入的模型名</p>
         </div>
-        <div v-if="settingCapability.id === 'chat'" class="grid grid-cols-2 gap-3">
+        <div v-if="settingCapability.generative" class="grid grid-cols-2 gap-3">
           <div class="grid gap-2"><Label for="ms-temperature">温度</Label><Input id="ms-temperature" v-model.number="settingForm.temperature" type="number" min="0" max="2" step="0.1" required /></div>
           <div class="grid gap-2"><Label for="ms-max-tokens">最大输出 Token</Label><Input id="ms-max-tokens" v-model.number="settingForm.maxTokens" type="number" min="1" max="1048576" step="1" required /></div>
-          <p class="col-span-2 text-xs leading-relaxed text-muted-foreground">最大输出 Token 是单次回答的长度上限（max_tokens），不是上下文窗口；不要超过模型的最大输出长度，否则调用会失败并退回原文摘录。问答回答一般 1024～4096 足够。</p>
+          <p v-if="settingCapability.id === 'chat'" class="col-span-2 text-xs leading-relaxed text-muted-foreground">最大输出 Token 是单次回答的长度上限（max_tokens），不是上下文窗口；不要超过模型的最大输出长度，否则调用会失败并退回原文摘录。问答回答一般 1024～4096 足够。</p>
+          <p v-else class="col-span-2 text-xs leading-relaxed text-muted-foreground">审核输出逐项判断与理由，温度建议为 0 以便结果稳定；最大输出 1024～2048 一般足够，推理模型需要留出思考的长度。</p>
         </div>
         <p v-if="settingCapability.id === 'embedding'" class="text-xs leading-relaxed text-muted-foreground">更换 Embedding 模型后，已向量化的文档需要重新向量化。</p>
         <DialogFooter>

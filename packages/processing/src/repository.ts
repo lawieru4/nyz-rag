@@ -707,9 +707,9 @@ export async function deleteModelProvider(id: string): Promise<{ deleted: boolea
   });
 }
 
-// ---- 业务模型（Chat / Embedding / Rerank 各选一个供应商与模型） ----
+// ---- 业务模型（Chat / Embedding / Rerank / 审核各选一个供应商与模型） ----
 
-const MODEL_CAPABILITIES: ModelCapability[] = ["chat", "embedding", "rerank"];
+const MODEL_CAPABILITIES: ModelCapability[] = ["chat", "embedding", "rerank", "review"];
 const toModelSetting = (row: typeof modelSettings.$inferSelect): ModelSettingRecord => ({ ...row, updatedAt: iso(row.updatedAt)! });
 
 export async function getModelSettings(db: Executor = getDb()): Promise<ModelSettingsResponse> {
