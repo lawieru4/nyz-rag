@@ -90,12 +90,19 @@ test("model JSON is extracted from fences and reasoning and rejected when invali
   assert.equal(parsed.question, "问题");
 });
 
-test("review passes only when every criterion is explicitly true", () => {
-  assert.equal(parseReview({ standalone: true, supported: true, faithful: true, specific: true, distinctive: true, natural: true, reason: "" }).passed, true);
-  const failed = parseReview({ standalone: true, supported: "true", faithful: true, specific: true, distinctive: true, natural: true, reason: " 证据不足 " });
+test("review passes only when every criterion scores at least 4", () => {
+  const scores = { standalone: 5, supported: 4, faithful: 5, specific: 4, distinctive: 4, natural: 5 };
+  const passed = parseReview({ analysis: " 其他周报无法回答 ", scores, reason: "" });
+  assert.equal(passed.passed, true);
+  assert.equal(passed.analysis, "其他周报无法回答");
+  assert.equal(parseReview({ scores: { ...scores, distinctive: 3 } }).passed, false);
+  // 分数缺失、不是 1～5 的整数或旧版布尔输出都视为不通过。
+  const failed = parseReview({ scores: { ...scores, supported: "5", faithful: 4.5, natural: 6 }, reason: " 证据不足 " });
   assert.equal(failed.passed, false);
+  assert.deepEqual([failed.scores.supported, failed.scores.faithful, failed.scores.natural], [null, null, null]);
   assert.equal(failed.criteria.supported, false);
   assert.equal(failed.reason, "证据不足");
+  assert.equal(parseReview({ standalone: true, supported: true, faithful: true, specific: true, distinctive: true, natural: true }).passed, false);
 });
 
 test("a well-formed question passes the program checks", () => {
@@ -119,6 +126,9 @@ test("program checks catch evidence, pronoun, leak, overlap, duplicate and type 
     const { failures } = checkGenerated(generated(question), article, target(targetOverrides));
     assert.ok(failures.map(failureCategory).includes(category), `${category}: ${failures.join("; ")}`);
   }
+  // 时效性问题写明的年份不算泄漏答案。
+  const dated = generated({ question: "2026年锂的 (110) 晶面为什么能维持更久的界面接触？", answer: "2026 年的测试中，Li(110) 屈服强度最低、蠕变指数最高。" });
+  assert.ok(!checkGenerated(dated, article, target()).failures.map(failureCategory).includes("泄漏答案"));
   const duplicate = checkGenerated(generated(), article, target(), [searchTerms("为什么锂的 (110) 晶面受压时能维持更久的界面接触")]);
   assert.ok(duplicate.failures.map(failureCategory).includes("重复"));
   // 元数据题：包含期刊或机构线索即可，证据也可以摘自标题。
@@ -127,8 +137,9 @@ test("program checks catch evidence, pronoun, leak, overlap, duplicate and type 
 });
 
 test("generation prompt carries the target, clues and retry feedback", () => {
-  const [system, user] = generationMessages(article, target({ type: "metadata" }), ["证据不在原文中：…"]);
+  const [system, user] = generationMessages({ ...article, publishedAt: new Date("2026-08-24T18:00:00Z") }, target({ type: "metadata" }), ["证据不在原文中：…"]);
   assert.equal(system.role, "system");
+  assert.match(user.content, /发布日期：2026-08-25/, "publish date is shown in Asia/Shanghai");
   assert.match(user.content, /目标题型：metadata/);
   assert.match(user.content, /线索：ACS Energy Letters；上海交通大学/);
   assert.match(user.content, /未通过检查[\s\S]*证据不在原文中/);

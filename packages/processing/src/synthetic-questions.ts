@@ -7,7 +7,7 @@ import type { ChatMessage } from "./models.js";
 import { metadataSearchFields, normalizeSearchText, searchTerms } from "./search-terms.js";
 
 /** 修改生成或审核提示、校验规则时加一，写入工作文件与冻结的数据集。 */
-export const SYNTHETIC_PROMPT_VERSION = 2;
+export const SYNTHETIC_PROMPT_VERSION = 4;
 export const MAX_GENERATION_ATTEMPTS = 3;
 export const MIN_ARTICLE_LENGTH = 300;
 /** 样本不足该篇数的栏目合并为「其他」。 */
@@ -31,6 +31,8 @@ export interface CorpusArticle {
   content: string;
   metadata: ArticleMetadata | null;
   contentHash: string | null;
+  /** 供时效性问题写明时间范围。 */
+  publishedAt?: Date | null;
 }
 
 export interface SampleTarget {
@@ -51,9 +53,16 @@ export interface GeneratedQuestion {
 export const REVIEW_CRITERIA = ["standalone", "supported", "faithful", "specific", "distinctive", "natural"] as const;
 export type ReviewCriterion = (typeof REVIEW_CRITERIA)[number];
 
+/** 审核按 1～5 分打分，每项都不低于该分才通过。 */
+export const REVIEW_PASS_SCORE = 4;
+
 export interface ReviewResult {
   passed: boolean;
   criteria: Record<ReviewCriterion, boolean>;
+  /** 各项得分；缺失或不是 1～5 的整数时为 null，视为不通过。 */
+  scores: Record<ReviewCriterion, number | null>;
+  /** 审核员打分前的分析，用于排查审核口径。 */
+  analysis: string;
   reason: string;
 }
 
@@ -161,7 +170,7 @@ const TYPE_GUIDES: Record<SyntheticType, string> = {
 
 const SPECIFICITY_GUIDES: Record<Specificity, string> = {
   high: "具体度 high：可以使用原文中的材料名、化学式等专有名词，但不得照抄原文句子。",
-  low: "具体度 low：模拟不了解原文措辞的提问者，用该领域的通用说法提问（如「钠离子电池」「硬碳负极」「储能电站」），不出现这篇文章特有的材料缩写、化学式、产品型号、机构名、人名和具体数值；要自然直白，不要为了回避名称写成谜语式的描述（如「一位长期研究某领域的教授」「借助某种流体的工艺」）。问题仍须能由这篇文章明确回答。",
+  low: "具体度 low：模拟不了解原文措辞的提问者，用该领域的通用说法提问（如「钠离子电池」「硬碳负极」「储能电站」），不出现这篇文章特有的材料缩写、化学式、产品型号、机构名、人名和具体数值（时间范围不算具体数值，时效性内容仍须写明）；要自然直白，不要为了回避名称写成谜语式的描述（如「一位长期研究某领域的教授」「借助某种流体的工艺」）。人物或企业介绍类文章，问不依赖姓名也能自然表述的内容（如某类技术的发展判断、某类产品的设计思路），不要用身份描述代替姓名去问个人经历。问题仍须能由这篇文章明确回答。",
 };
 
 /** 提示中的元数据：期刊、标题中的机构、项目字段与关键词。 */
@@ -169,6 +178,7 @@ function articleHeader(article: CorpusArticle): string {
   const fields = metadataSearchFields(article.metadata);
   const lines = [`标题：${article.title}`];
   if (article.category) lines.push(`栏目：${article.category}`);
+  if (article.publishedAt) lines.push(`发布日期：${article.publishedAt.toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })}`);
   if (fields.journal) lines.push(`期刊：${fields.journal.replace(/\n/g, " / ")}`);
   if (fields.titleInstitutions) lines.push(`标题中的机构：${fields.titleInstitutions.replace(/\n/g, "、")}`);
   if (fields.projectName) lines.push(`项目名称：${fields.projectName}`);
@@ -188,7 +198,7 @@ export function generationMessages(article: CorpusArticle, target: SampleTarget,
     "2. 问题不照抄标题或证据句，不把答案写进问题；",
     "3. 问题指向这篇文章特有的内容（这项研究、产品、专利、报告或人物的具体数据、方法与结论），不问教科书通识或多数文章都会提到的常识（如某材料的理论容量、某溶剂的常规用量）；也不问「这篇文章讲了什么」这类概括性问题；",
     "4. 问题像业务人员在知识库中实际会问的问题，长度 10～60 字，只问一件事；",
-    "5. 问题必须由这篇文章明确回答，答案唯一、可核对；不在问题中使用专利号、DOI、文章编号等用户通常不知道的标识符；",
+    "5. 问题必须由这篇文章明确回答，答案唯一、可核对；不在问题中使用专利号、DOI、文章编号等用户通常不知道的标识符；询问价格、行情、周报月报、装机或销量、排行榜、政策动态等时效性内容时，问题必须写明时间范围（如「2026年5月上旬」「2026年10月第3周」），使同系列其他时期的文章无法回答；时间优先取标题或正文，没有时再按发布日期写（如「2026年8月下旬」）；",
     "6. evidence 为 1～3 段逐字摘自正文的原文（元数据题也可以摘自「线索」），每段不超过 200 字，不改写、不省略、不拼接；",
     "7. answer 只依据 evidence 作答，不补充原文没有的内容，不超过 150 字。",
     "只输出一个 JSON 对象，不要输出其他内容：",
@@ -211,15 +221,17 @@ export function generationMessages(article: CorpusArticle, target: SampleTarget,
 
 export function reviewMessages(article: CorpusArticle, generated: GeneratedQuestion): ChatMessage[] {
   const system = [
-    "你是检索评估集的审核员，判断一道根据文章生成的问题是否合格。逐项判断，标准从严：",
-    "- standalone：不看文章也能理解问题在问什么，没有「本文」「该研究」等指代或缺失的上下文；",
+    "你是检索评估集的审核员，判断一道根据文章生成的问题是否合格。这道题将用于检验检索系统能否从上千篇同领域文章（科研解读、行业周报、企业与人物报道等）中找到这篇文章，只认这一篇为正确来源。",
+    "先在 analysis 中简要分析：知识库里同系列或同主题的其他文章（如其他时期的周报或行情、同一材料或技术的其他研究、同一企业的其他报道）能否同样回答这道题；问题是否属于教科书通识；措辞是否自然。然后逐项打分，标准从严：",
+    "- standalone：不看文章也能理解问题在问什么，没有「本文」「该研究」等指代或缺失的上下文（如时效性内容缺少时间范围）；",
     "- supported：evidence 足以支持 answer；",
     "- faithful：answer 没有编造或超出原文的推断，与正文一致；",
     "- specific：问题有明确、唯一、可核对的答案，不是开放式讨论；",
-    "- distinctive：问题指向这篇文章特有的内容（具体研究、产品、专利或报告中的数据、方法与结论），而不是教科书通识或多数同类文章都能回答的常识；",
+    "- distinctive：只有这篇文章能回答，同系列或同主题的其他文章无法给出同样的答案，也不是教科书通识；",
     "- natural：措辞像真实业务人员的提问：不是把原文句子改成问句，不是刻意回避名称的谜语式描述，也不含专利号、DOI 等用户通常不知道的标识符。",
+    "每项 1～5 分：5 完全符合；4 基本符合，只有不影响使用的小瑕疵；3 有明显问题；2 大部分不符合；1 完全不符合。不确定时给低分。",
     "只输出一个 JSON 对象，不要输出其他内容：",
-    "{\"standalone\": true, \"supported\": true, \"faithful\": true, \"specific\": true, \"distinctive\": true, \"natural\": true, \"reason\": \"不合格时说明原因，合格时为空字符串\"}",
+    "{\"analysis\": \"…\", \"scores\": {\"standalone\": 1, \"supported\": 1, \"faithful\": 1, \"specific\": 1, \"distinctive\": 1, \"natural\": 1}, \"reason\": \"有低于 4 分的项时说明原因，否则为空字符串\"}",
   ].join("\n");
   const user = [
     `问题：${generated.question}`,
@@ -266,9 +278,12 @@ export function parseGenerated(value: Record<string, unknown>): GeneratedQuestio
 }
 
 export function parseReview(value: Record<string, unknown>): ReviewResult {
-  const criteria = Object.fromEntries(REVIEW_CRITERIA.map((key) => [key, value[key] === true])) as Record<ReviewCriterion, boolean>;
-  const reason = typeof value.reason === "string" ? value.reason.trim() : "";
-  return { passed: REVIEW_CRITERIA.every((key) => criteria[key]), criteria, reason };
+  const raw = typeof value.scores === "object" && value.scores !== null ? value.scores as Record<string, unknown> : {};
+  const score = (item: unknown) => Number.isInteger(item) && (item as number) >= 1 && (item as number) <= 5 ? item as number : null;
+  const scores = Object.fromEntries(REVIEW_CRITERIA.map((key) => [key, score(raw[key])])) as Record<ReviewCriterion, number | null>;
+  const criteria = Object.fromEntries(REVIEW_CRITERIA.map((key) => [key, (scores[key] ?? 0) >= REVIEW_PASS_SCORE])) as Record<ReviewCriterion, boolean>;
+  const text = (key: string) => typeof value[key] === "string" ? (value[key] as string).trim() : "";
+  return { passed: REVIEW_CRITERIA.every((key) => criteria[key]), criteria, scores, analysis: text("analysis"), reason: text("reason") };
 }
 
 // ---- 程序校验 ----
@@ -297,8 +312,9 @@ export function evidenceSource(article: CorpusArticle, type: SyntheticType): str
   return type === "metadata" ? [article.content, article.title, ...metadataClues(article.metadata)].join("\n") : article.content;
 }
 
-// 答案中的小数与 4 位以上整数（不与字母相连），出现在问题里视为泄漏答案。
-const answerNumbers = (text: string) => [...normalizeSearchText(text).matchAll(/(?<![a-z0-9.])(\d+\.\d+|\d{4,})(?![a-z0-9])/g)].map((match) => match[1]);
+// 答案中的小数与 4 位以上整数（不与字母相连），出现在问题里视为泄漏答案；年份是问题应写明的时间范围，不算。
+const answerNumbers = (text: string) => [...normalizeSearchText(text).matchAll(/(?<![a-z0-9.])(\d+\.\d+|\d{4,})(?![a-z0-9])/g)]
+  .map((match) => match[1]).filter((value) => !/^(19|20)\d{2}$/.test(value));
 
 export interface CheckResult {
   failures: string[];
