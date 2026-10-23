@@ -139,12 +139,14 @@ export function createChatModel({ provider, model: configuredModel, temperature,
         try {
           for await (const data of readServerSentEvents(response.body)) {
             if (data === "[DONE]") return;
-            let payload: { choices?: Array<{ delta?: { content?: unknown } }>; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null };
+            let payload: { choices?: Array<{ delta?: { content?: unknown } }>; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null; error?: unknown };
             try {
               payload = JSON.parse(data);
             } catch {
               throw new ModelError("The chat provider returned an invalid stream.");
             }
+            // 部分供应商在 HTTP 200 的流中以 error 事件报告过载等错误，不能当作正常结束。
+            if (payload.error) throw new ModelError("The chat provider reported an error in the stream.");
             const text = payload.choices?.[0]?.delta?.content;
             if (typeof text === "string" && text) yield { type: "token", text };
             const usage = payload.usage;
