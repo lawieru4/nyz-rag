@@ -8,6 +8,7 @@ import pg from "pg";
 import { closeDatabase, DocumentBusyError, migrate, withDocumentWork, withTransaction } from "../src/db.js";
 import { processDocument } from "../src/process.js";
 import { createSource, getDocument, upsertDocument } from "../src/repository.js";
+import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 test("document work locks span transactions, roll back sync conflicts and fence disconnected owners", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 30000 }, async () => {
   const previousUrl = process.env.DATABASE_URL;
@@ -20,8 +21,8 @@ test("document work locks span transactions, roll back sync conflicts and fence 
   process.env.DATABASE_URL = url.toString();
   try {
     await migrate();
-    const source = await createSource({ name: "Lock test", url: "https://example.test", kind: "网页站点", frequency: "" });
-    const input = { sourceId: source.id, url: "https://example.test/a", title: "Original", content: "Original body", status: "ready" as const };
+    const source = await createSource({ name: "Lock test", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
+    const input = articleDocument(source.id, "a", "Original", "Original body");
     const id = await withTransaction((tx) => upsertDocument(tx, input));
     let contender: Promise<void> | undefined;
     let entered = false;
@@ -49,7 +50,7 @@ test("document work locks span transactions, roll back sync conflicts and fence 
 
     const created = await Promise.all([0, 1].map(() => withDocumentWork(async (db, lock) => {
       return db.transaction(async (tx) => {
-        const createdId = await upsertDocument(tx, { ...input, url: "https://example.test/new" });
+        const createdId = await upsertDocument(tx, articleDocument(source.id, "new", "Original", "Original body"));
         await lock(createdId);
         await processDocument(tx, createdId);
         return createdId;
@@ -57,14 +58,14 @@ test("document work locks span transactions, roll back sync conflicts and fence 
     })));
     assert.equal(created[0], created[1], "concurrent first syncs converge on one document identity");
 
-    const body = "Shared document body with enough content for deduplication. ".repeat(4);
+    const body = "Shared document body with enough content for deduplication. ".repeat(4).trim();
     const primary = await withTransaction(async (tx) => {
-      const target = await upsertDocument(tx, { ...input, url: "https://example.test/primary", content: body });
+      const target = await upsertDocument(tx, articleDocument(source.id, "primary", "Original", body));
       await processDocument(tx, target);
       return target;
     });
     const dependent = await withTransaction(async (tx) => {
-      const target = await upsertDocument(tx, { ...input, url: "https://example.test/duplicate", content: body });
+      const target = await upsertDocument(tx, articleDocument(source.id, "duplicate", "Original", body));
       assert.equal((await processDocument(tx, target)).duplicateOf, primary);
       return target;
     });
@@ -74,7 +75,7 @@ test("document work locks span transactions, roll back sync conflicts and fence 
         await tx.execute(sql`SELECT id FROM documents WHERE id = ${dependent} FOR UPDATE`);
         // A dependent already owns its row; the primary must fail fast rather than wait for that row.
         const conflict = withTransaction(async (other) => {
-          await upsertDocument(other, { ...input, url: "https://example.test/primary", content: "Changed body" });
+          await upsertDocument(other, articleDocument(source.id, "primary", "Original", "Changed body"));
           await processDocument(other, primary);
         });
         await assert.rejects(conflict, DocumentBusyError);

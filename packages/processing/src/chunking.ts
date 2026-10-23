@@ -33,7 +33,7 @@ export function estimateTokens(text: string): number {
 /** 向量化输入：上下文前缀 + 正文。 */
 export const embeddingInput = (chunk: DocumentChunkRecord) => chunk.context ? `${chunk.context}\n\n${chunk.content}` : chunk.content;
 
-/** 文章级向量化输入：标题 + 摘要；没有摘要（如网页来源）时为 null，不生成文章级向量。 */
+/** 文章级向量化输入：标题 + 摘要；没有摘要时为 null，不生成文章级向量。 */
 export function summaryEmbeddingInput(title: string, summary: string | null | undefined): string | null {
   const text = summary?.trim();
   return text ? `文章：${title}\n\n${text}` : null;
@@ -150,10 +150,4 @@ export function articleQuestions(article: Pick<ParsedArticle, "blocks">): string
 export function chunkArticle(documentId: string, article: ParsedArticle, options?: ChunkOptions): StructuredChunk[] {
   const keywords = [...new Set([...(article.sourceMeta?.keywords ?? []), ...(article.projectMeta?.keywords ?? [])])];
   return chunkBlocks(documentId, articleChunkBlocks(article), { title: article.title, keywords }, options);
-}
-
-/** 网页等纯文本正文：按行作为块，没有章节信息。 */
-export function chunkText(documentId: string, title: string, content: string, options?: ChunkOptions): StructuredChunk[] {
-  const blocks = content.split(/\n+/).map((line) => ({ kind: "text" as const, text: line.replace(/[ \t]+/g, " "), sectionPath: [] }));
-  return chunkBlocks(documentId, blocks, { title }, options);
 }

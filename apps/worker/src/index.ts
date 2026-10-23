@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  backfillContentHashes, canonicalUrlFromHtml, closeDatabase, closeModelAdmissionLimiter, contentFingerprint, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, findDocumentByCanonicalUrl, getSource, getSourceSyncState,
+  backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, getSource, getSourceSyncState,
   getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
   reindexChunkSearchTerms, reindexDocumentMetadataTerms, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState,
   syncArticles, updateTask, upsertDocument, withDocumentWork, withTransaction, type Database, type ProcessDocumentResult,
@@ -11,29 +11,12 @@ import type { DataSourceRecord } from "@nyz-rag/types";
 
 modelAdmissionConfig();
 const connection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
-const maxPages = Math.max(1, Math.min(100, Number.parseInt(process.env.CRAWL_MAX_PAGES ?? "20", 10) || 20));
-const requestDelayMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_DELAY_MS ?? "1000", 10) || 1000);
-const requestTimeoutMs = Math.max(1000, Number.parseInt(process.env.CRAWL_REQUEST_TIMEOUT_MS ?? "15000", 10) || 15000);
-// 文章 API：单次同步最多处理的文章数，以及头部扫描在连续多少页无变化后结束。
+// 文章接口：请求间隔与超时、单次同步最多处理的文章数，以及头部扫描在连续多少页无变化后结束。
+const requestDelayMs = Math.max(1000, Number.parseInt(process.env.NYZ_ARTICLE_REQUEST_DELAY_MS ?? "1000", 10) || 1000);
+const requestTimeoutMs = Math.max(1000, Number.parseInt(process.env.NYZ_ARTICLE_REQUEST_TIMEOUT_MS ?? "15000", 10) || 15000);
 const articleSyncLimit = Math.max(1, Math.min(5000, Number.parseInt(process.env.NYZ_ARTICLE_SYNC_LIMIT ?? "200", 10) || 200));
 const articleOverlapPages = Math.max(1, Math.min(20, Number.parseInt(process.env.NYZ_ARTICLE_OVERLAP_PAGES ?? "2", 10) || 2));
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message.slice(0, 500) : fallback;
-
-// url 已规范化；links 为同源 http(s) 链接，规范化后返回。
-function extractPage(html: string, url: string) {
-  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
-  const main = html.match(/<(?:main|article)\b[^>]*>([\s\S]*?)<\/(?:main|article)>/i)?.[1] ?? html;
-  const content = main
-    .replace(/<(script|style|noscript|svg|nav|footer|header)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/section|\/article)\b[^>]*>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
-    .replace(/[\t\r ]+/g, " ").replace(/\n\s+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  const links = [...html.matchAll(/<a\b[^>]*href\s*=\s*(["'])(.*?)\1[^>]*>/gi)]
-    .map((match) => normalizeUrl(match[2].replace(/&amp;/gi, "&"), url))
-    .filter((link): link is string => Boolean(link && new URL(link).origin === new URL(url).origin));
-  return { title: title.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), content, links, canonicalUrl: canonicalUrlFromHtml(html, url), rawHtml: html };
-}
 
 async function embedDocument(documentId: string, db: Database) {
   try {
@@ -68,18 +51,11 @@ async function autoEmbedDocuments({ embed }: ProcessDocumentResult, db: Database
   if (!embed.length) return;
   const providers = await listModelProviders(db);
   if (!providers.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
-  // An embedding failure remains retryable without discarding successfully crawled content.
+  // An embedding failure remains retryable without discarding successfully synced content.
   for (const documentId of embed) await embedDocument(documentId, db).catch(() => console.error(`Embedding failed for document ${documentId}`));
 }
 
 const duplicateNote = (count: number) => count ? `${count} 篇与已有文档内容相同，标记为重复，未切片和向量化` : "";
-
-async function fetchHtml(url: string, userAgent: string) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs), headers: { "user-agent": userAgent, accept: "text/html,application/xhtml+xml" }, redirect: "follow" });
-  if (!response.ok) throw new Error(`HTTP ${response.status} while fetching ${url}`);
-  if (!response.headers.get("content-type")?.toLowerCase().includes("text/html")) throw new Error(`Non-HTML response at ${url}`);
-  return { html: await response.text(), url: response.url || url };
-}
 
 async function syncArticleSource(source: DataSourceRecord, taskId: string) {
   const client = createArticleClient({ listUrl: source.url, token: process.env.NYZ_ARTICLE_TOKEN ?? "", timeoutMs: requestTimeoutMs });
@@ -123,76 +99,6 @@ async function syncArticleSource(source: DataSourceRecord, taskId: string) {
   return { count: result.processed, note: notes.length ? notes.join("；") : null };
 }
 
-/**
- * 网页文档在来源内按规范地址识别。页面声明的 canonical 已被另一抓取地址的文档占用时：正文相同说明是同一页面的别名地址，
- * 跳过（返回 null）；正文不同多为站点配置错误，不信任 canonical，改用抓取地址，避免不同页面互相覆盖。
- */
-async function saveWebPage(sourceId: string, url: string, page: ReturnType<typeof extractPage>) {
-  return withDocumentWork(async (db, lock) => {
-    const result = await db.transaction(async (tx) => {
-      let canonicalUrl = page.canonicalUrl ?? url;
-      if (canonicalUrl !== url) {
-        const existing = await findDocumentByCanonicalUrl(tx, sourceId, canonicalUrl);
-        if (existing && existing.url !== url) {
-          if (existing.contentHash === contentFingerprint(page.content)) return null;
-          canonicalUrl = url;
-        }
-      }
-      const id = await upsertDocument(tx, { sourceId, url, canonicalUrl, title: page.title, content: page.content, rawHtml: page.rawHtml, status: "ready" });
-      await lock(id);
-      const result = await processDocument(tx, id);
-      for (const target of result.embed) await lock(target);
-      return result;
-    });
-    if (result) await autoEmbedDocuments(result, db);
-    return result;
-  });
-}
-
-async function crawlSite(source: DataSourceRecord, taskId: string) {
-  const baseUrl = new URL(source.url);
-  if (!["http:", "https:"].includes(baseUrl.protocol)) throw new Error("Only HTTP and HTTPS sources are supported");
-  const userAgent = "NYZ-RAG-Bot/1.0 (+contact site administrator)";
-  const robotsUrl = new URL("/robots.txt", baseUrl);
-  const robotsResponse = await fetch(robotsUrl, { signal: AbortSignal.timeout(requestTimeoutMs), headers: { "user-agent": userAgent } });
-  if (robotsResponse.ok) {
-    const robots = await robotsResponse.text();
-    const blocked = robots.split(/\r?\n/).some((line) => /^\s*Disallow:\s*\/\s*$/i.test(line));
-    if (blocked) throw new Error("robots.txt disallows crawling this site");
-  } else if (robotsResponse.status !== 404 && robotsResponse.status !== 410) {
-    throw new Error(`Unable to check robots.txt (HTTP ${robotsResponse.status})`);
-  }
-
-  // 待抓取与已访问地址均已规范化；重定向目标和页面声明的 canonical 也计入已访问，避免同一页面重复抓取。
-  const pending = [normalizeUrl(baseUrl.toString())!];
-  const visited = new Set<string>();
-  let processed = 0;
-  let duplicates = 0;
-  while (pending.length && processed < maxPages) {
-    const url = pending.shift()!;
-    if (visited.has(url)) continue;
-    visited.add(url);
-    const fetched = await fetchHtml(url, userAgent);
-    const finalUrl = normalizeUrl(fetched.url) ?? url;
-    if (finalUrl !== url && visited.has(finalUrl)) continue;
-    visited.add(finalUrl);
-    const page = extractPage(fetched.html, finalUrl);
-    if (page.canonicalUrl) visited.add(page.canonicalUrl);
-    if (page.title && page.content) {
-      const result = await saveWebPage(source.id, finalUrl, page);
-      if (result) {
-        if (result.duplicateOf) duplicates += 1;
-        processed += 1;
-      }
-    }
-    for (const link of page.links) if (!visited.has(link) && !pending.includes(link) && new URL(link).pathname === baseUrl.pathname) pending.push(link);
-    await updateTask(taskId, { progress: Math.min(95, Math.round(processed / maxPages * 100)) });
-    if (pending.length && processed < maxPages) await new Promise((resolveDelay) => setTimeout(resolveDelay, requestDelayMs));
-  }
-  if (!processed) throw new Error("No article content found; expected a page with a title and readable text");
-  return { count: processed, note: duplicateNote(duplicates) || null };
-}
-
 async function reprocessDocument(documentId: string) {
   return withDocumentWork(async (db, lock) => {
     await lock(documentId);
@@ -216,7 +122,7 @@ async function syncSource(sourceId: string, taskId: string) {
   if (!task || !source) throw new Error("source or task not found");
   await updateTask(taskId, { status: "运行中", progress: 0, error: null });
   try {
-    const { count, note } = source.kind === "文章 API" ? await syncArticleSource(source, taskId) : await crawlSite(source, taskId);
+    const { count, note } = await syncArticleSource(source, taskId);
     await withTransaction(async (tx) => {
       await markSourceSynced(sourceId, tx);
       // 部分失败或达到单次上限时任务仍算完成，说明写在 error 字段供管理端展示。
@@ -224,7 +130,7 @@ async function syncSource(sourceId: string, taskId: string) {
     });
     return count;
   } catch (error) {
-    await updateTask(taskId, { status: "失败", error: errorMessage(error, "Unknown crawl error") });
+    await updateTask(taskId, { status: "失败", error: errorMessage(error, "Unknown sync error") });
     throw error;
   }
 }

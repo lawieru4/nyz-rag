@@ -6,13 +6,13 @@ import { contentFingerprint } from "./dedup.js";
 import type { ChunkHit } from "./rag.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
-  AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
+  AdminAccount, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
+import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -114,13 +114,13 @@ export async function getStats(db: Executor = getDb()): Promise<KnowledgeStats> 
 // ---- 文档与切片 ----
 
 // 列表不读取正文、原始内容与解析结果等大字段。
-const { content: _content, rawHtml: _rawHtml, rawJson: _rawJson, markdown: _markdown, metadata: _metadata, ...documentColumns } = getTableColumns(documents);
+const { content: _content, rawJson: _rawJson, markdown: _markdown, metadata: _metadata, ...documentColumns } = getTableColumns(documents);
 const summaryColumns = {
   ...documentColumns,
   chunkCount: sql<number>`(SELECT count(*)::int FROM ${documentChunks} WHERE ${documentChunks.documentId} = ${outer("documents", "id")})`,
 };
 
-type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawHtml" | "rawJson" | "markdown" | "metadata"> & { chunkCount: number };
+type SummaryRow = Omit<typeof documents.$inferSelect, "content" | "rawJson" | "markdown" | "metadata"> & { chunkCount: number };
 const toSummary = (row: SummaryRow): DocumentSummary => compact<DocumentSummary>({
   id: row.id, sourceId: row.sourceId, title: row.title, url: row.url, canonicalUrl: row.canonicalUrl, externalId: row.externalId, author: row.author, category: row.category,
   tags: row.tags, publishedAt: iso(row.publishedAt) ?? null, parserVersion: row.parserVersion, status: row.status,
@@ -163,7 +163,7 @@ export async function getDocumentSummary(id: string, db: Executor = getDb()): Pr
 const referenceColumns = { id: documents.id, sourceId: documents.sourceId, title: documents.title, url: documents.url };
 
 export async function getDocument(id: string, db: Executor = getDb()): Promise<DocumentRecord | null> {
-  const [row] = await db.select({ ...summaryColumns, content: documents.content, rawHtml: documents.rawHtml, markdown: documents.markdown, metadata: documents.metadata })
+  const [row] = await db.select({ ...summaryColumns, content: documents.content, markdown: documents.markdown, metadata: documents.metadata })
     .from(documents).where(eq(documents.id, id));
   if (!row) return null;
   const [chunks, [primary], duplicates] = await Promise.all([
@@ -172,7 +172,7 @@ export async function getDocument(id: string, db: Executor = getDb()): Promise<D
     db.select(referenceColumns).from(documents).where(eq(documents.duplicateOf, id)).orderBy(asc(documents.createdAt), asc(documents.id)),
   ]);
   return compact<DocumentRecord>({
-    ...toSummary(row), content: row.content, markdown: row.markdown, rawHtml: row.rawHtml, metadata: row.metadata, chunks, primary: primary ?? null, duplicates,
+    ...toSummary(row), content: row.content, markdown: row.markdown, metadata: row.metadata, chunks, primary: primary ?? null, duplicates,
   });
 }
 
@@ -200,8 +200,8 @@ export async function lockDocument(tx: Executor, id: string) {
 
 /** 读取重新清洗切片所需的原始内容；调用前应先用 lockDocument 锁定。 */
 export async function getProcessingInput(tx: Executor, id: string) {
-  const [row] = await tx.select({ title: documents.title, content: documents.content, rawJson: documents.rawJson }).from(documents).where(eq(documents.id, id));
-  return row ? { title: row.title, content: row.content, rawJson: row.rawJson as ArticleDetail | null } : null;
+  const [row] = await tx.select({ rawJson: documents.rawJson }).from(documents).where(eq(documents.id, id));
+  return row ? { rawJson: row.rawJson as ArticleDetail } : null;
 }
 
 /** 文章级向量化输入（标题 + 摘要）；没有摘要的文档返回 null。 */
@@ -210,53 +210,44 @@ export async function getSummaryInput(id: string, db: Executor = getDb()): Promi
   return row ? summaryEmbeddingInput(row.title, row.summary) : null;
 }
 
-/** 文章 API 来源已入库的文章：articleKey → 来源 updateTime（毫秒），用于增量同步。 */
+/** 来源已入库的文章：articleKey → 来源 updateTime（毫秒），用于增量同步。 */
 export async function listArticleVersions(sourceId: string, db: Executor = getDb()): Promise<Map<string, number | null>> {
   const rows = await db.select({ externalId: documents.externalId, sourceUpdatedAt: documents.sourceUpdatedAt })
-    .from(documents).where(and(eq(documents.sourceId, sourceId), isNotNull(documents.externalId)));
-  return new Map(rows.map((row) => [row.externalId!, row.sourceUpdatedAt?.getTime() ?? null]));
+    .from(documents).where(eq(documents.sourceId, sourceId));
+  return new Map(rows.map((row) => [row.externalId, row.sourceUpdatedAt?.getTime() ?? null]));
 }
 
 export interface UpsertDocumentInput {
   sourceId: string;
+  /** 来源标识（articleKey），同一来源内按它识别同一篇文章。 */
+  externalId: string;
   url: string;
-  /** 规范地址，默认与 url 相同；没有 externalId 的文档按它识别同一篇。 */
-  canonicalUrl?: string;
   title: string;
   content: string;
-  rawHtml?: string;
-  externalId?: string;
-  rawJson?: ArticleDetail;
+  rawJson: ArticleDetail;
   sourceUpdatedAt?: Date | null;
   status: DocumentStatus;
 }
 
-/** 有 externalId（文章 API）时按来源标识更新，否则按规范地址；地址随之更新。并发写入同一篇时由唯一约束串行化。 */
+/** 按来源标识更新，地址随之更新。并发写入同一篇时由唯一约束串行化。 */
 export async function upsertDocument(tx: Executor, input: UpsertDocumentInput): Promise<string> {
   const values = {
-    url: input.url, canonicalUrl: input.canonicalUrl ?? input.url, title: input.title, content: input.content, rawHtml: input.rawHtml ?? null,
-    externalId: input.externalId ?? null, rawJson: input.rawJson ?? null, sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
+    url: input.url, canonicalUrl: input.url, title: input.title, content: input.content,
+    externalId: input.externalId, rawJson: input.rawJson, sourceUpdatedAt: input.sourceUpdatedAt ?? null, status: input.status,
   };
   const [row] = await tx.insert(documents)
     .values({ id: randomUUID(), sourceId: input.sourceId, ...values })
-    .onConflictDoUpdate({ target: input.externalId ? [documents.sourceId, documents.externalId] : [documents.sourceId, documents.canonicalUrl], set: { ...values, updatedAt: sql`now()` } })
+    .onConflictDoUpdate({ target: [documents.sourceId, documents.externalId], set: { ...values, updatedAt: sql`now()` } })
     .returning({ id: documents.id });
   // Roll back the upsert if an embedding owner holds the document across transactions.
   await lockDocumentWork(tx, row.id);
   return row.id;
 }
 
-/** 来源内按规范地址查找文档（网页采集判断 canonical 是否可信）。 */
-export async function findDocumentByCanonicalUrl(tx: Executor, sourceId: string, canonicalUrl: string) {
-  const [row] = await tx.select({ id: documents.id, url: documents.url, contentHash: documents.contentHash })
-    .from(documents).where(and(eq(documents.sourceId, sourceId), eq(documents.canonicalUrl, canonicalUrl)));
-  return row ?? null;
-}
-
 // 文章级向量的模型与维度沿用文档的向量信息，因此随之清除；切片向量自带模型与维度，向量化失败时保留。
 const resetEmbedding = { embeddingProviderId: null, embeddingModel: null, embeddingDimensions: null, embeddingChunkCount: 0, summaryEmbedding: null };
 
-/** 清洗结果：正文必填；文章来源同时更新解析出的字段。 */
+/** 清洗结果：正文必填，其余为解析出的字段。 */
 export interface DocumentContentUpdate {
   content: string;
   title?: string;
@@ -359,7 +350,7 @@ export async function reindexChunkSearchTerms(afterId: string, batchSize: number
   return rows.at(-1)?.id ?? null;
 }
 
-/** 按当前规则重新生成一批文档的元数据检索词项，用法同 reindexChunkSearchTerms；没有元数据的文档（网页）跳过。 */
+/** 按当前规则重新生成一批文档的元数据检索词项，用法同 reindexChunkSearchTerms；尚未处理（没有元数据）的文档跳过。 */
 export async function reindexDocumentMetadataTerms(afterId: string, batchSize: number, options: { onlyMissing?: boolean } = {}, db: Executor = getDb()): Promise<string | null> {
   const rows = await db.select({ id: documents.id, metadata: documents.metadata }).from(documents)
     .where(and(sql`${documents.id} > ${afterId}`, isNotNull(documents.metadata), options.onlyMissing ? sql`${documents.metadataSearchVector} = ''::tsvector` : undefined))
@@ -946,4 +937,115 @@ export async function listSessionMessages(sessionId: string, db: Executor = getD
 /** 只能评价自己的问答；他人的与不存在的问答一样返回 false。 */
 export async function rateChatMessage(id: string, rating: ChatFeedbackRating, owner: ChatOwner, db: Executor = getDb()): Promise<boolean> {
   return (await db.update(chatMessages).set({ rating }).where(and(eq(chatMessages.id, id), ownedBy(chatMessages, owner))).returning({ id: chatMessages.id })).length > 0;
+}
+
+// ---- 管理员账号 ----
+
+/** 管理员登录校验用的账号字段，含密码哈希，只在 API 内使用。 */
+export interface AdminCredentials {
+  id: string;
+  email: string;
+  nickname: string;
+  isSuper: boolean;
+  passwordHash: string;
+  sessionVersion: number;
+  disabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const adminCredentialColumns = {
+  id: adminAccounts.id, email: adminAccounts.email, nickname: adminAccounts.nickname, isSuper: adminAccounts.isSuper,
+  passwordHash: adminAccounts.passwordHash, sessionVersion: adminAccounts.sessionVersion,
+  disabledAt: adminAccounts.disabledAt, createdAt: adminAccounts.createdAt, updatedAt: adminAccounts.updatedAt,
+};
+type AdminCredentialRow = { id: string; email: string; nickname: string; isSuper: boolean; passwordHash: string; sessionVersion: number; disabledAt: Date | null; createdAt: Date; updatedAt: Date };
+const toAdminCredentials = ({ disabledAt, createdAt, updatedAt, ...row }: AdminCredentialRow): AdminCredentials =>
+  ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+
+const toAdminAccount = ({ passwordHash: _ph, sessionVersion: _sv, disabledAt, createdAt, updatedAt, ...row }: AdminCredentialRow): AdminAccount =>
+  ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+
+/** email 须为小写规范形式。by id 或 by email。 */
+export async function getAdminCredentials(by: { id: string } | { email: string }, db: Executor = getDb()): Promise<AdminCredentials | null> {
+  const [row] = await db.select(adminCredentialColumns).from(adminAccounts)
+    .where("id" in by ? eq(adminAccounts.id, by.id) : eq(adminAccounts.email, by.email));
+  return row ? toAdminCredentials(row) : null;
+}
+
+/** 列出所有管理员账号（不含密码哈希），按创建时间倒序。 */
+export async function listAdminAccounts(db: Executor = getDb()): Promise<AdminAccount[]> {
+  const rows = await db.select(adminCredentialColumns).from(adminAccounts).orderBy(asc(adminAccounts.createdAt), asc(adminAccounts.id));
+  return rows.map(toAdminAccount);
+}
+
+/** 创建管理员账号；邮箱已存在时返回 null。 */
+export async function createAdminAccount(
+  input: { email: string; nickname: string; passwordHash: string; isSuper?: boolean },
+  db: Executor = getDb(),
+): Promise<AdminAccount | null> {
+  const [row] = await db.insert(adminAccounts)
+    .values({ id: randomUUID(), email: input.email, nickname: input.nickname, passwordHash: input.passwordHash, isSuper: input.isSuper ?? false })
+    .onConflictDoNothing({ target: adminAccounts.email })
+    .returning(adminCredentialColumns);
+  return row ? toAdminAccount(row) : null;
+}
+
+/**
+  * 种子：仅在没有超级管理员时创建初始账号，防止并发双重创建。
+ * 返回已有或新建的超级管理员；若已有账号则不改动任何数据。
+ */
+export async function seedSuperAdmin(
+  input: { email: string; nickname: string; passwordHash: string },
+): Promise<{ created: boolean; id: string }> {
+  return withTransaction(async (db) => {
+    await db.execute(sql`SELECT pg_advisory_xact_lock(4637202)`);
+    const existing = await db.select({ id: adminAccounts.id }).from(adminAccounts)
+      .where(eq(adminAccounts.isSuper, true)).limit(1);
+    if (existing.length) return { created: false, id: existing[0]!.id };
+    const [row] = await db.insert(adminAccounts)
+      .values({ id: randomUUID(), email: input.email, nickname: input.nickname, passwordHash: input.passwordHash, isSuper: true })
+      .onConflictDoNothing({ target: adminAccounts.email })
+      .returning({ id: adminAccounts.id });
+    if (row) return { created: true, id: row.id };
+    throw new Error("Bootstrap administrator email is already in use");
+  });
+}
+
+/** 修改密码并使该账号已签发的会话全部失效，返回新的会话版本；账号不存在时返回 null。 */
+export async function updateAdminPassword(id: string, passwordHash: string, db: Executor = getDb()): Promise<number | null> {
+  const [row] = await db.update(adminAccounts)
+    .set({ passwordHash, sessionVersion: sql`${adminAccounts.sessionVersion} + 1`, updatedAt: sql`now()` })
+    .where(eq(adminAccounts.id, id)).returning({ sessionVersion: adminAccounts.sessionVersion });
+  return row?.sessionVersion ?? null;
+}
+
+/** 更新邮箱与昵称；返回更新后的账号；账号不存在时返回 null。邮箱冲突返回 null。 */
+export async function updateAdminProfile(
+  id: string,
+  input: { email: string; nickname: string },
+  db: Executor = getDb(),
+): Promise<AdminAccount | null> {
+  try {
+    const [row] = await db.update(adminAccounts)
+      .set({ email: input.email, nickname: input.nickname, updatedAt: sql`now()` })
+      .where(eq(adminAccounts.id, id)).returning(adminCredentialColumns);
+    return row ? toAdminAccount(row) : null;
+  } catch (error) {
+    const cause = error as { code?: string; cause?: { code?: string } };
+    if (cause.code === "23505" || cause.cause?.code === "23505") return null;
+    throw error;
+  }
+}
+
+/** 停用/启用管理员账号；停用时使会话失效。超级管理员禁止停用。账号不存在时返回 null。 */
+export async function setAdminDisabled(id: string, disabled: boolean, db: Executor = getDb()): Promise<AdminAccount | null> {
+  const [existing] = await db.select({ isSuper: adminAccounts.isSuper }).from(adminAccounts).where(eq(adminAccounts.id, id));
+  if (!existing) return null;
+  if (existing.isSuper && disabled) throw new Error("super admin cannot be disabled");
+  const [row] = await db.update(adminAccounts).set(disabled
+    ? { disabledAt: sql`COALESCE(${adminAccounts.disabledAt}, now())`, sessionVersion: sql`${adminAccounts.sessionVersion} + 1`, updatedAt: sql`now()` }
+    : { disabledAt: null, updatedAt: sql`now()` })
+    .where(eq(adminAccounts.id, id)).returning(adminCredentialColumns);
+  return row ? toAdminAccount(row) : null;
 }

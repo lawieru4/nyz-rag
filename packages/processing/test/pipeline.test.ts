@@ -8,6 +8,7 @@ import test from "node:test";
 import pg from "pg";
 import { closeDatabase, getPool, migrate, withDocumentWork, withTransaction } from "../src/db.js";
 import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, upsertDocument } from "../src/repository.js";
+import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
   // 每次运行使用独立 schema（search_path 指向它，pgvector 类型仍从 public 解析），结束后整体删除。
@@ -25,49 +26,35 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   const chatPrompts: string[] = [];
   const chatRequests: Array<Array<{ role: string; content: string }>> = [];
   let chatAborted = false;
-  // 模拟 nyzdata 文章接口：两篇文章，第二篇的标题与 updateTime 可在测试中修改。
+  // 模拟 nyzdata 文章接口：tagKey=1 为两篇文章，第二篇的标题与 updateTime 可在测试中修改；tagKey=2 为两篇正文相同的文章。
   const articleToken = "integration-article-token";
-  const article = (key: string, title: string, updateTime: number) => ({
+  const article = (key: string, title: string, updateTime: number, body = `${title}的正文结论。`) => ({
     _key: key, title, updateTime, createTime: 1, summary: "摘要", tagName: "科研", tagArray: [{ name: "钠电" }], creator: { nickName: "作者" },
     content: JSON.stringify({ type: "doc", content: [
       { type: "blockquote", content: [{ type: "paragraph", content: [{ type: "text", text: "作者：qwen3.6-plus" }, { type: "hardBreak" }, { type: "text", text: "转载源：测试公众号" }, { type: "hardBreak" }, { type: "text", text: "关键词：[[钠离子电池]]" }] }] },
       { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "【结论】" }] },
-      { type: "paragraph", content: [{ type: "text", text: `${title}的正文结论。` }] },
+      { type: "paragraph", content: [{ type: "text", text: body }] },
       { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "延伸思考" }] },
       { type: "paragraph", content: [{ type: "text", text: "1. 如何放大？" }] },
     ] }),
   });
   const articles = new Map([["a1", article("a1", "文章一", 100)], ["a2", article("a2", "文章二", 100)]]);
+  const sharedBody = "钠离子电池正极材料的研究进展与产业化前景。".repeat(4);
+  const duplicateArticles = new Map([["d1", article("d1", "重复一", 100, sharedBody)], ["d2", article("d2", "重复二", 100, sharedBody)]]);
   const articleRequests: string[] = [];
-  // 模拟网页站点（同一路径、按 id 区分的页面）：2 声明自身为 canonical；3 与 1 正文相同（排版不同）；4 是 2 的别名地址。
-  const siteBody = (topic: string) => `${topic}正极材料的研究进展与产业化前景。`.repeat(4);
-  const sitePages: Record<string, { head?: string; body: string; links?: string[] }> = {
-    "1": { body: siteBody("钠离子电池"), links: ["page?utm_source=feed&id=2", "page?id=1#top", "page?id=3", "page?id=4"] },
-    "2": { head: '<link rel="canonical" href="/site/page?id=2">', body: siteBody("固态电池") },
-    "3": { body: siteBody("钠离子电池").replace(/。/g, "。<br>") },
-    "4": { head: '<link rel="canonical" href="/site/page?id=2&amp;utm_medium=x">', body: siteBody("固态电池") },
-  };
-  const siteRequests: string[] = [];
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://mock");
-    if (url.pathname === "/site/page") {
-      siteRequests.push(url.search);
-      const page = sitePages[url.searchParams.get("id") ?? ""];
-      if (!page) { response.writeHead(404).end(); return; }
-      response.setHeader("content-type", "text/html; charset=utf-8");
-      const links = (page.links ?? []).map((href) => `<a href="${href}">link</a>`).join("");
-      response.end(`<html><head><title>页面 ${url.searchParams.get("id")}</title>${page.head ?? ""}</head><body><main>${page.body}</main><nav>${links}</nav></body></html>`);
-      return;
-    }
     if (url.pathname.startsWith("/nyz/")) {
       articleRequests.push(url.pathname);
       assert.equal(url.searchParams.get("token"), articleToken);
       response.setHeader("content-type", "application/json");
       if (url.pathname === "/nyz/article") {
-        const list = url.searchParams.get("curPage") === "1" ? [...articles.values()].map(({ _key, updateTime }) => ({ _key, updateTime })) : [];
+        const listed = url.searchParams.get("tagKey") === "2" ? duplicateArticles : articles;
+        const list = url.searchParams.get("curPage") === "1" ? [...listed.values()].map(({ _key, updateTime }) => ({ _key, updateTime })) : [];
         response.end(JSON.stringify({ status: 200, data: { list, total: list.length } }));
       } else {
-        response.end(JSON.stringify({ status: 200, data: articles.get(url.searchParams.get("articleKey") ?? "") }));
+        const key = url.searchParams.get("articleKey") ?? "";
+        response.end(JSON.stringify({ status: 200, data: articles.get(key) ?? duplicateArticles.get(key) }));
       }
       return;
     }
@@ -142,7 +129,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       cwd: new URL("../../../", import.meta.url),
       env: {
         ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), TEST_EMBEDDING_KEY: "integration-test-key", DOCUMENT_QUEUE_NAME: `test-${schema}`,
-        NYZ_ARTICLE_TOKEN: articleToken, CRAWL_REQUEST_DELAY_MS: "1000",
+        NYZ_ARTICLE_TOKEN: articleToken, NYZ_ARTICLE_REQUEST_DELAY_MS: "1000",
         ADMIN_USERNAME: "admin", ADMIN_PASSWORD: adminPassword, ADMIN_COOKIE_SECURE: "false",
         // 不发送真实邮件：开发模式下验证码写入 API 日志，由测试从输出中读取。
         SMTP_HOST: "", USER_COOKIE_SECURE: "false",
@@ -172,9 +159,9 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   const post = (path: string) => fetch(`${apiBase}/api/admin/documents/${documentId}/${path}`, { method: "POST" });
   try {
     await migrate();
-    const source = await createSource({ name: "Test source", url: "https://example.test", kind: "网页站点", frequency: "" });
+    const source = await createSource({ name: "Test source", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
     documentId = await withTransaction(async (client) => {
-      const id = await upsertDocument(client, { sourceId: source.id, url: "https://example.test/a", title: "Vector test", content: "First chunk. Second chunk.", status: "ready" });
+      const id = await upsertDocument(client, articleDocument(source.id, "vector-test", "Vector test", "First chunk. Second chunk."));
       await replaceDocumentChunks(client, id, { content: "First chunk. Second chunk." }, [
         { id: `${id}-1`, index: 0, content: "First chunk.", tokenEstimate: 5 },
         { id: `${id}-2`, index: 1, content: "Second chunk.", tokenEstimate: 5 },
@@ -256,7 +243,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await waitEmbedding("ready");
     rows = await embeddedChunks();
     assert.equal(rows.length, 1, "reprocessing removes obsolete chunk vectors");
-    assert.equal((await getPool().query("SELECT summary_embedding FROM documents WHERE id = $1", [documentId])).rows[0].summary_embedding, null, "web pages have no summary vector");
+    assert.equal((await getPool().query("SELECT summary_embedding FROM documents WHERE id = $1", [documentId])).rows[0].summary_embedding, null, "articles without a summary have no summary vector");
 
     const chat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "vector test" }) })).json();
     assert.equal(chat.answerMode, "generated", output);
@@ -404,7 +391,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(publicDetail.title, "文章一");
     assert.equal(publicDetail.repostSource, "测试公众号");
     assert.deepEqual(publicDetail.tags, ["钠电"]);
-    assert.equal(publicDetail.rawHtml, undefined);
+    assert.equal(publicDetail.rawJson, undefined);
     assert.equal(publicDetail.chunks, undefined);
     assert.equal((await fetch(`${apiBase}/api/documents/not-found`)).status, 404);
     await getPool().query("UPDATE documents SET status = 'failed' WHERE id = $1", [synced[0].id]);
@@ -448,28 +435,28 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     synced = await articleDocuments();
     assert.equal(synced[1].title, "文章二（更新）");
     assert.deepEqual(articleRequests.filter((path) => path.endsWith("/articleDetail")).length, 1, "only the changed article is fetched again");
-    // 网页站点：地址规范化后去重抓取；同来源不同地址的相同正文标记为重复，canonical 别名地址不另存。
-    const siteSource = await (await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Site", url: `http://127.0.0.1:${mockPort}/site/page?id=1`, kind: "网页站点", frequency: "" }) })).json();
-    await fetch(`${apiBase}/api/admin/sources/${siteSource.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ status: "运行中" }) });
-    const siteTask = await (await fetch(`${apiBase}/api/admin/sources/${siteSource.id}/sync`, { method: "POST" })).json();
-    await until(async () => ["已完成", "失败"].includes((await getPool().query("SELECT status FROM crawl_tasks WHERE id = $1", [siteTask.id])).rows[0].status));
-    const { rows: [siteTaskRow] } = await getPool().query("SELECT status, error FROM crawl_tasks WHERE id = $1", [siteTask.id]);
-    assert.equal(siteTaskRow.status, "已完成", siteTaskRow.error ?? output);
-    assert.match(siteTaskRow.error, /1 篇与已有文档内容相同/);
-    assert.deepEqual(siteRequests, ["?id=1", "?id=2", "?id=3", "?id=4"], "fragments and tracking params do not cause refetches");
-    const siteDocuments = (await getPool().query("SELECT id, url, canonical_url, processing_status, duplicate_of FROM documents WHERE source_id = $1 ORDER BY url", [siteSource.id])).rows;
-    const pageUrl = (id: string) => `http://127.0.0.1:${mockPort}/site/page?id=${id}`;
-    assert.deepEqual(siteDocuments.map((row) => [row.url, row.canonical_url, row.processing_status]), [
-      [pageUrl("1"), pageUrl("1"), "chunked"], [pageUrl("2"), pageUrl("2"), "chunked"], [pageUrl("3"), pageUrl("3"), "duplicate"],
-    ]);
-    assert.equal(siteDocuments[2].duplicate_of, siteDocuments[0].id);
-    assert.equal((await fetch(`${apiBase}/api/admin/documents/${siteDocuments[2].id}/embed`, { method: "POST" })).status, 409, "duplicates are not embedded");
-    const primaryDetail = await (await fetch(`${apiBase}/api/admin/documents/${siteDocuments[0].id}`)).json();
-    assert.deepEqual(primaryDetail.duplicates.map((item: { id: string }) => item.id), [siteDocuments[2].id]);
+    // 只接受文章接口来源。
+    assert.equal((await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Site", url: "https://example.test", kind: "网页站点", frequency: "" }) })).status, 400);
+    // 正文相同的文章：后处理的一篇标记为重复，不切片、不向量化；删除主文档后由重复文档接替。
+    const duplicateSource = await (await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Duplicates", url: `http://127.0.0.1:${mockPort}/nyz/article?tagKey=2`, kind: "文章 API", frequency: "" }) })).json();
+    await fetch(`${apiBase}/api/admin/sources/${duplicateSource.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ status: "运行中" }) });
+    const duplicateTask = await (await fetch(`${apiBase}/api/admin/sources/${duplicateSource.id}/sync`, { method: "POST" })).json();
+    await until(async () => ["已完成", "失败"].includes((await getPool().query("SELECT status FROM crawl_tasks WHERE id = $1", [duplicateTask.id])).rows[0].status));
+    const { rows: [duplicateTaskRow] } = await getPool().query("SELECT status, error FROM crawl_tasks WHERE id = $1", [duplicateTask.id]);
+    assert.equal(duplicateTaskRow.status, "已完成", duplicateTaskRow.error ?? output);
+    assert.match(duplicateTaskRow.error, /1 篇与已有文档内容相同/);
+    const duplicateRows = (await getPool().query("SELECT id, processing_status, duplicate_of FROM documents WHERE source_id = $1", [duplicateSource.id])).rows;
+    const primaryRow = duplicateRows.find((row) => row.processing_status === "chunked")!;
+    const duplicateRow = duplicateRows.find((row) => row.processing_status === "duplicate")!;
+    assert.equal(duplicateRows.length, 2);
+    assert.equal(duplicateRow.duplicate_of, primaryRow.id);
+    assert.equal((await fetch(`${apiBase}/api/admin/documents/${duplicateRow.id}/embed`, { method: "POST" })).status, 409, "duplicates are not embedded");
+    const primaryDetail = await (await fetch(`${apiBase}/api/admin/documents/${primaryRow.id}`)).json();
+    assert.deepEqual(primaryDetail.duplicates.map((item: { id: string }) => item.id), [duplicateRow.id]);
     // 删除主文档：重复文档接替，重新切片并向量化。
-    assert.equal((await fetch(`${apiBase}/api/admin/documents/${siteDocuments[0].id}`, { method: "DELETE" })).status, 204);
-    await until(async () => (await getDocumentSummary(siteDocuments[2].id))?.embedding.status === "ready");
-    const promoted = (await getDocumentSummary(siteDocuments[2].id))!;
+    assert.equal((await fetch(`${apiBase}/api/admin/documents/${primaryRow.id}`, { method: "DELETE" })).status, 204);
+    await until(async () => (await getDocumentSummary(duplicateRow.id))?.embedding.status === "ready");
+    const promoted = (await getDocumentSummary(duplicateRow.id))!;
     assert.equal(promoted.processingStatus, "chunked");
     assert.equal(promoted.duplicateOf, undefined);
 

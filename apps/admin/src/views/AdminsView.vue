@@ -1,0 +1,187 @@
+<script setup lang="ts">
+import { onMounted, ref } from "vue";
+import { LoaderCircle, Plus } from "@lucide/vue";
+import type { AdminAccount, CreateAdminRequest } from "@nyz-rag/types";
+import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
+import { Button } from "@nyz-rag/ui/components/button";
+import { Card } from "@nyz-rag/ui/components/card";
+import { confirm } from "@nyz-rag/ui/confirm";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
+import { Input } from "@nyz-rag/ui/components/input";
+import { Label } from "@nyz-rag/ui/components/label";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@nyz-rag/ui/components/table";
+import { toast } from "@nyz-rag/ui/lib/toast";
+import EmptyState from "../components/EmptyState.vue";
+import PageHeading from "../components/PageHeading.vue";
+import StatusBadge from "../components/StatusBadge.vue";
+import { client, errorMessage } from "../workspace";
+
+const admins = ref<AdminAccount[]>([]);
+const loading = ref(false);
+const updating = ref(new Set<string>());
+const dialogOpen = ref(false);
+const formBusy = ref(false);
+const formError = ref("");
+const form = ref<CreateAdminRequest>({ email: "", nickname: "", password: "" });
+
+async function loadAdmins() {
+  loading.value = true;
+  try {
+    admins.value = await client.request<AdminAccount[]>("/api/admin/admins");
+  } catch {
+    toast.error("管理员列表加载失败，请检查 API 服务");
+  } finally {
+    loading.value = false;
+  }
+}
+onMounted(loadAdmins);
+
+function openCreate() {
+  form.value = { email: "", nickname: "", password: "" };
+  formError.value = "";
+  dialogOpen.value = true;
+}
+
+function validateForm(): string {
+  if (!form.value.email.trim()) return "请输入邮箱";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.value.email.trim())) return "邮箱格式不正确";
+  if (!form.value.nickname.trim()) return "请输入昵称";
+  if (!form.value.password) return "请输入密码";
+  if (form.value.password.length < 8) return "密码至少 8 个字符";
+  if (form.value.password.length > 1024) return "密码不能超过 1024 个字符";
+  return "";
+}
+
+async function createAdmin() {
+  const err = validateForm();
+  if (err) { formError.value = err; return; }
+  formError.value = "";
+  formBusy.value = true;
+  try {
+    const created = await client.request<AdminAccount>("/api/admin/admins", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: form.value.email.trim(), nickname: form.value.nickname.trim(), password: form.value.password }),
+    });
+    admins.value = [...admins.value, created];
+    form.value = { email: "", nickname: "", password: "" };
+    dialogOpen.value = false;
+    toast.success(`管理员 ${created.nickname} 已创建`);
+  } catch (err) {
+    formError.value = errorMessage(err, "创建失败，请检查 API 服务");
+  } finally {
+    formBusy.value = false;
+  }
+}
+
+async function toggleAdmin(admin: AdminAccount) {
+  if (admin.isSuper || updating.value.has(admin.id)) return;
+  const willDisable = !admin.disabled;
+  if (willDisable && !await confirm({
+    title: "停用管理员账号",
+    description: `确定停用管理员"${admin.nickname}"（${admin.email}）？该账号将立即退出登录且不能再登录。`,
+    confirmText: "停用",
+    destructive: true,
+  })) return;
+  if (updating.value.has(admin.id)) return;
+  updating.value.add(admin.id);
+  try {
+    const updated = await client.request<AdminAccount>(`/api/admin/admins/${admin.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ disabled: willDisable }),
+    });
+    admins.value = admins.value.map((a) => a.id === updated.id ? updated : a);
+    toast.success(updated.disabled ? `已停用 ${updated.nickname}` : `已启用 ${updated.nickname}`);
+  } catch (err) {
+    toast.error(errorMessage(err, "账号状态更新失败"));
+  } finally {
+    updating.value.delete(admin.id);
+  }
+}
+</script>
+
+<template>
+  <PageHeading eyebrow="ADMINISTRATOR ACCOUNTS" title="管理员管理" subtitle="管理后台管理员账号，仅超级管理员可见">
+    <Button @click="openCreate"><Plus /> 添加管理员</Button>
+  </PageHeading>
+  <Card class="min-h-96 gap-0 overflow-hidden py-0">
+    <Table class="min-w-[640px]">
+      <TableHeader class="bg-muted/50">
+        <TableRow>
+          <TableHead class="pl-4">昵称</TableHead>
+          <TableHead>邮箱</TableHead>
+          <TableHead>角色</TableHead>
+          <TableHead>状态</TableHead>
+          <TableHead>创建时间</TableHead>
+          <TableHead />
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <TableRow v-for="admin in admins" :key="admin.id" class="text-xs text-muted-foreground">
+          <TableCell class="py-3 pl-4 font-semibold text-foreground">{{ admin.nickname }}</TableCell>
+          <TableCell>{{ admin.email }}</TableCell>
+          <TableCell>
+            <span v-if="admin.isSuper" class="rounded-sm bg-sidebar-primary/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-sidebar-primary">超级管理员</span>
+            <span v-else class="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">管理员</span>
+          </TableCell>
+          <TableCell>
+            <StatusBadge :on="!admin.disabled">{{ admin.disabled ? '已停用' : '正常' }}</StatusBadge>
+          </TableCell>
+          <TableCell>{{ new Date(admin.createdAt).toLocaleString() }}</TableCell>
+          <TableCell>
+            <div class="flex justify-end">
+              <Button
+                v-if="!admin.isSuper"
+                :variant="admin.disabled ? 'outline' : 'ghost'"
+                size="sm"
+                :disabled="updating.has(admin.id)"
+                :aria-busy="updating.has(admin.id)"
+                :class="!admin.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'"
+                @click="toggleAdmin(admin)"
+              >
+                {{ admin.disabled ? '启用' : '停用' }}
+              </Button>
+              <span v-else class="pr-2 text-[11px] text-muted-foreground/50">不可停用</span>
+            </div>
+          </TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
+    <EmptyState v-if="loading && !admins.length">正在加载管理员…</EmptyState>
+    <EmptyState v-else-if="!admins.length">尚无管理员账号</EmptyState>
+  </Card>
+
+  <Dialog v-model:open="dialogOpen">
+    <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
+      <DialogHeader>
+        <p class="font-mono text-[10px] font-medium tracking-wider text-link">ADMINISTRATOR</p>
+        <DialogTitle>添加管理员</DialogTitle>
+      </DialogHeader>
+      <form class="grid gap-4" novalidate @submit.prevent="createAdmin">
+        <Alert v-if="formError" variant="destructive" role="alert" aria-live="assertive">
+          <AlertDescription>{{ formError }}</AlertDescription>
+        </Alert>
+        <div class="grid gap-2">
+          <Label for="ca-email">邮箱</Label>
+          <Input id="ca-email" v-model="form.email" type="email" autocomplete="off" required :disabled="formBusy" placeholder="admin@example.com" aria-required="true" />
+        </div>
+        <div class="grid gap-2">
+          <Label for="ca-nickname">昵称</Label>
+          <Input id="ca-nickname" v-model="form.nickname" type="text" autocomplete="off" required maxlength="100" :disabled="formBusy" placeholder="显示名称" aria-required="true" />
+        </div>
+        <div class="grid gap-2">
+          <Label for="ca-password">密码</Label>
+          <Input id="ca-password" v-model="form.password" type="password" autocomplete="new-password" required minlength="8" maxlength="1024" :disabled="formBusy" placeholder="至少 8 个字符" aria-required="true" />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" :disabled="formBusy" @click="dialogOpen = false">取消</Button>
+          <Button type="submit" :disabled="formBusy" :aria-busy="formBusy">
+            <LoaderCircle v-if="formBusy" class="animate-spin" aria-hidden="true" />
+            {{ formBusy ? '创建中…' : '创建管理员' }}
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  </Dialog>
+</template>

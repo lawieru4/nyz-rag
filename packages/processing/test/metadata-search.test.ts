@@ -8,6 +8,7 @@ import { parseRetrievalFilters } from "../src/retrieval-filters.js";
 import type { ArticleMetadata } from "@nyz-rag/types";
 import { createSource, getDocumentDetail, keywordSearchChunks, reindexDocumentMetadataTerms, replaceDocumentChunks, upsertDocument, vectorSearchChunks } from "../src/repository.js";
 import { searchTerms } from "../src/search-terms.js";
+import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 test("metadata filters validate dates, limits, exact lists and unknown fields", () => {
   assert.deepEqual(parseRetrievalFilters(undefined), {});
@@ -30,10 +31,10 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
   try {
     await migrate();
     await migrate();
-    const source = await createSource({ name: "Filter fixtures", url: "https://example.test", kind: "网页站点", frequency: "" });
+    const source = await createSource({ name: "Filter fixtures", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
     const vector = Array.from({ length: 384 }, (_, i) => i === 0 ? 1 : 0);
     const create = async (name: string, category: string, tags: string[], publishedAt: string | null, scenario: string) => withTransaction(async (tx) => {
-      const id = await upsertDocument(tx, { sourceId: source.id, url: `https://example.test/${name}`, title: name, content: "battery materials", rawHtml: "private input", status: "ready" });
+      const id = await upsertDocument(tx, articleDocument(source.id, name, name, "battery materials"));
       await replaceDocumentChunks(tx, id, { content: "battery materials", category, tags, publishedAt: publishedAt ? new Date(publishedAt) : null }, [{ id: `${id}-chunk`, index: 0, content: "battery materials", tokenEstimate: 5 }]);
       return { id, scenario };
     });
@@ -49,7 +50,7 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
     assert.equal(detail?.repostSource, "Original");
     assert.deepEqual(detail?.scenarios, ["storage"]);
     assert.equal(detail?.publishedAt, "2026-10-20T00:00:00.000Z");
-    for (const key of ["rawHtml", "rawJson", "chunks", "processingError", "embedding", "sourceId"]) assert.ok(!(key in detail!));
+    for (const key of ["rawJson", "externalId", "chunks", "processingError", "embedding", "sourceId"]) assert.ok(!(key in detail!));
     assert.equal(await getDocumentDetail("missing"), null);
     const cases = [
       { filters: {}, ids: [a.id, b.id, c.id, d.id] },
@@ -121,9 +122,9 @@ test("metadata boost recalls project fields once per document in an isolated sch
   process.env.DATABASE_URL = url.toString();
   try {
     await migrate();
-    const source = await createSource({ name: "Boost fixtures", url: "https://example.test", kind: "网页站点", frequency: "" });
+    const source = await createSource({ name: "Boost fixtures", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
     const create = async (name: string, contents: string[], metadata: Partial<ArticleMetadata> | null, category = "research") => withTransaction(async (tx) => {
-      const id = await upsertDocument(tx, { sourceId: source.id, url: `https://example.test/${name}`, title: name, content: contents.join("\n"), status: "ready" });
+      const id = await upsertDocument(tx, articleDocument(source.id, name, name, contents));
       await replaceDocumentChunks(tx, id, { content: contents.join("\n"), category, ...(metadata ? { metadata: metadata as ArticleMetadata } : {}) },
         contents.map((content, index) => ({ id: `${id}-${index}`, index, content, tokenEstimate: content.length })));
       return id;

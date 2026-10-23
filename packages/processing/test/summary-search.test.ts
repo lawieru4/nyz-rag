@@ -9,6 +9,7 @@ import {
   createSource, getSummaryInput, listDocumentChunks, listMissingSummaryEmbeddings, replaceDocumentChunks, saveDocumentEmbeddings, saveSummaryEmbedding, setEmbeddingState,
   summarySearchChunks, upsertDocument,
 } from "../src/repository.js";
+import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 const DIMENSIONS = 384;
 // 若干单位向量之和（未归一化，余弦相似度与长度无关）。
@@ -28,10 +29,10 @@ test("summary recall finds articles by summary vector and locates their best chu
   process.env.DATABASE_URL = url.toString();
   try {
     await migrate();
-    const source = await createSource({ name: "Summary fixtures", url: "https://example.test", kind: "网页站点", frequency: "" });
-    // chunkVectors 与切片一一对应；summaryVector 为 null 表示没有摘要（网页来源）。
+    const source = await createSource({ name: "Summary fixtures", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
+    // chunkVectors 与切片一一对应；summaryVector 为 null 表示文章没有摘要。
     const create = async (name: string, category: string, summary: string | null, chunkVectors: number[][], summaryVector: number[] | null) => withTransaction(async (tx) => {
-      const id = await upsertDocument(tx, { sourceId: source.id, url: `https://example.test/${name}`, title: name, content: name, status: "ready" });
+      const id = await upsertDocument(tx, articleDocument(source.id, name, name, name));
       await replaceDocumentChunks(tx, id, { content: name, category, metadata: summary === null ? null : { summary } as ArticleMetadata },
         chunkVectors.map((_, index) => ({ id: `${id}-${index}`, index, content: `${name} 切片 ${index}`, tokenEstimate: 5 })));
       if (summary !== null) assert.equal(await getSummaryInput(id, tx), `文章：${name}\n\n${summary}`);

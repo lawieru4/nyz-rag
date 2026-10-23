@@ -257,7 +257,7 @@ const documentSummarySchema = {
     createdAt: { type: "string" },
     updatedAt: { type: "string" },
   },
-  required: ["id", "sourceId", "title", "url", "canonicalUrl", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
+  required: ["id", "sourceId", "title", "url", "canonicalUrl", "externalId", "tags", "status", "processingStatus", "embedding", "chunkCount", "createdAt", "updatedAt"],
   additionalProperties: false,
 } as const;
 
@@ -373,7 +373,6 @@ const documentRecordSchema = {
     ...documentSummarySchema.properties,
     content: { type: "string" },
     markdown: { type: "string" },
-    rawHtml: { type: "string" },
     metadata: articleMetadataSchema,
     chunks: { type: "array", items: documentChunkRecordSchema },
     primary: documentReferenceSchema,
@@ -531,7 +530,7 @@ const dataSourceRecordSchema = {
     id: { type: "string" },
     name: { type: "string" },
     url: { type: "string" },
-    kind: { type: "string", enum: ["文章 API", "网页站点"] },
+    kind: { type: "string", enum: ["文章 API"] },
     frequency: { type: "string" },
     status: { type: "string", enum: ["运行中", "已暂停"] },
     documentCount: { type: "number" },
@@ -546,7 +545,7 @@ const createSourceBodySchema = {
   properties: {
     name: nonBlankString,
     url: nonBlankString,
-    kind: { type: "string", enum: ["文章 API", "网页站点"] },
+    kind: { type: "string", enum: ["文章 API"] },
     frequency: { type: "string" },
   },
   required: ["name", "url", "kind"],
@@ -742,10 +741,29 @@ export interface RouteSchema {
   response?: Record<string, Record<string, unknown>>;
 }
 
+const adminAccountSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    email: { type: "string" },
+    nickname: { type: "string" },
+    isSuper: { type: "boolean" },
+    disabled: { type: "boolean" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+  required: ["id", "email", "nickname", "isSuper", "disabled", "createdAt", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
 const adminSessionSchema = {
   type: "object",
-  properties: { username: { type: "string" }, expiresAt: { type: "string" } },
-  required: ["username", "expiresAt"],
+  properties: {
+    username: { type: "string" },
+    expiresAt: { type: "string" },
+    admin: adminAccountSchema,
+  },
+  required: ["username", "expiresAt", "admin"],
   additionalProperties: false,
 } as const;
 
@@ -798,7 +816,7 @@ export const routeSchemas: Record<string, RouteSchema> = {
   "POST /api/admin/auth/login": {
     body: {
       type: "object",
-      properties: { username: { type: "string", minLength: 1, maxLength: 128 }, password: { type: "string", minLength: 1, maxLength: 1024 } },
+      properties: { username: { type: "string", minLength: 1, maxLength: 254 }, password: { type: "string", minLength: 1, maxLength: 1024 } },
       required: ["username", "password"],
       additionalProperties: false,
     },
@@ -806,6 +824,50 @@ export const routeSchemas: Record<string, RouteSchema> = {
   },
   "GET /api/admin/auth/session": { response: { "200": adminSessionSchema, ...errorResponses } },
   "POST /api/admin/auth/logout": { response: { "204": { type: "object" }, ...errorResponses } },
+  "PATCH /api/admin/auth/profile": {
+    body: {
+      type: "object",
+      properties: { email: { type: "string", format: "email", maxLength: 254 }, nickname: { type: "string", minLength: 1, maxLength: 100, pattern: "\\S" } },
+      required: ["email", "nickname"],
+      additionalProperties: false,
+    },
+    response: { "200": adminSessionSchema, ...errorResponses },
+  },
+  "POST /api/admin/auth/password": {
+    body: {
+      type: "object",
+      properties: {
+        currentPassword: { type: "string", minLength: 1, maxLength: 1024 },
+        newPassword: { type: "string", minLength: 8, maxLength: 1024, pattern: "\\S" },
+      },
+      required: ["currentPassword", "newPassword"],
+      additionalProperties: false,
+    },
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  // ── Admin: admin accounts (super-only) ─────────────────────────────────────
+  "GET /api/admin/admins": {
+    response: { "200": { type: "array", items: adminAccountSchema }, ...errorResponses },
+  },
+  "POST /api/admin/admins": {
+    body: {
+      type: "object",
+      properties: {
+        email: { type: "string", format: "email", maxLength: 254 },
+        nickname: { type: "string", minLength: 1, maxLength: 100, pattern: "\\S" },
+        password: { type: "string", minLength: 8, maxLength: 1024, pattern: "\\S" },
+      },
+      required: ["email", "nickname", "password"],
+      additionalProperties: false,
+    },
+    response: { "201": adminAccountSchema, ...errorResponses },
+  },
+  "PATCH /api/admin/admins/:id": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    body: objectBody({ disabled: { type: "boolean" } }),
+    response: { "200": adminAccountSchema, ...errorResponses },
+  },
 
   // ── User accounts ───────────────────────────────────────────────────────────
   "GET /api/auth/session": { response: { "200": userSessionSchema, ...errorResponses } },

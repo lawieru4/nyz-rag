@@ -6,6 +6,33 @@ export interface AdminLoginRequest {
 export interface AdminSession {
   username: string;
   expiresAt: string;
+  admin: AdminAccount;
+}
+
+export interface AdminAccount {
+  id: string;
+  email: string;
+  nickname: string;
+  isSuper: boolean;
+  disabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAdminRequest {
+  email: string;
+  nickname: string;
+  password: string;
+}
+
+export interface UpdateAdminProfileRequest {
+  email: string;
+  nickname: string;
+}
+
+export interface ChangeAdminPasswordRequest {
+  currentPassword: string;
+  newPassword: string;
 }
 
 /** 用户端账号（邮箱注册）。未登录访客由浏览器 Cookie 识别，没有账号记录。 */
@@ -195,10 +222,10 @@ export interface DocumentSummary {
   sourceId: string;
   title: string;
   url: string;
-  /** 规范地址（网页声明的 canonical 或规范化后的抓取地址），同一来源内唯一。 */
+  /** 规范地址，与 url 相同，同一来源内唯一。 */
   canonicalUrl: string;
-  /** 来源系统中的标识，例如 nyzdata 的 articleKey；网页文档没有。 */
-  externalId?: string;
+  /** 来源系统中的标识，即 nyzdata 的 articleKey。 */
+  externalId: string;
   author?: string;
   category?: string;
   tags: string[];
@@ -224,11 +251,10 @@ export interface DocumentReference {
 }
 
 export interface DocumentRecord extends DocumentSummary {
-  /** 参与检索的正文；文章来源不含文首元信息、相关阅读、本文链接与延伸思考。 */
+  /** 参与检索的正文，不含文首元信息、相关阅读、本文链接与延伸思考。 */
   content: string;
-  /** 文章来源的完整 Markdown（含全部章节）。 */
+  /** 完整 Markdown（含全部章节）。 */
   markdown?: string;
-  rawHtml?: string;
   metadata?: ArticleMetadata;
   chunks: DocumentChunkRecord[];
   /** 重复文档所指向的主文档。 */
@@ -342,7 +368,8 @@ export interface DataSourceRecord {
   id: string;
   name: string;
   url: string;
-  kind: "文章 API" | "网页站点";
+  /** 只支持 nyzdata 文章接口。 */
+  kind: "文章 API";
   frequency: string;
   status: "运行中" | "已暂停";
   documentCount: number;

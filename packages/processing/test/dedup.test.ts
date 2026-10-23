@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
-import { closeDatabase, getDb, getPool, migrate, withTransaction } from "../src/db.js";
-import { canonicalUrlFromHtml, contentFingerprint, isDedupCandidate, normalizeUrl } from "../src/dedup.js";
+import { closeDatabase, getPool, migrate, withTransaction } from "../src/db.js";
+import { contentFingerprint, isDedupCandidate, normalizeUrl } from "../src/dedup.js";
 import { processDocument } from "../src/process.js";
 import {
-  backfillContentHashes, createSource, deleteDocument, findDocumentByCanonicalUrl, getDocument, getDocumentSummary, getStats, keywordSearchChunks, listDocumentChunks, upsertDocument,
+  backfillContentHashes, createSource, deleteDocument, getDocument, getDocumentSummary, getStats, keywordSearchChunks, listDocumentChunks, upsertDocument,
 } from "../src/repository.js";
 import { searchTerms } from "../src/search-terms.js";
+import { articleDocument } from "./article-fixtures.js";
 
 test("normalizeUrl drops fragments, default ports and tracking params, and sorts the query", () => {
   assert.equal(normalizeUrl("HTTPS://Example.COM:443/a/b?b=2&utm_source=x&a=1&spm=3#top"), "https://example.com/a/b?a=1&b=2");
@@ -18,17 +19,6 @@ test("normalizeUrl drops fragments, default ports and tracking params, and sorts
   assert.equal(normalizeUrl("../b?x=1", "https://example.com/a/c"), "https://example.com/b?x=1");
   assert.equal(normalizeUrl("mailto:a@example.com"), null);
   assert.equal(normalizeUrl("not a url"), null);
-});
-
-test("canonicalUrlFromHtml reads <link rel=canonical> and ignores site-root misconfiguration", () => {
-  const page = "https://example.com/news/item?id=1&utm_source=feed";
-  const html = (link: string) => `<html><head><title>t</title>${link}</head><body><link rel="canonical" href="/body"></body></html>`;
-  assert.equal(canonicalUrlFromHtml(html(`<link href="/news/item?utm_campaign=x&amp;id=1" rel="alternate canonical">`), page), "https://example.com/news/item?id=1");
-  assert.equal(canonicalUrlFromHtml(html("<link rel=canonical href=https://mirror.example.org/a>"), page), "https://mirror.example.org/a");
-  assert.equal(canonicalUrlFromHtml(html('<link rel="canonical" href="https://example.com/">'), page), null, "non-root page pointing at the homepage");
-  assert.equal(canonicalUrlFromHtml(html('<link rel="canonical" href="/">'), "https://example.com/"), "https://example.com/");
-  assert.equal(canonicalUrlFromHtml(html('<link rel="canonical" href="javascript:void(0)">'), page), null);
-  assert.equal(canonicalUrlFromHtml(html('<link rel="stylesheet" href="/a.css">'), page), null, "only links inside <head> are considered");
 });
 
 test("contentFingerprint ignores whitespace and width differences; short content is not deduplicated", () => {
@@ -50,23 +40,22 @@ test("duplicate documents keep their source but are not chunked; primaries hand 
   process.env.DATABASE_URL = url.toString();
   try {
     await migrate();
-    const siteA = await createSource({ name: "Site A", url: "https://a.test", kind: "网页站点", frequency: "" });
-    const siteB = await createSource({ name: "Site B", url: "https://b.test", kind: "网页站点", frequency: "" });
-    const save = (sourceId: string, path: string, content: string, canonicalUrl?: string) => withTransaction((tx) =>
-      upsertDocument(tx, { sourceId, url: `https://${path}`, canonicalUrl, title: path, content, status: "ready" }));
+    const sourceA = await createSource({ name: "Source A", url: "https://example.test/nyz/article?tagKey=a", kind: "文章 API", frequency: "" });
+    const sourceB = await createSource({ name: "Source B", url: "https://example.test/nyz/article?tagKey=b", kind: "文章 API", frequency: "" });
+    const save = (sourceId: string, key: string, content: string | string[]) => withTransaction((tx) => upsertDocument(tx, articleDocument(sourceId, key, key, content)));
     const run = (id: string) => withTransaction((tx) => processDocument(tx, id));
     const state = async (id: string) => {
       const summary = (await getDocumentSummary(id))!;
       return { status: summary.processingStatus, duplicateOf: summary.duplicateOf ?? null, chunks: summary.chunkCount };
     };
 
-    // 跨来源：后处理的同内容文档成为重复文档，不切片；排版差异不影响判定。
-    const a = await save(siteA.id, "a.test/1", body("钠离子电池"));
-    const b = await save(siteB.id, "b.test/x", body("钠离子电池").replace(/。/g, "。\n"));
+    // 跨来源：后处理的同内容文档成为重复文档，不切片；分段差异不影响判定。
+    const a = await save(sourceA.id, "a1", body("钠离子电池"));
+    const b = await save(sourceB.id, "bx", body("钠离子电池").split(/(?<=。)/));
     assert.deepEqual(await run(a), { duplicateOf: null, chunks: 1, embed: [a] });
     assert.deepEqual(await run(b), { duplicateOf: a, chunks: 0, embed: [] });
     assert.deepEqual(await state(b), { status: "duplicate", duplicateOf: a, chunks: 0 });
-    assert.deepEqual((await getDocument(a))!.duplicates, [{ id: b, sourceId: siteB.id, title: "b.test/x", url: "https://b.test/x" }]);
+    assert.deepEqual((await getDocument(a))!.duplicates, [{ id: b, sourceId: sourceB.id, title: "bx", url: "https://example.test/articles/bx" }]);
     assert.equal((await getDocument(b))!.primary?.id, a);
     assert.deepEqual((await keywordSearchChunks(searchTerms("钠离子电池"), 10)).map((hit) => hit.documentId), [a], "duplicates are not retrievable");
     assert.equal((await getStats()).documents, 1, "duplicates are not counted as knowledge documents");
@@ -75,28 +64,28 @@ test("duplicate documents keep their source but are not chunked; primaries hand 
     assert.equal((await state(b)).duplicateOf, a);
 
     // 过短的正文不判重。
-    const s1 = await save(siteA.id, "a.test/short-1", "加载中");
-    const s2 = await save(siteB.id, "b.test/short-2", "加载中");
+    const s1 = await save(sourceA.id, "short-1", "加载中");
+    const s2 = await save(sourceB.id, "short-2", "加载中");
     await run(s1);
     assert.equal((await run(s2)).duplicateOf, null);
 
     // 主文档内容变化：最早的重复文档接替为主文档（需要向量化），其余同内容的跟随它。
-    const c = await save(siteA.id, "a.test/3", body("钠离子电池"));
+    const c = await save(sourceA.id, "a3", body("钠离子电池"));
     assert.equal((await run(c)).duplicateOf, a);
-    await save(siteA.id, "a.test/1", body("固态电池"));
+    await save(sourceA.id, "a1", body("固态电池"));
     assert.deepEqual(await run(a), { duplicateOf: null, chunks: 1, embed: [a, b] });
     assert.deepEqual(await state(b), { status: "chunked", duplicateOf: null, chunks: 1 });
     assert.deepEqual(await state(c), { status: "duplicate", duplicateOf: b, chunks: 0 });
 
     // 主文档的内容变成另一篇主文档的内容：它成为重复文档，名下内容不同的重复文档重新判定并接替。
-    await save(siteB.id, "b.test/x", body("固态电池"));
+    await save(sourceB.id, "bx", body("固态电池"));
     assert.deepEqual(await run(b), { duplicateOf: a, chunks: 0, embed: [c] });
     assert.deepEqual(await state(c), { status: "chunked", duplicateOf: null, chunks: 1 });
 
     // 历史数据中同内容的两篇主文档：重新处理较晚的一篇时，它与名下同内容的重复文档都归到最早的主文档。
-    const d = await save(siteB.id, "b.test/4", body("钠离子电池"));
+    const d = await save(sourceB.id, "b4", body("钠离子电池"));
     assert.equal((await run(d)).duplicateOf, c);
-    const legacy = await save(siteA.id, "a.test/legacy", body("钠离子电池"));
+    const legacy = await save(sourceA.id, "legacy", body("钠离子电池"));
     await getPool().query("UPDATE documents SET created_at = now() - interval '1 day', content_hash = $2, processing_status = 'chunked' WHERE id = $1", [legacy, contentFingerprint(body("钠离子电池"))]);
     assert.deepEqual(await run(c), { duplicateOf: legacy, chunks: 0, embed: [] });
     assert.equal((await state(d)).duplicateOf, legacy);
@@ -110,17 +99,17 @@ test("duplicate documents keep their source but are not chunked; primaries hand 
     assert.equal(await deleteDocument(d), null);
 
     // 并发处理同内容的两篇新文档：按指纹加锁，只有一篇成为主文档。
-    const e1 = await save(siteA.id, "a.test/e1", body("液流电池"));
-    const e2 = await save(siteB.id, "b.test/e2", body("液流电池"));
+    const e1 = await save(sourceA.id, "e1", body("液流电池"));
+    const e2 = await save(sourceB.id, "e2", body("液流电池"));
     const results = await Promise.all([run(e1), run(e2)]);
     assert.equal(results.filter((result) => result.duplicateOf === null).length, 1);
     assert.equal((await listDocumentChunks(e1)).length + (await listDocumentChunks(e2)).length, 1);
 
-    // 规范地址：同来源同 canonical 的不同抓取地址更新同一篇；不同来源互不影响。
-    const p1 = await save(siteA.id, "a.test/page?ref=1", body("钙钛矿"), "https://a.test/page");
-    assert.equal(await save(siteA.id, "a.test/page?ref=2", body("钙钛矿"), "https://a.test/page"), p1);
-    assert.equal((await findDocumentByCanonicalUrl(getDb(), siteA.id, "https://a.test/page"))?.url, "https://a.test/page?ref=2");
-    assert.notEqual(await save(siteB.id, "a.test/page?ref=2", body("钙钛矿"), "https://a.test/page"), p1);
+    // 来源标识：同来源同 articleKey 更新同一篇；不同来源互不影响。
+    const p1 = await save(sourceA.id, "page", body("钙钛矿"));
+    assert.equal(await save(sourceA.id, "page", body("钙钛矿电池")), p1);
+    assert.equal((await getDocumentSummary(p1))?.externalId, "page");
+    assert.notEqual(await save(sourceB.id, "page", body("钙钛矿")), p1);
 
     // 回填正文指纹：只补缺失的，不改变重复关系。
     await getPool().query("UPDATE documents SET content_hash = NULL WHERE id = $1", [a]);

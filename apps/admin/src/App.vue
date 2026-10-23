@@ -1,39 +1,50 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, type Component } from "vue";
-import { Bell, Database, FileText, Library, LogOut, MessagesSquare, Settings2, Users } from "@lucide/vue";
+import { Bell, Database, FileText, Library, LogOut, MessagesSquare, Settings2, Shield, User, Users } from "@lucide/vue";
 import type { AdminSession } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { ConfirmDialog } from "@nyz-rag/ui/confirm";
 import { Toaster } from "@nyz-rag/ui/components/sonner";
 import { toast } from "@nyz-rag/ui/lib/toast";
 import AdminLogin from "./AdminLogin.vue";
+import AdminsView from "./views/AdminsView.vue";
 import ChatLogsView from "./views/ChatLogsView.vue";
 import DocumentsView from "./views/DocumentsView.vue";
 import KnowledgeBasesView from "./views/KnowledgeBasesView.vue";
 import ModelProvidersView from "./views/ModelProvidersView.vue";
+import ProfileView from "./views/ProfileView.vue";
 import SourcesView from "./views/SourcesView.vue";
 import UsersView from "./views/UsersView.vue";
 import { ApiError, client, errorMessage, loadKnowledge, resetKnowledge, sources } from "./workspace";
 
-const modules: Array<{ name: string; icon: Component; view: Component }> = [
+const allModules: Array<{ name: string; icon: Component; view: Component; superOnly?: boolean }> = [
   { name: "数据源", icon: Database, view: SourcesView },
   { name: "文档管理", icon: FileText, view: DocumentsView },
   { name: "知识库", icon: Library, view: KnowledgeBasesView },
   { name: "问答记录", icon: MessagesSquare, view: ChatLogsView },
   { name: "用户管理", icon: Users, view: UsersView },
   { name: "模型配置", icon: Settings2, view: ModelProvidersView },
+  { name: "管理员管理", icon: Shield, view: AdminsView, superOnly: true },
 ];
 
+const PROFILE_MODULE = "个人资料";
+
+const session = ref<AdminSession | null>(null);
 const activeModule = ref("数据源");
 // 再次点击当前模块时重新挂载视图，即重新加载数据。
 const viewKey = ref(0);
-const session = ref<AdminSession | null>(null);
 const authChecking = ref(true);
 const loginBusy = ref(false);
 const loginError = ref("");
 
-// “抓取任务”等未单独实现的入口沿用数据源页面。
-const activeView = computed(() => modules.find((item) => item.name === activeModule.value)?.view ?? SourcesView);
+const isSuper = computed(() => session.value?.admin.isSuper ?? false);
+const modules = computed(() => allModules.filter((m) => !m.superOnly || isSuper.value));
+
+// 当前显示的视图（个人资料是特殊模块，不在 modules 列表）
+const activeView = computed(() => {
+  if (activeModule.value === PROFILE_MODULE) return ProfileView;
+  return modules.value.find((item) => item.name === activeModule.value)?.view ?? SourcesView;
+});
 
 function select(name: string) {
   if (name === activeModule.value) viewKey.value++;
@@ -71,7 +82,7 @@ async function restoreSession() {
 
 async function login(username: string, password: string) {
   if (!username || !password) {
-    loginError.value = "请输入用户名和密码";
+    loginError.value = "请输入邮箱/账号和密码";
     return;
   }
   loginBusy.value = true;
@@ -94,6 +105,16 @@ async function logout() {
     return;
   }
   resetWorkspace();
+}
+
+// ProfileView 事件：profile 更新后同步 session；密码修改后强制重新登录
+function handleSessionUpdated(updated: AdminSession) {
+  session.value = updated;
+}
+
+function handleLogoutRequired() {
+  resetWorkspace();
+  loginError.value = "密码已修改，请重新登录";
 }
 
 onMounted(restoreSession);
@@ -122,10 +143,20 @@ onMounted(restoreSession);
           <span v-if="item.name === '数据源'" class="ml-auto font-mono text-[11px] max-md:hidden">{{ sources.length }}</span>
         </button>
       </nav>
-      <div class="mt-auto flex items-center gap-2.5 border-t border-sidebar-border px-1.5 pt-4 pb-1 max-md:justify-center max-md:px-0">
-        <span class="grid size-7.5 flex-none place-items-center rounded-full bg-[#53634f] font-mono text-[11px] text-[#e5edda] max-md:hidden">{{ session.username.slice(0, 2).toUpperCase() }}</span>
-        <span class="grid min-w-0 gap-0.5 text-[11px] max-md:hidden"><b class="truncate text-sidebar-accent-foreground">{{ session.username }}</b><small class="text-[10px] text-sidebar-foreground/70">管理员</small></span>
-        <Button variant="ghost" size="icon-sm" class="ml-auto text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:ml-0" title="退出登录" aria-label="退出登录" @click="logout"><LogOut /></Button>
+      <div class="mt-auto flex items-center gap-2.5 border-t border-sidebar-border px-1.5 pt-4 pb-1 max-md:flex-col max-md:justify-center max-md:px-0">
+        <button
+          class="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent/60 max-md:justify-center"
+          title="个人资料"
+          :aria-current="activeModule === PROFILE_MODULE ? 'page' : undefined"
+          @click="select(PROFILE_MODULE)"
+        >
+          <span class="grid size-7.5 flex-none place-items-center rounded-full bg-[#53634f] font-mono text-[11px] text-[#e5edda]"><User class="size-3.5" /></span>
+          <span class="grid min-w-0 gap-0.5 text-[11px] max-md:hidden">
+            <b class="truncate text-sidebar-accent-foreground">{{ session.admin.nickname }}</b>
+            <small class="text-[10px] text-sidebar-foreground/70">{{ session.admin.isSuper ? '超级管理员' : '管理员' }}</small>
+          </span>
+        </button>
+        <Button variant="ghost" size="icon-sm" class="ml-auto flex-none text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:ml-0" title="退出登录" aria-label="退出登录" @click="logout"><LogOut /></Button>
       </div>
     </aside>
 
@@ -140,6 +171,13 @@ onMounted(restoreSession);
       </header>
       <div class="mx-auto max-w-330 px-10 pt-9 pb-7 max-lg:px-6 max-md:px-4">
         <SourcesView v-if="activeView === SourcesView" :key="`sources-${viewKey}`" :title="activeModule" @navigate="select" />
+        <ProfileView
+          v-else-if="activeView === ProfileView && session"
+          :key="`profile-${viewKey}`"
+          :session="session"
+          @session-updated="handleSessionUpdated"
+          @logout-required="handleLogoutRequired"
+        />
         <component :is="activeView" v-else :key="`${activeModule}-${viewKey}`" />
       </div>
     </main>

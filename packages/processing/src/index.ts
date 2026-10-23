@@ -7,7 +7,7 @@ export { parseRetrievalFilters } from "./retrieval-filters.js";
 export { normalizeSearchText, searchTerms } from "./search-terms.js";
 export * from "./chunking.js";
 export { articleDocumentUpdate, prepareDocument } from "./prepare.js";
-export { canonicalUrlFromHtml, contentFingerprint, DEDUP_MIN_LENGTH, isDedupCandidate, normalizeUrl } from "./dedup.js";
+export { contentFingerprint, DEDUP_MIN_LENGTH, isDedupCandidate, normalizeUrl } from "./dedup.js";
 export { processDocument, type ProcessDocumentResult } from "./process.js";
 export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleListItem } from "./article/client.js";
 export { parseArticle, PARSER_VERSION, type ArticleBlock, type ArticleDetail, type ParsedArticle } from "./article/parse.js";
