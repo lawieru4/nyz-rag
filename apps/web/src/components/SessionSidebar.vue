@@ -48,13 +48,13 @@ const statsNote = computed(() => {
 <template>
   <div class="flex h-full flex-col">
     <div class="p-3">
-      <Button variant="outline" class="w-full justify-start gap-2 bg-card text-xs" :disabled="busy" @click="emit('new')"><SquarePen />新对话</Button>
+      <Button variant="ghost" class="w-full justify-start gap-2 text-xs hover:bg-card" :disabled="busy" @click="emit('new')"><SquarePen />新对话</Button>
     </div>
 
     <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-3" aria-label="历史会话">
       <section v-for="group in groups" :key="group.label" class="mt-2 first:mt-0">
         <h2 class="px-2 py-1.5 text-[10px] font-medium text-muted-foreground/80">{{ group.label }}</h2>
-        <div v-for="session in group.sessions" :key="session.id" :class="['group flex items-center rounded-md hover:bg-accent', session.id === sessionId && 'bg-accent']">
+        <div v-for="session in group.sessions" :key="session.id" :class="['group flex items-center rounded-md transition-colors hover:bg-card/60', session.id === sessionId && 'bg-card hover:bg-card']">
           <button
             class="min-w-0 flex-1 px-2 py-2 text-left text-xs text-[#3e4842] disabled:cursor-default disabled:opacity-60"
             :disabled="busy" :title="session.title" :aria-current="session.id === sessionId ? 'page' : undefined"
@@ -76,7 +76,7 @@ const statsNote = computed(() => {
       未登录：会话仅保存在当前浏览器。<Button variant="link" class="h-auto p-0 text-[10px] text-link" @click="emit('login')">登录</Button>后可跨设备查看。
     </p>
 
-    <div class="border-t px-4 py-3.5" aria-label="知识库状态">
+    <div class="px-4 py-3.5" aria-label="知识库状态">
       <div class="flex items-center gap-2 text-xs font-semibold">
         <span :class="['size-1.75 rounded-full', statsError ? 'bg-destructive' : stats ? 'bg-[#82ad55]' : 'bg-muted-foreground/40']" />文章知识库
       </div>

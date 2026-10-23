@@ -230,7 +230,7 @@ async function startCrawl(source: Source) {
               <div class="grid w-52 gap-1.5">
                 <span class="tabular-nums"><b class="font-semibold text-foreground">{{ source.pages.toLocaleString() }}</b> / {{ source.remoteTotal?.toLocaleString() ?? "—" }}<span v-if="coverage.percent !== null" class="ml-1.5 text-[11px]">{{ coverage.percent }}%</span></span>
                 <Progress v-if="coverage.percent !== null" :model-value="coverage.percent" class="h-1" />
-                <small class="text-[11px]">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
+                <small class="text-[11px] tabular-nums">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
               </div>
             </TableCell>
             <TableCell><StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge></TableCell>
@@ -261,7 +261,7 @@ async function startCrawl(source: Source) {
           <Progress :model-value="taskProgress(task).value" class="h-1" />
           <small class="min-w-24 text-[11px] whitespace-nowrap text-muted-foreground tabular-nums">{{ taskProgress(task).label }}</small>
         </div>
-        <span class="ml-auto w-32 text-[11px] text-muted-foreground max-md:hidden">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
+        <span class="ml-auto w-32 text-[11px] text-muted-foreground tabular-nums max-md:hidden">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
       </div>
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>

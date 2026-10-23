@@ -51,9 +51,9 @@ watch(() => props.id, load, { immediate: true });
       <Button v-if="id" variant="outline" class="mt-4" @click="load">重试</Button>
     </div>
     <article v-else-if="article" class="mx-auto max-w-190">
-      <header class="border-b pb-6">
+      <header class="pb-6">
         <p class="eyebrow mb-3">知识库文章</p>
-        <h1 class="text-[32px] leading-[1.45] font-semibold break-words max-sm:text-[26px]">{{ article.title }}</h1>
+        <h1 class="text-[32px] leading-[1.45] font-semibold text-balance break-words max-sm:text-[26px]">{{ article.title }}</h1>
         <p v-if="article.summary" class="mt-3.5 text-base leading-[1.8] text-muted-foreground max-sm:text-sm">{{ article.summary }}</p>
         <div class="mt-4.5 flex flex-wrap gap-x-4.5 gap-y-2 text-xs text-muted-foreground">
           <span v-if="article.author">{{ article.author }}</span>

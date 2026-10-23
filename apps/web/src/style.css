@@ -4,6 +4,19 @@
 
 @source "../../../packages/ui/src";
 
+@theme {
+  /* 欠阻尼弹簧（刚度 380、阻尼 18）的采样曲线，用于点赞、复制成功等确认反馈的轻微回弹 */
+  --ease-spring-soft: linear(0, 0.11, 0.361, 0.649, 0.899, 1.076, 1.171, 1.195, 1.17, 1.119, 1.064, 1.016, 0.983, 0.966, 0.962, 0.968, 0.978, 0.989, 0.998, 1.004, 1.007, 1.007, 1.006, 1.004, 1);
+  --animate-pop: pop 600ms var(--ease-spring-soft) both;
+
+  @keyframes pop {
+    from {
+      opacity: 0;
+      scale: 0.7;
+    }
+  }
+}
+
 @layer components {
   .eyebrow {
     font: 500 10px var(--font-mono);
@@ -11,13 +24,44 @@
     color: #7e8c52;
   }
 
-  /* 流式生成中的光标：跟在回答最后一个文本块（列表为最后一项）之后 */
-  .streaming-cursor::after,
-  .answer-streaming > :last-child:not(ol, ul)::after,
-  .answer-streaming > :is(ol, ul):last-child > li:last-child::after {
+  /* 尚未收到文字（检索中）时的闪烁光标 */
+  .streaming-cursor::after {
     content: "▍";
     color: #788648;
     animation: blink 1s steps(2) infinite;
+  }
+
+  /*
+   * 流式生成中，回答末尾约 3 个字被渐变遮罩由淡到实地盖住，新字像墨迹逐渐显现。
+   * 遮罩跟在最后一个段落/标题（列表为最后一项）之后，左外边距抵消宽度，不占位也不影响换行；底色须与回答卡片一致。
+   * 最后一块是代码或表格时不显示。
+   */
+  .answer-streaming > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
+  .answer-streaming > :is(ol, ul):last-child > li:last-child::after {
+    content: "";
+    display: inline-block;
+    width: 3em;
+    height: 1lh;
+    margin-left: -3em;
+    vertical-align: top;
+    background: linear-gradient(to right, transparent, color-mix(in oklab, var(--card) 88%, transparent));
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .streaming-cursor::after {
+      animation: none;
+    }
+    .answer-streaming > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
+    .answer-streaming > :is(ol, ul):last-child > li:last-child::after {
+      content: "▍";
+      width: auto;
+      height: auto;
+      margin-left: 0;
+      vertical-align: baseline;
+      background: none;
+      color: #788648;
+    }
   }
 
   /* 回答中的引用标记 [n] */
@@ -53,6 +97,7 @@
     font-size: 15px;
     line-height: 1.95;
     overflow-wrap: anywhere;
+    text-wrap: pretty;
   }
   .article-body .markdown-heading {
     margin: 30px 0 10px;
@@ -92,7 +137,6 @@
     overflow: auto;
     margin: 0 0 18px;
     padding: 14px;
-    border: 1px solid var(--border);
     border-radius: 5px;
     background: #f0f2ef;
     font: 12px/1.7 var(--font-mono);
