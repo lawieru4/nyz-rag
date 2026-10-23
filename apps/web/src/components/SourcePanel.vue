@@ -27,7 +27,7 @@ const documentHref = (id: string) => `#/documents/${encodeURIComponent(id)}`;
 
 <template>
   <div class="flex h-full flex-col">
-    <div class="flex items-start justify-between gap-3 border-b px-4 py-3.5">
+    <div class="flex items-start justify-between gap-3 px-4 py-3.5">
       <div class="min-w-0">
         <h2 class="text-xs font-semibold">引用来源 <span class="font-mono font-normal text-muted-foreground">· {{ sources.length }} 篇</span></h2>
         <p class="mt-1 truncate text-[11px] text-muted-foreground" :title="question">{{ question }}</p>
@@ -38,7 +38,7 @@ const documentHref = (id: string) => `#/documents/${encodeURIComponent(id)}`;
     <ol ref="list" class="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
       <li
         v-for="(source, index) in sources" :key="source.documentId" :data-citation="index + 1"
-        :class="['scroll-my-3 rounded-lg border bg-card transition-shadow', activeCitation === index + 1 ? 'border-ring shadow-[0_0_0_3px_#dff16e66]' : 'hover:border-ring/60']"
+        :class="['scroll-my-3 rounded-lg bg-card transition-shadow', activeCitation === index + 1 ? 'shadow-[0_0_0_1px_var(--ring),0_0_0_4px_#dff16e66]' : 'hover:shadow-[0_1px_3px_#202b1414]']"
       >
         <button type="button" class="flex w-full items-start gap-2.5 px-3.5 pt-3 text-left" :aria-pressed="activeCitation === index + 1" @click="emit('select', index + 1)">
           <span :class="['citation mt-0.5 flex-none', activeCitation === index + 1 && 'citation-active']">{{ index + 1 }}</span>
@@ -51,7 +51,7 @@ const documentHref = (id: string) => `#/documents/${encodeURIComponent(id)}`;
         <div v-if="source.excerpts?.length" class="mt-2.5 space-y-2 px-3.5">
           <blockquote v-for="(excerpt, excerptIndex) in source.excerpts" :key="excerptIndex" class="rounded-md bg-[#f5f7ee] px-3 py-2.5">
             <p v-if="excerpt.sectionPath.length" class="mb-1 truncate text-[10px] font-medium text-[#7a8951]">{{ excerpt.sectionPath.join(" › ") }}</p>
-            <p :class="['text-xs leading-[1.75] whitespace-pre-line text-[#4c5750]', activeCitation !== index + 1 && 'line-clamp-3']">{{ excerpt.text }}</p>
+            <p :class="['text-xs leading-[1.75] text-pretty whitespace-pre-line text-[#4c5750]', activeCitation !== index + 1 && 'line-clamp-3']">{{ excerpt.text }}</p>
           </blockquote>
         </div>
         <p v-else class="mt-2 px-3.5 text-[11px] text-muted-foreground/80">暂无片段摘录</p>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { ArrowUpRight, Copy, KeyRound, LogOut, Menu, RefreshCw, SlidersHorizontal, Sparkles, Square, SquarePen, ThumbsDown, ThumbsUp, X } from "@lucide/vue";
+import { ArrowUpRight, Check, Copy, KeyRound, LogOut, Menu, RefreshCw, SlidersHorizontal, Sparkles, Square, SquarePen, ThumbsDown, ThumbsUp, X } from "@lucide/vue";
 import type {
   ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamRequest, KnowledgeStats,
   RetrievalFilters, UserAccount, UserSessionResponse,
@@ -62,6 +62,7 @@ const categoriesText = ref("");
 const tagsText = ref("");
 const scenariosText = ref("");
 let controller: AbortController | null = null;
+const copyTimers = new WeakMap<Turn, ReturnType<typeof setTimeout>>();
 /** 窄屏下的会话抽屉。 */
 const sidebarOpen = ref(false);
 const filtersOpen = ref(false);
@@ -319,7 +320,8 @@ async function copy(turn: Turn) {
     textarea.remove();
   }
   turn.copied = true;
-  setTimeout(() => { turn.copied = false; }, 1500);
+  clearTimeout(copyTimers.get(turn));
+  copyTimers.set(turn, setTimeout(() => { turn.copied = false; }, 2500));
 }
 
 async function sendFeedback(turn: Turn, rating: ChatFeedbackRating) {
@@ -343,7 +345,7 @@ function useSuggestion(text: string) {
 <template>
   <TooltipProvider :delay-duration="300">
     <main class="min-h-dvh">
-      <header class="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b bg-card/90 px-5 backdrop-blur max-sm:px-3">
+      <header class="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 bg-background/85 px-5 backdrop-blur max-sm:px-3">
         <div class="flex min-w-0 items-center gap-1.5">
           <IconButton v-if="articleId === null" label="历史会话" class="lg:hidden" @click="sidebarOpen = true"><Menu /></IconButton>
           <a class="flex items-center gap-2.5 text-sm font-bold max-sm:text-[13px]" href="#/" aria-label="NYZ RAG 首页"><span class="grid size-7 place-items-center rounded-md bg-brand text-[15px] text-brand-foreground">N</span><span>NYZ <b class="font-medium text-muted-foreground">知识问答</b></span></a>
@@ -352,7 +354,7 @@ function useSuggestion(text: string) {
           <IconButton v-if="articleId === null" label="新对话" class="lg:hidden" :disabled="busy" @click="newSession"><SquarePen /></IconButton>
           <DropdownMenu v-if="user">
             <DropdownMenuTrigger as-child>
-              <Button variant="outline" class="h-8 max-w-55 gap-2 pr-2.5 pl-1 text-xs font-normal max-sm:pr-1">
+              <Button variant="ghost" class="h-8 max-w-55 gap-2 pr-2.5 pl-1 text-xs font-normal max-sm:pr-1">
                 <span class="grid size-6 flex-none place-items-center rounded-[5px] bg-brand-soft text-[11px] font-semibold text-accent-foreground">{{ user.email.slice(0, 1).toUpperCase() }}</span>
                 <span class="truncate max-sm:hidden">{{ user.email }}</span>
               </Button>
@@ -362,7 +364,7 @@ function useSuggestion(text: string) {
               <DropdownMenuItem :disabled="busy" @select="logout"><LogOut />退出登录</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button v-else variant="outline" size="sm" class="text-xs" @click="openAccount('login')">登录 / 注册</Button>
+          <Button v-else variant="secondary" size="sm" class="text-xs" @click="openAccount('login')">登录 / 注册</Button>
         </div>
       </header>
       <p v-if="accountNotice" class="flex items-center justify-center gap-2.5 bg-secondary px-4 py-2 text-xs text-secondary-foreground" role="status">
@@ -373,11 +375,11 @@ function useSuggestion(text: string) {
       <ArticleView v-if="articleId !== null" :id="articleId" />
 
       <div v-show="articleId === null" :class="['lg:grid', citedTurn && wide ? 'lg:grid-cols-[264px_minmax(0,1fr)_380px]' : 'lg:grid-cols-[264px_minmax(0,1fr)]']">
-        <aside class="sticky top-14 h-[calc(100dvh-3.5rem)] border-r bg-[#fbfcfa] max-lg:hidden">
+        <aside class="sticky top-14 h-[calc(100dvh-3.5rem)] bg-panel max-lg:hidden">
           <SessionSidebar v-bind="sidebarProps" @new="newSession" @open="openSession" @remove="removeSession" @login="openAccount('login')" />
         </aside>
         <Sheet v-model:open="sidebarOpen">
-          <SheetContent side="left" class="w-72 gap-0 bg-[#fbfcfa] p-0 pt-10">
+          <SheetContent side="left" class="w-72 gap-0 bg-panel p-0 pt-10">
             <SheetTitle class="sr-only">历史会话</SheetTitle>
             <SheetDescription class="sr-only">切换或删除历史会话，查看知识库状态</SheetDescription>
             <SessionSidebar
@@ -399,7 +401,7 @@ function useSuggestion(text: string) {
           <div v-if="turns.length" ref="thread" class="grid gap-6 pb-6">
             <article v-for="(turn, index) in turns" :key="turn.id ?? `pending-${index}`" class="grid scroll-mb-48 gap-2.5">
               <p class="max-w-[85%] justify-self-end rounded-lg rounded-br-sm bg-primary px-3.5 py-2.5 text-[13px] leading-[1.7] break-words whitespace-pre-wrap text-primary-foreground">{{ turn.question }}</p>
-              <section class="rounded-lg border bg-card p-4.5" aria-live="polite">
+              <section class="rounded-lg bg-card p-4.5" aria-live="polite">
                 <div class="flex items-center gap-2.5">
                   <span class="grid size-7 place-items-center rounded-md bg-brand-soft text-[#566b2f]"><Sparkles class="size-4" /></span>
                   <div><strong class="block text-xs">回答</strong><small class="mt-0.5 block text-[11px] text-muted-foreground">{{ answerCaption(turn) }}</small></div>
@@ -410,7 +412,7 @@ function useSuggestion(text: string) {
                 />
                 <p v-else-if="turn.streaming" class="streaming-cursor my-4 text-[13px]" />
                 <p v-if="turn.notice" class="mt-3 rounded-md bg-warning-soft px-2.5 py-2 text-[11px] text-warning">{{ turn.notice }}</p>
-                <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="border-t pt-3 text-[11px] text-muted-foreground">
+                <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="mt-4 text-[11px] text-muted-foreground">
                   <div class="mb-2 flex items-center justify-between">
                     <span>引用来源<span v-if="turn.sources.length" class="font-mono"> · {{ turn.sources.length }}</span></span>
                     <Button v-if="turn.sources.length" variant="link" size="xs" class="h-auto p-0 text-[11px] font-normal text-link" @click="openSources(index, null)">查看原文片段</Button>
@@ -418,19 +420,25 @@ function useSuggestion(text: string) {
                   <div v-if="turn.sources.length" class="flex flex-wrap gap-1.5">
                     <button
                       v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" type="button"
-                      :class="['inline-flex max-w-full items-center gap-1.5 rounded-md border bg-background py-1 pr-2.5 pl-1 text-left hover:border-ring hover:text-foreground', citing?.turn === index && citing.citation === sourceIndex + 1 && 'border-ring text-foreground']"
+                      :class="['inline-flex max-w-full items-center gap-1.5 rounded-md bg-background py-1 pr-2.5 pl-1 text-left transition-colors hover:bg-accent hover:text-foreground', citing?.turn === index && citing.citation === sourceIndex + 1 && 'bg-accent text-foreground']"
                       :title="source.title" @click="openSources(index, sourceIndex + 1)"
                     ><span class="citation m-0 flex-none">{{ sourceIndex + 1 }}</span><span class="truncate">{{ source.title }}</span></button>
                   </div>
                   <span v-else class="text-muted-foreground/70">暂无匹配文章</span>
                 </div>
-                <div v-if="!turn.streaming" class="mt-3.5 flex flex-wrap items-center gap-2 border-t pt-3 text-[11px] text-muted-foreground">
-                  <Button v-if="turn.answer" variant="outline" size="xs" @click="copy(turn)"><Copy />{{ turn.copied ? '已复制' : '复制' }}</Button>
-                  <Button v-if="index === turns.length - 1" variant="outline" size="xs" :disabled="busy" @click="regenerate"><RefreshCw />重新生成</Button>
+                <div v-if="!turn.streaming" class="mt-4 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                  <Button v-if="turn.answer" variant="ghost" size="xs" class="px-1.5 text-muted-foreground" @click="copy(turn)">
+                    <!-- 复制成功时对勾弹出，2.5 秒后淡出恢复 -->
+                    <span class="grid *:col-start-1 *:row-start-1">
+                      <Copy :class="['transition-opacity duration-300', turn.copied && 'opacity-0']" />
+                      <Check :class="['text-success', turn.copied ? 'motion-safe:animate-pop' : 'opacity-0 transition-opacity duration-300']" />
+                    </span>{{ turn.copied ? '已复制' : '复制' }}
+                  </Button>
+                  <Button v-if="index === turns.length - 1" variant="ghost" size="xs" class="text-muted-foreground" :disabled="busy" @click="regenerate"><RefreshCw />重新生成</Button>
                   <template v-if="turn.id">
                     <span class="ml-auto">{{ turn.rating ? '感谢反馈' : '这个回答有帮助吗？' }}</span>
-                    <IconButton label="有帮助" size="icon-sm" variant="outline" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'positive' && 'border-ring bg-secondary disabled:opacity-100'" @click="sendFeedback(turn, 'positive')"><ThumbsUp /></IconButton>
-                    <IconButton label="需要改进" size="icon-sm" variant="outline" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'negative' && 'border-ring bg-secondary disabled:opacity-100'" @click="sendFeedback(turn, 'negative')"><ThumbsDown /></IconButton>
+                    <IconButton label="有帮助" size="icon-sm" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'positive' && 'bg-secondary text-[#5d6b37] disabled:opacity-100 motion-safe:[&_svg]:animate-pop'" @click="sendFeedback(turn, 'positive')"><ThumbsUp /></IconButton>
+                    <IconButton label="需要改进" size="icon-sm" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'negative' && 'bg-secondary text-[#5d6b37] disabled:opacity-100 motion-safe:[&_svg]:animate-pop'" @click="sendFeedback(turn, 'negative')"><ThumbsDown /></IconButton>
                   </template>
                 </div>
               </section>
@@ -439,21 +447,26 @@ function useSuggestion(text: string) {
 
           <!-- 对话中输入框固定在底部；空会话时随引导内容居中。 -->
           <div :class="turns.length > 0 && 'sticky bottom-0 mt-auto bg-linear-to-t from-background from-75% to-transparent pt-5'">
-            <form class="rounded-lg border bg-card shadow-[0_3px_12px_#202b1410]" @submit.prevent="ask">
+            <!-- 输入框不画边框，聚焦时用双环阴影（细实环 + 浅色光晕）表示 -->
+            <form
+              class="overflow-hidden rounded-lg bg-card shadow-[0_3px_12px_#202b1410] transition-shadow duration-200 has-[textarea:focus-visible]:shadow-[0_0_0_1px_var(--ring),0_0_0_4px_color-mix(in_oklab,var(--ring)_22%,transparent),0_3px_12px_#202b1414]"
+              @submit.prevent="ask"
+            >
               <Collapsible v-slot="{ open }" v-model:open="filtersOpen">
-                <CollapsibleContent>
-                  <div class="border-b px-4 pt-3.5 pb-3">
+                <!-- 常驻挂载，用 grid-rows 0fr → 1fr 过渡高度；收起后 invisible，筛选项不会被 Tab 选中 -->
+                <CollapsibleContent force-mount class="grid transition-[grid-template-rows,visibility] duration-250 ease-out data-[state=closed]:invisible data-[state=closed]:grid-rows-[0fr] data-[state=open]:grid-rows-[1fr]">
+                  <div class="min-h-0 overflow-hidden"><div class="bg-background/70 px-4 pt-3.5 pb-3">
                     <div class="grid grid-cols-5 gap-2.5 max-md:grid-cols-2 max-sm:grid-cols-1">
                       <div v-for="field in filterFields" :key="field.id" class="grid gap-1">
                         <Label :for="field.id" class="text-[11px] font-normal text-muted-foreground">{{ field.label }}</Label>
-                        <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8 bg-card text-xs md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔' : undefined" :aria-label="field.aria" />
+                        <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8 border-transparent bg-card text-xs shadow-none md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔' : undefined" :aria-label="field.aria" />
                       </div>
                     </div>
                     <p class="mt-2 text-[10px] text-muted-foreground">
                       本次提问及重新生成将按当前检索范围筛选，分类、标签、场景需与文章中的值完全一致。
                       <Button v-if="activeFilterCount" type="button" variant="link" class="h-auto p-0 text-[10px] text-link" @click="clearFilters">清除筛选</Button>
                     </p>
-                  </div>
+                  </div></div>
                 </CollapsibleContent>
                 <Label for="question" class="sr-only">{{ turns.length ? '继续提问' : '你的问题' }}</Label>
                 <Textarea
@@ -481,15 +494,15 @@ function useSuggestion(text: string) {
 
           <div v-if="!turns.length" class="mt-5 grid gap-2">
             <p class="mb-0.5 text-[11px] text-muted-foreground">试试这样提问</p>
-            <Button v-for="text in ['最近收录的文章有哪些主要主题？', '帮我总结一篇文章的核心观点']" :key="text" variant="outline" class="h-auto min-h-10 justify-between bg-transparent py-2 text-left text-xs font-normal whitespace-normal text-[#505a54]" @click="useSuggestion(text)">{{ text }} <ArrowUpRight class="text-[#87934d]" /></Button>
+            <Button v-for="text in ['最近收录的文章有哪些主要主题？', '帮我总结一篇文章的核心观点']" :key="text" variant="ghost" class="h-auto min-h-10 justify-between bg-card py-2 text-left text-xs font-normal whitespace-normal text-[#505a54]" @click="useSuggestion(text)">{{ text }} <ArrowUpRight class="text-[#87934d]" /></Button>
           </div>
         </section>
 
-        <aside v-if="citedTurn && wide" class="sticky top-14 h-[calc(100dvh-3.5rem)] border-l bg-[#fbfcfa]" aria-label="引用来源">
+        <aside v-if="citedTurn && wide" class="sticky top-14 h-[calc(100dvh-3.5rem)] bg-panel" aria-label="引用来源">
           <SourcePanel :sources="citedTurn.sources" :active-citation="citing!.citation" :question="citedTurn.question" closable @close="citing = null" @select="(citation) => openSources(citing!.turn, citation)" />
         </aside>
         <Sheet v-model:open="sourceSheetOpen">
-          <SheetContent side="right" class="w-[min(92vw,400px)] gap-0 bg-[#fbfcfa] p-0 pt-8 sm:max-w-none">
+          <SheetContent side="right" class="w-[min(92vw,400px)] gap-0 bg-panel p-0 pt-8 sm:max-w-none">
             <SheetTitle class="sr-only">引用来源</SheetTitle>
             <SheetDescription class="sr-only">本轮回答引用的文章与原文片段</SheetDescription>
             <SourcePanel v-if="citedTurn" :sources="citedTurn.sources" :active-citation="citing!.citation" :question="citedTurn.question" @select="(citation) => openSources(citing!.turn, citation)" />

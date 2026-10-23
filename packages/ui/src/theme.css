@@ -33,6 +33,8 @@
   --warning: #8a6a2f;
   --warning-soft: #fbf3e6;
   --link: #687a43;
+  /* web 侧栏与来源面板：比页面背景暗约 2%，靠明度差而不是边框分层 */
+  --panel: #f1f3ef;
   /* admin 深色侧边栏 */
   --sidebar: #202a26;
   --sidebar-foreground: #aeb9b2;
@@ -76,6 +78,7 @@
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
   --color-link: var(--link);
+  --color-panel: var(--panel);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
