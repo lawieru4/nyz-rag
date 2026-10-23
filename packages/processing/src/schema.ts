@@ -187,7 +187,7 @@ export const modelSettings = pgTable("model_settings", {
   maxTokens: integer().notNull().default(1024),
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
-  check("model_settings_capability_check", sql`${table.capability} IN ('chat', 'embedding', 'rerank')`),
+  check("model_settings_capability_check", sql`${table.capability} IN ('chat', 'embedding', 'rerank', 'review')`),
   check("model_settings_model_check", sql`btrim(${table.model}) <> ''`),
   check("model_settings_temperature_check", sql`${table.temperature} BETWEEN 0 AND 2`),
   check("model_settings_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 1048576`),

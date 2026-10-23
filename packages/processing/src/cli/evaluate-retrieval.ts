@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
-import { evaluateRetrieval, rankOffline, readEvaluationDataset, validateEvaluationDataset, type DatasetValidationOptions } from "../evaluation.js";
+import { evaluateRetrieval, filterSplit, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset, type DatasetValidationOptions, type Split } from "../evaluation.js";
 import { getDb, closeDatabase } from "../db.js";
 import { documents } from "../schema.js";
 import { keywordSearchChunks } from "../repository.js";
@@ -26,8 +26,13 @@ const ks = [...new Set((arg("k") ?? "1,3,5,10").split(",").map(Number))];
 
 if (ks.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new Error("--k must contain only positive integers");
 if (mode !== "offline" && mode !== "db") throw new Error(`Unknown --mode=${mode}; use offline or db`);
+const split = arg("split") as Split | undefined;
+if (split !== undefined && !SPLITS.includes(split)) throw new Error("--split must be dev or test");
 
-const dataset = await readEvaluationDataset(datasetPath);
+// 先校验完整数据集（ID 唯一等），再按 --split 取子集。
+const fullDataset = await readEvaluationDataset(datasetPath);
+const dataset = filterSplit(fullDataset, split);
+if (!dataset.questions.length) throw new Error(`No questions in split ${split}`);
 
 // --- Offline mode: rank using a stable keyword baseline against local clean files. ---
 // DB mode: query the actual indexed corpus; local files are optional (for validation only if --corpus is given).

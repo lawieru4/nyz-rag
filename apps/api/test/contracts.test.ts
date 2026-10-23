@@ -565,12 +565,13 @@ test("PUT /api/admin/model-settings/:capability — validates the capability and
   const res = await app.inject({ method: "PUT", url: "/api/admin/model-settings/chat", payload: { ...valid, temperature: 0.7, maxTokens: 131072 } });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().extra, undefined);
+  assert.equal((await app.inject({ method: "PUT", url: "/api/admin/model-settings/review", payload: { ...valid, temperature: 0 } })).statusCode, 200);
 });
 
 test("GET /api/admin/model-settings — returns every capability, null when unset", async () => {
   const app = buildTestApp();
   app.get("/api/admin/model-settings", async () => ({
-    chat: null, rerank: null,
+    chat: null, rerank: null, review: null,
     embedding: { capability: "embedding", providerId: UUID, model: "BAAI/bge-m3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01" },
   }));
   await app.ready();
@@ -578,7 +579,7 @@ test("GET /api/admin/model-settings — returns every capability, null when unse
   const res = await app.inject({ method: "GET", url: "/api/admin/model-settings" });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.json(), {
-    chat: null, rerank: null,
+    chat: null, rerank: null, review: null,
     embedding: { capability: "embedding", providerId: UUID, model: "BAAI/bge-m3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01" },
   });
 });

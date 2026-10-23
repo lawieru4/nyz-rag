@@ -9,6 +9,7 @@
     "db:migrate": "pnpm --filter @nyz-rag/processing db:migrate",
     "db:reindex-search": "pnpm --filter @nyz-rag/processing db:reindex-search",
     "evaluate:retrieval": "pnpm --filter @nyz-rag/processing evaluate:retrieval",
+    "evaluate:generate": "pnpm --filter @nyz-rag/processing evaluate:generate",
     "db:generate": "pnpm --filter @nyz-rag/processing db:generate"
   }
 }

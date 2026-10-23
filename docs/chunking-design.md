@@ -1,6 +1,6 @@
 # 文章切片方案：章节父块 + 语义子块
 
-状态：方案，未实施。实施前须先完成[真实问题评估集](evaluation-plan.md)并产出基线，切片改造以基线对比验收。
+状态：方案，未实施。实施前须先完成[评估集](evaluation-plan.md)（文章派生合成基线）并产出基线，切片改造以基线对比验收。
 
 范围：只处理 nyzdata 文章接口的正文（ProseMirror 解析结果中 `role === "content"` 的块）；图片、PDF 附件不参与（见 [TODO](todo.md)「暂不实施」）。
 
@@ -102,5 +102,5 @@
 2. `chunking.ts`：实现父块与子块生成（纯函数），单元测试覆盖短章节、长章节、无标题、表格、超长段落、纯图片文章；在 200 篇样本上输出统计（父块/子块数量与长度分布、章节路径正确性）。
 3. 迁移：新增 `document_sections`、`document_chunks.section_id`/`ord`、`documents.chunker_version`；`replaceDocumentChunks` 同时写入父块。
 4. 检索：`rag.ts` 增加按父块聚合与上下文组装；repository 召回结果带 `sectionId`；`message_chunks` 记录父块。
-5. 在临时 schema 上全量导入样本，对比基线：Recall@10、nDCG@10、Evidence Hit@5 不下降，上下文精度提升，分题型无明显退步后再上线。
+5. 对比基线（验收规则见 [evaluation-plan.md](evaluation-plan.md) 第十一节）：来源文章 Hit@10、MRR、Evidence Hit 不下降，分题型与具体度无明显退步后再上线。
 6. 业务库执行迁移并全量「重新处理」。

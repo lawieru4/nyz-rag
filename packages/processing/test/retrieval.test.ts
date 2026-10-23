@@ -213,6 +213,15 @@ test("chat and rerank errors hide provider bodies; rerank results are validated"
   });
   await assert.rejects(createRerankModel(selection("rerank-model"), noopLimiter()).rerank("q", ["a", "b"]), /rerank request failed with HTTP 401/);
 
+  // HTTP 200 的流中出现 error 事件（如供应商过载）时报错，而不是返回空回答。
+  globalThis.fetch = (async () => new Response(`data:${JSON.stringify({ choices: [{ delta: { role: "assistant" } }] })}\n\ndata: ${JSON.stringify({ error: { message: "overloaded test-secret", type: "upstream_error" } })}\n\n`, { status: 200 })) as unknown as typeof fetch;
+  await assert.rejects(consume(), (error: unknown) => {
+    assert(error instanceof Error);
+    assert.match(error.message, /reported an error in the stream/);
+    assert.doesNotMatch(error.message, /overloaded|test-secret/);
+    return true;
+  });
+
   let body: Record<string, unknown> = {};
   globalThis.fetch = (async (_input: string, init?: RequestInit) => {
     body = JSON.parse(String(init?.body));

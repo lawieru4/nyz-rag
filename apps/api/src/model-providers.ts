@@ -5,7 +5,7 @@ import {
 } from "@nyz-rag/processing";
 import type { ListProviderModelsRequest, ModelCapability, SaveModelProviderRequest, SaveModelSettingRequest } from "@nyz-rag/types";
 
-const CAPABILITY_LABELS: Record<ModelCapability, string> = { chat: "Chat", embedding: "Embedding", rerank: "Rerank" };
+const CAPABILITY_LABELS: Record<ModelCapability, string> = { chat: "Chat", embedding: "Embedding", rerank: "Rerank", review: "审核" };
 
 function validBaseUrl(url: string) {
   if (!url) return true;
@@ -89,7 +89,7 @@ export const modelProviderRoutes: FastifyPluginAsync = async (app) => {
     return providerModels(saved, () => providerCredential(saved, "model list"), reply);
   });
 
-  // ---- 业务模型：Chat / Embedding / Rerank 各选一个供应商与模型 ----
+  // ---- 业务模型：Chat / Embedding / Rerank / 审核各选一个供应商与模型 ----
 
   app.get("/api/admin/model-settings", async () => getModelSettings());
 
