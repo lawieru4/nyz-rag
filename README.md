@@ -84,9 +84,20 @@ API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器�
 pnpm evaluate:retrieval --mode=offline
 # 已入库文章上的关键词检索基线，只读，不迁移或填充数据库
 pnpm evaluate:retrieval --mode=db
+# 只评估 v2 数据集的 dev 或 test 划分
+pnpm evaluate:retrieval --mode=db --dataset=<JSON绝对路径> --split=dev
 ```
 
-默认评估集为 `packages/processing/test/evaluation/retrieval-dataset.json`，包含 50 条文章衍生合成问题，不是真实用户问题，也未经过人工标注复核。离线模式默认读取 `.nyz-data/nyz-articles/clean`（样本未随仓库提交），可用 `--corpus=<清洗目录绝对路径>` 覆盖；数据库模式不依赖本地样本。支持 `--dataset=<JSON绝对路径>` 和 `--k=1,3,5,10`。结果为文章去重后的 Recall@K、MRR、线性增益 nDCG@K；数据库模式按就绪文档实际覆盖范围报告缺失标注数量，有缺失时返回非零退出码，不能将部分语料指标当完整基线。数据库候选为前 `max(20,K)` 个切片，再按文章去重，不代表全库文章级排序。这两种基线均不评估向量、Rerank 或回答质量，真实问题人工标注与混合检索评估仍待补充。
+默认评估集为 `packages/processing/test/evaluation/retrieval-dataset.json`，包含 50 条文章衍生合成问题，不是真实用户问题，也未经过人工标注复核。离线模式默认读取 `.nyz-data/nyz-articles/clean`（样本未随仓库提交），可用 `--corpus=<清洗目录绝对路径>` 覆盖；数据库模式不依赖本地样本。支持 `--dataset=<JSON绝对路径>` 和 `--k=1,3,5,10`。结果为文章去重后的 Recall@K、MRR、线性增益 nDCG@K；数据库模式按就绪文档实际覆盖范围报告缺失标注数量，有缺失时返回非零退出码，不能将部分语料指标当完整基线。数据库候选为前 `max(20,K)` 个切片，再按文章去重，不代表全库文章级排序。这两种基线均不评估向量、Rerank 或回答质量，混合检索评估仍待补充。
+
+合成评估集生成命令（方案见 `docs/evaluation-plan.md`）：按文章分层抽样，用业务模型中的 Chat 模型生成问题、参考答案与原文证据，经程序校验和「审核」模型审核，未通过时带原因重试，最多 3 次。工作文件在 `.nyz-data/evaluation/<名称>/`，中断后重新运行会从未完成的文章继续。会调用模型并产生费用，数据库只读。
+
+```sh
+# 首次运行冻结语料快照并抽样（默认 400 篇、种子 20261023）；--limit 只处理前 N 篇（试点）
+pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --limit=50 --concurrency=3
+# 全部样本完成后导出 schemaVersion 2 数据集（默认写入 packages/processing/test/evaluation/<名称>.json）
+pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --freeze
+```
 
 ### 共享 Docker 服务（默认）
 
