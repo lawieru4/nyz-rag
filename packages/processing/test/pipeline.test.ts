@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import pg from "pg";
 import { closeDatabase, getPool, migrate, withDocumentWork, withTransaction } from "../src/db.js";
-import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, upsertDocument } from "../src/repository.js";
+import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, saveModelSetting, upsertDocument } from "../src/repository.js";
 import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
@@ -28,6 +28,10 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   let chatAborted = false;
   // 模拟 nyzdata 文章接口：tagKey=1 为两篇文章，第二篇的标题与 updateTime 可在测试中修改；tagKey=2 为两篇正文相同的文章。
   const articleToken = "integration-article-token";
+  // 后台配置的 token 与模型密钥加密入库；测试进程（直接写库）与 API/Worker 子进程使用同一主密钥。
+  const previousSecretKey = process.env.NYZ_SECRET_KEY;
+  const secretKey = randomBytes(32).toString("hex");
+  process.env.NYZ_SECRET_KEY = secretKey;
   const article = (key: string, title: string, updateTime: number, body = `${title}的正文结论。`) => ({
     _key: key, title, updateTime, createTime: 1, summary: "摘要", tagName: "科研", tagArray: [{ name: "钠电" }], creator: { nickName: "作者" },
     content: JSON.stringify({ type: "doc", content: [
@@ -56,6 +60,12 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
         const key = url.searchParams.get("articleKey") ?? "";
         response.end(JSON.stringify({ status: 200, data: articles.get(key) ?? duplicateArticles.get(key) }));
       }
+      return;
+    }
+    if (request.url === "/v1/models") {
+      if (request.headers.authorization !== "Bearer integration-test-key") { response.writeHead(401).end("do-not-leak-provider-body"); return; }
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ data: [{ id: "test-embedding" }, { id: "test-chat" }] }));
       return;
     }
     if (request.url !== "/v1/embeddings" && request.url !== "/v1/chat/completions") { response.writeHead(404).end(); return; }
@@ -128,8 +138,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), entry], {
       cwd: new URL("../../../", import.meta.url),
       env: {
-        ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), TEST_EMBEDDING_KEY: "integration-test-key", DOCUMENT_QUEUE_NAME: `test-${schema}`,
-        NYZ_ARTICLE_TOKEN: articleToken, NYZ_ARTICLE_REQUEST_DELAY_MS: "1000",
+        ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), DOCUMENT_QUEUE_NAME: `test-${schema}`,
+        NYZ_SECRET_KEY: secretKey, NYZ_ARTICLE_REQUEST_DELAY_MS: "1000",
         ADMIN_USERNAME: "admin", ADMIN_PASSWORD: adminPassword, ADMIN_COOKIE_SECURE: "false",
         // 不发送真实邮件：开发模式下验证码写入 API 日志，由测试从输出中读取。
         SMTP_HOST: "", USER_COOKIE_SECURE: "false",
@@ -168,7 +178,14 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       ]);
       return id;
     });
-    await createModelProvider({ name: "Local test", provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, embeddingModel: "test-embedding", chatModel: "test-chat", rerankModel: "", credentialEnv: "TEST_EMBEDDING_KEY", enabled: true, isDefault: true });
+    // 密钥保存在后台（加密），不经过环境变量；Worker 与 API 解密后带上认证头。供应商只描述连接，模型在业务模型中选择。
+    const localProvider = await createModelProvider({
+      name: "Local test", provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: "integration-test-key", enabled: true,
+    });
+    assert.equal(localProvider.hasApiKey, true);
+    await saveModelSetting("embedding", { providerId: localProvider.id, model: "test-embedding" });
+    await saveModelSetting("chat", { providerId: localProvider.id, model: "test-chat" });
+    assert.doesNotMatch(JSON.stringify((await getPool().query("SELECT api_key_ciphertext FROM model_providers")).rows), /integration-test-key/, "keys are stored encrypted");
     // 模拟升级前已切片的数据：Worker 启动时应补齐关键词检索词项。
     await getPool().query("UPDATE document_chunks SET search_vector = ''::tsvector WHERE document_id = $1", [documentId]);
     start("apps/api/src/index.ts");
@@ -196,16 +213,45 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(knowledgeUpdated.status, 200);
     assert.equal((await knowledgeUpdated.json()).description, "updated");
     assert.equal((await (await fetch(`${apiBase}/api/admin/knowledge-bases`)).json()).length, 1);
-    const providerInput = { name: "Disabled provider", provider: "OpenAI 兼容", baseUrl: "", chatModel: "test", embeddingModel: "", rerankModel: "", credentialEnv: "UNUSED_KEY", enabled: false, isDefault: false };
-    const providerCreated = await fetch(`${apiBase}/api/admin/model-providers`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(providerInput) });
+    const providerInput = { name: "Disabled provider", provider: "OpenAI 兼容", baseUrl: "", credentialEnv: "UNUSED_KEY", enabled: false };
+    const providerCreated = await fetch(`${apiBase}/api/admin/model-providers`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...providerInput, apiKey: "disabled-secret" }) });
     assert.equal(providerCreated.status, 201);
     const provider = await providerCreated.json();
-    assert.equal(provider.temperature, 0.3);
-    assert.equal(provider.maxTokens, 1024);
-    const providerUpdated = await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ ...providerInput, temperature: 0.7, maxTokens: 512 }) });
+    assert.equal(provider.hasApiKey, true);
+    assert.equal(provider.apiKey, undefined);
+    const providerUpdated = await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ ...providerInput, name: "Renamed provider" }) });
     assert.equal(providerUpdated.status, 200);
-    assert.equal((await providerUpdated.json()).temperature, 0.7);
+    const updatedProvider = await providerUpdated.json();
+    assert.equal(updatedProvider.name, "Renamed provider");
+    assert.equal(updatedProvider.hasApiKey, true, "omitting apiKey keeps the saved key");
+    const providerCleared = await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ ...providerInput, clearApiKey: true }) });
+    assert.equal((await providerCleared.json()).hasApiKey, false);
+    // 测试连接：使用已保存供应商的密钥（不在请求中传密钥）；业务模型选择时按供应商 ID 获取模型。
+    const listed = await fetch(`${apiBase}/api/admin/model-providers/models`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, providerId: localProvider.id }) });
+    assert.deepEqual(await listed.json(), { models: ["test-chat", "test-embedding"] });
+    assert.deepEqual(await (await fetch(`${apiBase}/api/admin/model-providers/${localProvider.id}/models`)).json(), { models: ["test-chat", "test-embedding"] });
+    const unauthorized = await fetch(`${apiBase}/api/admin/model-providers/models`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: "wrong-key" }) });
+    assert.equal(unauthorized.status, 502);
     assert.equal((await (await fetch(`${apiBase}/api/admin/model-providers`)).json()).length, 2);
+
+    // 业务模型：各用途独立选择供应商与模型；停用的供应商不能选，被使用的供应商不能删除。
+    const modelSettings = await (await fetch(`${apiBase}/api/admin/model-settings`)).json();
+    assert.equal(modelSettings.embedding.providerId, localProvider.id);
+    assert.equal(modelSettings.embedding.model, "test-embedding");
+    assert.equal(modelSettings.chat.temperature, 0.3);
+    assert.equal(modelSettings.rerank, null);
+    const settingUrl = (capability: string) => `${apiBase}/api/admin/model-settings/${capability}`;
+    assert.equal((await fetch(settingUrl("rerank"), { method: "PUT", headers: jsonHeaders, body: JSON.stringify({ providerId: provider.id, model: "test-rerank" }) })).status, 400, "disabled providers cannot be selected");
+    const chatSetting = await fetch(settingUrl("chat"), { method: "PUT", headers: jsonHeaders, body: JSON.stringify({ providerId: localProvider.id, model: " test-chat ", temperature: 0.7, maxTokens: 512 }) });
+    assert.equal(chatSetting.status, 200);
+    assert.deepEqual({ ...(await chatSetting.json()), updatedAt: undefined }, { capability: "chat", providerId: localProvider.id, model: "test-chat", temperature: 0.7, maxTokens: 512, updatedAt: undefined });
+    const rerankSetting = await fetch(settingUrl("rerank"), { method: "PUT", headers: jsonHeaders, body: JSON.stringify({ providerId: localProvider.id, model: "test-rerank" }) });
+    assert.equal(rerankSetting.status, 200);
+    assert.equal((await fetch(settingUrl("rerank"), { method: "DELETE" })).status, 204);
+    assert.equal((await (await fetch(`${apiBase}/api/admin/model-settings`)).json()).rerank, null);
+    const inUse = await fetch(`${apiBase}/api/admin/model-providers/${localProvider.id}`, { method: "DELETE" });
+    assert.equal(inUse.status, 409);
+    assert.match((await inUse.json()).error, /Chat、Embedding/);
     assert.equal((await fetch(`${apiBase}/api/admin/model-providers/${provider.id}`, { method: "DELETE" })).status, 204);
 
     assert.equal((await post("embed")).status, 202);
@@ -356,8 +402,16 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal((await getPool().query("SELECT 1 FROM document_chunks WHERE document_id = $1", [documentId])).rowCount, 0);
     assert.ok(requested >= 4);
 
-    // 文章 API 来源：地址不能带 token；同步后入库、切片并自动向量化；updateTime 变化后重新解析。
+    // 文章 API 来源：token 在后台配置（只写不读）；地址不能带 token；同步后入库、切片并自动向量化；updateTime 变化后重新解析。
     const json = { "content-type": "application/json" };
+    const tokenPath = `${apiBase}/api/admin/settings/article-token`;
+    assert.equal((await (await fetch(tokenPath)).json()).configured, false);
+    const savedToken = await fetch(tokenPath, { method: "PUT", headers: json, body: JSON.stringify({ value: articleToken }) });
+    assert.equal(savedToken.status, 200);
+    const tokenStatus = await savedToken.text();
+    assert.doesNotMatch(tokenStatus, new RegExp(articleToken));
+    assert.equal(JSON.parse(tokenStatus).configured, true);
+    assert.doesNotMatch(JSON.stringify((await getPool().query("SELECT ciphertext FROM secret_settings")).rows), new RegExp(articleToken), "the token is stored encrypted");
     const listUrl = `http://127.0.0.1:${mockPort}/nyz/article?tagKey=1`;
     assert.equal((await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Articles", url: `${listUrl}&token=x`, kind: "文章 API", frequency: "" }) })).status, 400);
     const articleSource = await (await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Articles", url: listUrl, kind: "文章 API", frequency: "" }) })).json();
@@ -460,7 +514,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(promoted.processingStatus, "chunked");
     assert.equal(promoted.duplicateOf, undefined);
 
-    assert.doesNotMatch(output, new RegExp(articleToken));
+    for (const secret of [articleToken, secretKey, "integration-test-key", "disabled-secret", "do-not-leak-provider-body"]) assert.doesNotMatch(output, new RegExp(secret));
     assert.doesNotMatch(output, new RegExp(adminPassword));
     assert.doesNotMatch(output, /integration password/);
     assert.equal((await fetch(`${apiBase}/api/admin/auth/logout`, { method: "POST" })).status, 204);
@@ -476,5 +530,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previousUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = previousUrl;
+    if (previousSecretKey === undefined) delete process.env.NYZ_SECRET_KEY;
+    else process.env.NYZ_SECRET_KEY = previousSecretKey;
   }
 });

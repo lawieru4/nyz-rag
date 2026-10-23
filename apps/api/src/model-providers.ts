@@ -1,6 +1,11 @@
-import type { FastifyPluginAsync } from "fastify";
-import { createModelProvider, deleteModelProvider, listModelProviders, updateModelProvider } from "@nyz-rag/processing";
-import type { SaveModelProviderRequest } from "@nyz-rag/types";
+import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import {
+  createModelProvider, deleteModelProvider, deleteModelSetting, getModelSettings, listModelProviderConfigs, listModelProviders, listProviderModels, providerCredential,
+  saveModelSetting, secretKeyConfigured, updateModelProvider, type ModelProviderConfig,
+} from "@nyz-rag/processing";
+import type { ListProviderModelsRequest, ModelCapability, SaveModelProviderRequest, SaveModelSettingRequest } from "@nyz-rag/types";
+
+const CAPABILITY_LABELS: Record<ModelCapability, string> = { chat: "Chat", embedding: "Embedding", rerank: "Rerank" };
 
 function validBaseUrl(url: string) {
   if (!url) return true;
@@ -8,23 +13,95 @@ function validBaseUrl(url: string) {
   catch { return false; }
 }
 
+/** 请求体的业务校验；不通过时回复 4xx/503 并返回 false。 */
+function checkProvider(body: SaveModelProviderRequest, reply: FastifyReply): boolean {
+  const invalid = !validBaseUrl(body.baseUrl) ? "baseUrl must be a valid http(s) URL"
+    : body.apiKey?.trim() && body.clearApiKey ? "apiKey 与 clearApiKey 不能同时提供"
+    : null;
+  if (invalid) {
+    reply.code(400).send({ error: invalid });
+    return false;
+  }
+  if (body.apiKey?.trim() && !secretKeyConfigured()) {
+    reply.code(503).send({ error: "服务端未配置可用的 NYZ_SECRET_KEY，无法保存密钥" });
+    return false;
+  }
+  return true;
+}
+
+/** 列出供应商的模型；错误信息由 processing 生成，不含地址、密钥或响应正文。 */
+async function providerModels(provider: Pick<ModelProviderConfig, "name" | "provider" | "baseUrl">, apiKey: () => string | null, reply: FastifyReply) {
+  try {
+    return { models: await listProviderModels(provider, apiKey()) };
+  } catch (error) {
+    return reply.code(502).send({ error: `获取模型列表失败：${error instanceof Error ? error.message : "unknown error"}` });
+  }
+}
+
 export const modelProviderRoutes: FastifyPluginAsync = async (app) => {
+  // ---- 供应商：只描述连接（地址、密钥、启用） ----
+
   app.get("/api/admin/model-providers", async () => listModelProviders());
 
   app.post<{ Body: SaveModelProviderRequest }>("/api/admin/model-providers", async (request, reply) => {
-    if (!validBaseUrl(request.body.baseUrl)) return reply.code(400).send({ error: "baseUrl must be a valid http(s) URL" });
+    if (!checkProvider(request.body, reply)) return reply;
     return reply.code(201).send(await createModelProvider({ ...request.body, name: request.body.name.trim() }));
   });
 
   app.patch<{ Params: { id: string }; Body: SaveModelProviderRequest }>("/api/admin/model-providers/:id", async (request, reply) => {
-    if (!validBaseUrl(request.body.baseUrl)) return reply.code(400).send({ error: "baseUrl must be a valid http(s) URL" });
+    if (!checkProvider(request.body, reply)) return reply;
     const updated = await updateModelProvider(request.params.id, { ...request.body, name: request.body.name.trim() });
     if (!updated) return reply.code(404).send({ error: "model provider not found" });
     return updated;
   });
 
   app.delete<{ Params: { id: string } }>("/api/admin/model-providers/:id", async (request, reply) => {
-    if (!await deleteModelProvider(request.params.id)) return reply.code(404).send({ error: "model provider not found" });
+    const { deleted, usedBy } = await deleteModelProvider(request.params.id);
+    if (usedBy.length) {
+      const labels = (Object.keys(CAPABILITY_LABELS) as ModelCapability[]).filter((capability) => usedBy.includes(capability)).map((capability) => CAPABILITY_LABELS[capability]);
+      return reply.code(409).send({ error: `该供应商正用于 ${labels.join("、")} 模型，请先更换业务模型` });
+    }
+    if (!deleted) return reply.code(404).send({ error: "model provider not found" });
+    return reply.code(204).send();
+  });
+
+  // 测试连接：按表单中的地址获取可选模型。密钥依次取：表单填写的 apiKey、已保存供应商的密钥（providerId）、credentialEnv 指定的环境变量；都没有时不带认证头。
+  app.post<{ Body: ListProviderModelsRequest }>("/api/admin/model-providers/models", async (request, reply) => {
+    const { apiKey, providerId, credentialEnv, ...endpoint } = request.body;
+    if (!validBaseUrl(endpoint.baseUrl)) return reply.code(400).send({ error: "baseUrl must be a valid http(s) URL" });
+    let saved: ModelProviderConfig | undefined;
+    if (!apiKey?.trim() && providerId) {
+      saved = (await listModelProviderConfigs()).find((provider) => provider.id === providerId);
+      if (!saved) return reply.code(404).send({ error: "model provider not found" });
+    } else if (!apiKey?.trim() && credentialEnv?.trim() && !process.env[credentialEnv.trim()]?.trim()) {
+      return reply.code(400).send({ error: `环境变量 ${credentialEnv.trim()} 未设置` });
+    }
+    const key = () => apiKey?.trim()
+      || (saved ? providerCredential({ ...saved, credentialEnv: credentialEnv ?? saved.credentialEnv }, "model list") : null)
+      || (credentialEnv?.trim() ? process.env[credentialEnv.trim()]!.trim() : null);
+    return providerModels({ name: endpoint.name ?? "", provider: endpoint.provider, baseUrl: endpoint.baseUrl }, key, reply);
+  });
+
+  // 已保存供应商的可选模型，供业务模型选择。
+  app.get<{ Params: { id: string } }>("/api/admin/model-providers/:id/models", async (request, reply) => {
+    const saved = (await listModelProviderConfigs()).find((provider) => provider.id === request.params.id);
+    if (!saved) return reply.code(404).send({ error: "model provider not found" });
+    return providerModels(saved, () => providerCredential(saved, "model list"), reply);
+  });
+
+  // ---- 业务模型：Chat / Embedding / Rerank 各选一个供应商与模型 ----
+
+  app.get("/api/admin/model-settings", async () => getModelSettings());
+
+  app.put<{ Params: { capability: ModelCapability }; Body: SaveModelSettingRequest }>("/api/admin/model-settings/:capability", async (request, reply) => {
+    const provider = (await listModelProviders()).find((item) => item.id === request.body.providerId);
+    if (!provider) return reply.code(400).send({ error: "供应商不存在" });
+    if (!provider.enabled) return reply.code(400).send({ error: "供应商已停用，请先启用" });
+    return saveModelSetting(request.params.capability, request.body);
+  });
+
+  app.delete<{ Params: { capability: ModelCapability } }>("/api/admin/model-settings/:capability", async (request, reply) => {
+    await deleteModelSetting(request.params.capability);
     return reply.code(204).send();
   });
 };

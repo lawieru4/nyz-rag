@@ -2,7 +2,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus,
+  ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
 } from "@nyz-rag/types";
 
 // pgvector 列不限维度，以支持不同 Embedding 模型；drizzle 内置 vector 类型要求固定维度，因此自定义。
@@ -161,27 +161,40 @@ export const knowledgeBases = pgTable("knowledge_bases", {
   check("knowledge_bases_max_context_length_check", sql`${table.maxContextLength} >= 256`),
 ]);
 
-// 只保存密钥的环境变量名，密钥值不入库。
+// 供应商只描述连接：密钥优先使用后台保存的密文（secrets.ts，绑定供应商 ID），其次读取 credential_env 指定的环境变量；都没有时不带认证头（本地模型）。
 export const modelProviders = pgTable("model_providers", {
   id: text().primaryKey(),
   name: text().notNull(),
   provider: text().notNull(),
   baseUrl: text().notNull().default(""),
-  chatModel: text().notNull(),
-  embeddingModel: text().notNull().default(""),
-  rerankModel: text().notNull().default(""),
-  temperature: doublePrecision().notNull().default(0.3),
-  maxTokens: integer().notNull().default(1024),
-  credentialEnv: text().notNull(),
+  credentialEnv: text().notNull().default(""),
+  apiKeyCiphertext: text(),
   enabled: boolean().notNull().default(false),
-  isDefault: boolean().notNull().default(false),
   createdAt: timestamptz().notNull().defaultNow(),
   updatedAt: timestamptz().notNull().defaultNow(),
+});
+
+// 业务模型：Chat、Embedding、Rerank 各选一个供应商与模型；temperature / max_tokens 只用于 Chat。被使用的供应商不能删除。
+export const modelSettings = pgTable("model_settings", {
+  capability: text().$type<ModelCapability>().primaryKey(),
+  providerId: text().notNull().references(() => modelProviders.id, { onDelete: "restrict" }),
+  model: text().notNull(),
+  temperature: doublePrecision().notNull().default(0.3),
+  maxTokens: integer().notNull().default(1024),
+  updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
-  uniqueIndex("model_providers_single_default_idx").on(table.isDefault).where(sql`${table.isDefault}`),
-  check("model_providers_temperature_check", sql`${table.temperature} BETWEEN 0 AND 2`),
-  check("model_providers_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
+  check("model_settings_capability_check", sql`${table.capability} IN ('chat', 'embedding', 'rerank')`),
+  check("model_settings_model_check", sql`btrim(${table.model}) <> ''`),
+  check("model_settings_temperature_check", sql`${table.temperature} BETWEEN 0 AND 2`),
+  check("model_settings_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 32768`),
 ]);
+
+// 后台配置的全局密钥（如 nyzdata 文章接口 token），只存 secrets.ts 加密后的密文。
+export const secretSettings = pgTable("secret_settings", {
+  name: text().primaryKey(),
+  ciphertext: text().notNull(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+});
 
 // 管理员账号：由超级管理员（或 seed）创建；email 存小写形式；isSuper 仅首个 seed 账号为 true。
 export const adminAccounts = pgTable("admin_accounts", {

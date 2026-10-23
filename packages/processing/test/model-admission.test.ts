@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { test, describe } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
+import type { ModelSelection } from "../src/provider.js";
 import { AdmissionError, type AdmissionLimiter } from "../src/index.js";
 import { embedChunks } from "../src/embedding.js";
 import { createChatModel, createRerankModel } from "../src/models.js";
@@ -26,19 +27,16 @@ function provider(overrides: Partial<ModelProviderRecord> = {}): ModelProviderRe
     name: "Compatible",
     provider: "compatible",
     baseUrl: "https://api.example/v1",
-    chatModel: "chat-model",
-    embeddingModel: "emb-model",
-    rerankModel: "rerank-model",
-    temperature: 0.1,
-    maxTokens: 128,
     credentialEnv: "MODEL_ADMISSION_TEST_KEY",
     enabled: true,
-    isDefault: true,
+    hasApiKey: false,
     createdAt: "",
     updatedAt: "",
     ...overrides,
   };
 }
+
+const selection = (model: string): ModelSelection => ({ provider: provider(), model, temperature: 0.1, maxTokens: 128 });
 
 /** Set / restore env and globalThis.fetch around a test. */
 function withFetch(
@@ -78,7 +76,7 @@ describe("no fetch when admission is denied", () => {
 
     const err = admission429();
     await assert.rejects(
-      () => embedChunks(provider(), ["hello"], denyingLimiter(err)),
+      () => embedChunks(selection("emb-model"), ["hello"], denyingLimiter(err)),
       (e: unknown) => { assert.strictEqual(e, err); return true; },
     );
     assert.equal(fetchCalled, false, "fetch must not be called when admission is denied");
@@ -90,7 +88,7 @@ describe("no fetch when admission is denied", () => {
     globalThis.fetch = (async () => { fetchCalled = true; return new Response("", { status: 200 }); }) as typeof fetch;
 
     const err = admission503();
-    const gen = createChatModel(provider(), denyingLimiter(err)).streamChat([{ role: "user", content: "hi" }]);
+    const gen = createChatModel(selection("chat-model"), denyingLimiter(err)).streamChat([{ role: "user", content: "hi" }]);
     await assert.rejects(
       async () => { for await (const _ of gen) { /* drain */ } },
       (e: unknown) => { assert.strictEqual(e, err); return true; },
@@ -105,7 +103,7 @@ describe("no fetch when admission is denied", () => {
 
     const err = admission429();
     await assert.rejects(
-      () => createRerankModel(provider(), denyingLimiter(err)).rerank("q", ["a", "b"]),
+      () => createRerankModel(selection("rerank-model"), denyingLimiter(err)).rerank("q", ["a", "b"]),
       (e: unknown) => { assert.strictEqual(e, err); return true; },
     );
     assert.equal(fetchCalled, false, "fetch must not be called when admission is denied");
@@ -123,7 +121,7 @@ describe("lease released on errors", () => {
       close: async () => undefined,
     };
     await assert.rejects(
-      () => embedChunks(provider(), ["hello"], trackingLimiter),
+      () => embedChunks(selection("emb-model"), ["hello"], trackingLimiter),
       /HTTP 500/,
     );
     assert.equal(released, true, "lease must be released even when the HTTP request fails");
@@ -136,7 +134,7 @@ describe("lease released on errors", () => {
       acquire: async () => ({ release: async () => { released = true; } }),
       close: async () => undefined,
     };
-    const gen = createChatModel(provider(), trackingLimiter).streamChat([{ role: "user", content: "hi" }]);
+    const gen = createChatModel(selection("chat-model"), trackingLimiter).streamChat([{ role: "user", content: "hi" }]);
     await assert.rejects(
       async () => { for await (const _ of gen) { /* drain */ } },
       /HTTP 401/,
@@ -152,7 +150,7 @@ describe("lease released on errors", () => {
       close: async () => undefined,
     };
     await assert.rejects(
-      () => createRerankModel(provider(), trackingLimiter).rerank("q", ["doc-a"]),
+      () => createRerankModel(selection("rerank-model"), trackingLimiter).rerank("q", ["doc-a"]),
       /HTTP 503/,
     );
     assert.equal(released, true, "lease must be released when rerank HTTP request fails");
@@ -187,7 +185,7 @@ describe("chat generator lease lifecycle", () => {
       close: async () => undefined,
     };
     const chunks: string[] = [];
-    for await (const chunk of createChatModel(provider(), trackingLimiter).streamChat([{ role: "user", content: "hi" }])) {
+    for await (const chunk of createChatModel(selection("chat-model"), trackingLimiter).streamChat([{ role: "user", content: "hi" }])) {
       if (chunk.type === "token") chunks.push(chunk.text);
     }
     assert.deepEqual(chunks, ["token1", "token2"]);
@@ -203,7 +201,7 @@ describe("chat generator lease lifecycle", () => {
       close: async () => undefined,
     };
     // Break after first token
-    for await (const chunk of createChatModel(provider(), trackingLimiter).streamChat([{ role: "user", content: "hi" }])) {
+    for await (const chunk of createChatModel(selection("chat-model"), trackingLimiter).streamChat([{ role: "user", content: "hi" }])) {
       if (chunk.type === "token") break;
     }
     assert.equal(released, true, "lease must be released when consumer breaks early");
@@ -232,7 +230,7 @@ test("each embedding batch acquires exactly one lease", async (context) => {
 
   // 65 inputs → ceil(65/32) = 3 batches
   const inputs = Array.from({ length: 65 }, (_, i) => `text-${i}`);
-  await embedChunks(provider(), inputs, countingLimiter);
+  await embedChunks(selection("emb-model"), inputs, countingLimiter);
   assert.equal(acquireCount, 3, "3 batches → 3 lease acquisitions");
   assert.equal(releaseCount, 3, "3 leases must all be released");
 });

@@ -1,11 +1,12 @@
-// 统一模型接口：Embedding、Chat（流式）与 Rerank，均按 OpenAI 兼容协议调用供应商配置中的模型。
+// 统一模型接口：Embedding、Chat（流式）与 Rerank，均按 OpenAI 兼容协议调用业务模型配置选定的供应商与模型。
 // 错误信息不包含地址、密钥或供应商响应正文。
-import type { ModelProviderRecord } from "@nyz-rag/types";
 import { embedChunks } from "./embedding.js";
 import { acquireModelLease, type AdmissionLimiter } from "./model-admission.js";
-import { providerCredential, providerUrl } from "./provider.js";
+import { authorizationHeaders, providerCredential, providerUrl, type ModelProviderConfig, type ModelSelection, type ModelTarget } from "./provider.js";
 
 const CHAT_TIMEOUT_MS = 120_000;
+const MODEL_LIST_TIMEOUT_MS = 15_000;
+const MAX_LISTED_MODELS = 2000;
 const RERANK_TIMEOUT_MS = 30_000;
 
 export interface EmbeddingModel {
@@ -40,25 +41,46 @@ export interface RerankModel {
 /** 本模块生成的错误，信息可直接展示；其他异常（网络、解析）统一替换为不含细节的信息。 */
 class ModelError extends Error {}
 
-/** 唯一的启用默认供应商；数据库唯一索引保证最多一个默认。 */
-export function selectDefaultProvider(providers: ModelProviderRecord[]): ModelProviderRecord | null {
-  return providers.find((provider) => provider.enabled && provider.isDefault) ?? null;
+/** 供应商的可用模型（OpenAI 兼容 GET /models 的 data[].id），供后台选择模型；去重并排序。 */
+export async function listProviderModels(provider: Pick<ModelProviderConfig, "name" | "provider" | "baseUrl">, apiKey: string | null): Promise<string[]> {
+  const url = providerUrl(provider, "models", "model list");
+  let response: Response;
+  try {
+    response = await fetch(url, { headers: authorizationHeaders(apiKey), signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS) });
+  } catch {
+    throw new ModelError("The model list request failed or timed out.");
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new ModelError(`The model list request failed with HTTP ${response.status}.`);
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new ModelError("The provider returned an invalid model list.");
+  }
+  const data = typeof payload === "object" && payload !== null ? (payload as { data?: unknown }).data : undefined;
+  if (!Array.isArray(data)) throw new ModelError("The provider returned an invalid model list.");
+  const ids = data.map((item) => typeof item === "object" && item !== null ? (item as { id?: unknown }).id : undefined)
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0);
+  return [...new Set(ids)].sort().slice(0, MAX_LISTED_MODELS);
 }
 
-export function createEmbeddingModel(provider: ModelProviderRecord, limiter?: AdmissionLimiter): EmbeddingModel {
+export function createEmbeddingModel(selection: ModelTarget, limiter?: AdmissionLimiter): EmbeddingModel {
   return {
-    model: provider.embeddingModel.trim(),
-    embedDocuments: (texts) => embedChunks(provider, texts, limiter),
-    embedQuery: async (text) => (await embedChunks(provider, [text], limiter))[0],
+    model: selection.model.trim(),
+    embedDocuments: (texts) => embedChunks(selection, texts, limiter),
+    embedQuery: async (text) => (await embedChunks(selection, [text], limiter))[0],
   };
 }
 
-async function postJson(url: string, apiKey: string, body: unknown, signal: AbortSignal, label: string): Promise<Response> {
+async function postJson(url: string, apiKey: string | null, body: unknown, signal: AbortSignal, label: string): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      headers: { ...authorizationHeaders(apiKey), "content-type": "application/json" },
       body: JSON.stringify(body),
       signal,
     });
@@ -96,8 +118,8 @@ async function* readServerSentEvents(body: ReadableStream<Uint8Array>): AsyncGen
   }
 }
 
-export function createChatModel(provider: ModelProviderRecord, limiter?: AdmissionLimiter): ChatModel {
-  const model = provider.chatModel.trim();
+export function createChatModel({ provider, model: configuredModel, temperature, maxTokens }: ModelSelection, limiter?: AdmissionLimiter): ChatModel {
+  const model = configuredModel.trim();
   return {
     model,
     async *streamChat(messages, options = {}) {
@@ -111,7 +133,7 @@ export function createChatModel(provider: ModelProviderRecord, limiter?: Admissi
         const timeout = AbortSignal.timeout(CHAT_TIMEOUT_MS);
         const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
         const response = await postJson(url, apiKey, {
-          model, messages, temperature: provider.temperature, max_tokens: provider.maxTokens, stream: true, stream_options: { include_usage: true },
+          model, messages, temperature, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true },
         }, signal, "chat");
         if (!response.body) throw new ModelError("The chat provider returned an empty response.");
         try {
@@ -143,8 +165,8 @@ export function createChatModel(provider: ModelProviderRecord, limiter?: Admissi
 }
 
 /** 兼容 Jina / Cohere / SiliconFlow 风格的 /rerank 接口（results 或 output.results）。返回按得分降序排列。 */
-export function createRerankModel(provider: ModelProviderRecord, limiter?: AdmissionLimiter): RerankModel {
-  const model = provider.rerankModel.trim();
+export function createRerankModel({ provider, model: configuredModel }: ModelTarget, limiter?: AdmissionLimiter): RerankModel {
+  const model = configuredModel.trim();
   return {
     model,
     async rerank(query, documents, topN = documents.length) {

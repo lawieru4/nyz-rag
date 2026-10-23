@@ -487,38 +487,115 @@ const modelProviderRecordSchema = {
     name: { type: "string" },
     provider: { type: "string" },
     baseUrl: { type: "string" },
-    chatModel: { type: "string" },
-    embeddingModel: { type: "string" },
-    rerankModel: { type: "string" },
-    temperature: { type: "number" },
-    maxTokens: { type: "number" },
     credentialEnv: { type: "string" },
+    hasApiKey: { type: "boolean" },
     enabled: { type: "boolean" },
-    isDefault: { type: "boolean" },
     createdAt: { type: "string" },
     updatedAt: { type: "string" },
   },
-  required: ["id", "name", "provider", "baseUrl", "chatModel", "embeddingModel", "rerankModel", "temperature", "maxTokens", "credentialEnv", "enabled", "isDefault", "createdAt", "updatedAt"],
+  required: ["id", "name", "provider", "baseUrl", "credentialEnv", "hasApiKey", "enabled", "createdAt", "updatedAt"],
   additionalProperties: false,
 } as const;
 
-// temperature and maxTokens are optional (defaults applied by handler)
+// credentialEnv 可省略（新建为空，更新保持不变）；apiKey 只写不读。
 const saveModelProviderBodySchema = {
   type: "object",
   properties: {
     name: nonBlankString,
     provider: nonBlankString,
     baseUrl: { type: "string" },
-    chatModel: nonBlankString,
-    embeddingModel: { type: "string" },
-    rerankModel: { type: "string" },
-    credentialEnv: { type: "string", pattern: "^[A-Z][A-Z0-9_]*$" },
+    credentialEnv: { type: "string", pattern: "^([A-Z][A-Z0-9_]*)?$" },
+    apiKey: { type: "string", maxLength: 4096 },
+    clearApiKey: { type: "boolean" },
     enabled: { type: "boolean" },
-    isDefault: { type: "boolean" },
+  },
+  required: ["name", "provider", "baseUrl", "enabled"],
+  additionalProperties: false,
+} as const;
+
+const modelCapabilityParams = {
+  type: "object",
+  properties: { capability: { type: "string", enum: ["chat", "embedding", "rerank"] } },
+  required: ["capability"],
+  additionalProperties: false,
+} as const;
+
+const modelSettingRecordSchema = {
+  type: "object",
+  properties: {
+    capability: { type: "string" },
+    providerId: { type: "string" },
+    model: { type: "string" },
+    temperature: { type: "number" },
+    maxTokens: { type: "number" },
+    updatedAt: { type: "string" },
+  },
+  required: ["capability", "providerId", "model", "temperature", "maxTokens", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
+const modelSettingsResponseSchema = {
+  type: "object",
+  properties: {
+    chat: { ...modelSettingRecordSchema, nullable: true },
+    embedding: { ...modelSettingRecordSchema, nullable: true },
+    rerank: { ...modelSettingRecordSchema, nullable: true },
+  },
+  required: ["chat", "embedding", "rerank"],
+  additionalProperties: false,
+} as const;
+
+// temperature、maxTokens 可省略（新建取默认值，更新保持不变），只用于 Chat。
+const saveModelSettingBodySchema = {
+  type: "object",
+  properties: {
+    providerId: uuidParam,
+    model: { ...nonBlankString, maxLength: 200 },
     temperature: { type: "number", minimum: 0, maximum: 2 },
     maxTokens: { type: "integer", minimum: 1, maximum: 32768 },
   },
-  required: ["name", "provider", "chatModel", "credentialEnv", "enabled", "isDefault"],
+  required: ["providerId", "model"],
+  additionalProperties: false,
+} as const;
+
+const listProviderModelsBodySchema = {
+  type: "object",
+  properties: {
+    name: { type: "string" },
+    provider: nonBlankString,
+    baseUrl: { type: "string" },
+    apiKey: { type: "string", maxLength: 4096 },
+    providerId: uuidParam,
+    credentialEnv: { type: "string", pattern: "^([A-Z][A-Z0-9_]*)?$" },
+  },
+  required: ["provider", "baseUrl"],
+  additionalProperties: false,
+} as const;
+
+const listProviderModelsResponseSchema = {
+  type: "object",
+  properties: { models: { type: "array", items: { type: "string" } } },
+  required: ["models"],
+  additionalProperties: false,
+} as const;
+
+// ─── Secret settings ──────────────────────────────────────────────────────────
+
+const secretSettingStatusSchema = {
+  type: "object",
+  properties: {
+    configured: { type: "boolean" },
+    updatedAt: { type: "string", nullable: true },
+    encryptionReady: { type: "boolean" },
+  },
+  required: ["configured", "updatedAt", "encryptionReady"],
+  additionalProperties: false,
+} as const;
+
+const saveSecretSettingBodySchema = {
+  type: "object",
+  properties: { value: { type: "string", pattern: "^\\S+$", maxLength: 4096 } },
+  required: ["value"],
   additionalProperties: false,
 } as const;
 
@@ -1047,8 +1124,48 @@ export const routeSchemas: Record<string, RouteSchema> = {
     response: { "200": modelProviderRecordSchema, ...errorResponses },
   },
 
+  "POST /api/admin/model-providers/models": {
+    body: listProviderModelsBodySchema,
+    response: { "200": listProviderModelsResponseSchema, ...errorResponses },
+  },
+
   "DELETE /api/admin/model-providers/:id": {
     params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  "GET /api/admin/model-providers/:id/models": {
+    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
+    response: { "200": listProviderModelsResponseSchema, ...errorResponses },
+  },
+
+  // ── Admin: model settings ───────────────────────────────────────────────────
+  "GET /api/admin/model-settings": {
+    response: { "200": modelSettingsResponseSchema, ...errorResponses },
+  },
+
+  "PUT /api/admin/model-settings/:capability": {
+    params: modelCapabilityParams,
+    body: saveModelSettingBodySchema,
+    response: { "200": modelSettingRecordSchema, ...errorResponses },
+  },
+
+  "DELETE /api/admin/model-settings/:capability": {
+    params: modelCapabilityParams,
+    response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
+  },
+
+  // ── Admin: secret settings ──────────────────────────────────────────────────
+  "GET /api/admin/settings/article-token": {
+    response: { "200": secretSettingStatusSchema, ...errorResponses },
+  },
+
+  "PUT /api/admin/settings/article-token": {
+    body: saveSecretSettingBodySchema,
+    response: { "200": secretSettingStatusSchema, ...errorResponses },
+  },
+
+  "DELETE /api/admin/settings/article-token": {
     response: { "204": { type: "object", additionalProperties: true }, ...errorResponses },
   },
 

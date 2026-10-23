@@ -13,7 +13,7 @@
 
 ## 二、前置条件
 
-1. **全量语料入库**：业务库目前没有文档。需要用真实 `NYZ_ARTICLE_TOKEN` 完成 nyzdata 全量同步（约 7068 篇），并配置默认 Embedding 模型完成向量化。评估语料以某一次同步结果为准，记录文档数、`PARSER_VERSION`、切片版本和 Embedding 模型。
+1. **全量语料入库**：业务库目前没有文档。需要在管理后台配置 nyzdata token 后完成全量同步（约 7068 篇），并在模型配置中选择 Embedding 模型完成向量化。评估语料以某一次同步结果为准，记录文档数、`PARSER_VERSION`、切片版本和 Embedding 模型。
 2. **评估用知识库配置固定**：`topK`、`similarityThreshold`、`rerankEnabled`、`maxContextLength` 在运行记录中保存，比较两次运行时只改变待验证的变量。
 3. **只取接口来源文章**：评估语料只包括文章接口来源的 ready 主文档（不含重复文档）。
 

@@ -499,7 +499,7 @@ test("POST /api/admin/model-providers — missing required fields → 400", asyn
 
   const res = await app.inject({
     method: "POST", url: "/api/admin/model-providers",
-    payload: { name: "test" }, // missing provider, chatModel, credentialEnv
+    payload: { name: "test" }, // missing provider, baseUrl and enabled
   });
   assertError(res, 400);
 });
@@ -512,64 +512,107 @@ test("POST /api/admin/model-providers — invalid credentialEnv pattern → 400"
   const res = await app.inject({
     method: "POST", url: "/api/admin/model-providers",
     payload: {
-      name: "test", provider: "openai", chatModel: "gpt-4",
-      credentialEnv: "lowercase_var", // must match ^[A-Z][A-Z0-9_]*$
-      embeddingModel: "", rerankModel: "", baseUrl: "", enabled: true, isDefault: false,
+      name: "test", provider: "openai", baseUrl: "", enabled: true,
+      credentialEnv: "lowercase_var", // must be empty or match ^[A-Z][A-Z0-9_]*$
     },
   });
   assertError(res, 400);
 });
 
-test("POST /api/admin/model-providers — temperature out of range → 400", async () => {
-  const app = buildTestApp();
-  app.post("/api/admin/model-providers", async (_req, reply) => reply.code(201).send({}));
-  await app.ready();
-
-  const res = await app.inject({
-    method: "POST", url: "/api/admin/model-providers",
-    payload: {
-      name: "test", provider: "openai", chatModel: "gpt-4",
-      credentialEnv: "OPENAI_API_KEY",
-      embeddingModel: "", rerankModel: "", baseUrl: "", enabled: true, isDefault: false,
-      temperature: 5, // max is 2
-    },
-  });
-  assertError(res, 400);
-});
-
-test("POST /api/admin/model-providers — blank name or fractional maxTokens → 400", async () => {
+test("POST /api/admin/model-providers — blank name, model fields or oversized key → 400", async () => {
   const app = buildTestApp();
   app.post("/api/admin/model-providers", async () => { throw new Error("handler must not run"); });
   await app.ready();
 
-  const valid = { name: "test", provider: "openai", chatModel: "gpt-4", credentialEnv: "OPENAI_API_KEY", embeddingModel: "", rerankModel: "", baseUrl: "", enabled: true, isDefault: false };
-  for (const invalid of [{ name: " " }, { provider: "\t" }, { chatModel: "  " }, { maxTokens: 10.5 }]) {
+  const valid = { name: "test", provider: "openai", credentialEnv: "OPENAI_API_KEY", baseUrl: "", enabled: true };
+  // Providers only describe the connection; models are chosen in the model settings.
+  for (const invalid of [{ name: " " }, { provider: "\t" }, { chatModel: "gpt-4" }, { isDefaultEmbedding: true }, { temperature: 0.3 }, { apiKey: "x".repeat(4097) }]) {
     const res = await app.inject({ method: "POST", url: "/api/admin/model-providers", payload: { ...valid, ...invalid } });
     assertError(res, 400);
   }
 });
 
-test("POST /api/admin/model-providers — valid body with optional temperature → 201", async () => {
+test("POST /api/admin/model-providers — valid body → 201 without the key ciphertext", async () => {
   const app = buildTestApp();
   app.post("/api/admin/model-providers", async (_req, reply) =>
     reply.code(201).send({
-      id: UUID, name: "test", provider: "openai", baseUrl: "", chatModel: "gpt-4",
-      embeddingModel: "", rerankModel: "", credentialEnv: "OPENAI_API_KEY",
-      enabled: true, isDefault: false, temperature: 0.3, maxTokens: 1024,
-      createdAt: "2026-01-01", updatedAt: "2026-01-01",
+      id: UUID, name: "test", provider: "openai", baseUrl: "", credentialEnv: "", hasApiKey: true, apiKeyCiphertext: "v1:must-not-leak",
+      enabled: true, createdAt: "2026-01-01", updatedAt: "2026-01-01",
     }));
   await app.ready();
 
   const res = await app.inject({
     method: "POST", url: "/api/admin/model-providers",
-    payload: {
-      name: "test", provider: "openai", chatModel: "gpt-4",
-      credentialEnv: "OPENAI_API_KEY",
-      embeddingModel: "", rerankModel: "", baseUrl: "", enabled: true, isDefault: false,
-      // temperature and maxTokens are optional
-    },
+    payload: { name: "test", provider: "openai", baseUrl: "", enabled: true, apiKey: "sk-test" },
   });
   assert.equal(res.statusCode, 201);
+  assert.equal(res.json().hasApiKey, true);
+  assert.doesNotMatch(res.body, /must-not-leak|apiKeyCiphertext/, "only declared fields are serialized");
+});
+
+test("PUT /api/admin/model-settings/:capability — validates the capability and body", async () => {
+  const app = buildTestApp();
+  app.put("/api/admin/model-settings/:capability", async () => ({
+    capability: "chat", providerId: UUID, model: "deepseek-ai/DeepSeek-V3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01", extra: "dropped",
+  }));
+  await app.ready();
+
+  const valid = { providerId: UUID, model: "deepseek-ai/DeepSeek-V3" };
+  assertError(await app.inject({ method: "PUT", url: "/api/admin/model-settings/vision", payload: valid }), 400);
+  for (const invalid of [{ providerId: BAD_ID }, { model: " " }, { model: "x".repeat(201) }, { temperature: 5 }, { maxTokens: 10.5 }, { extra: 1 }]) {
+    assertError(await app.inject({ method: "PUT", url: "/api/admin/model-settings/chat", payload: { ...valid, ...invalid } }), 400);
+  }
+  const res = await app.inject({ method: "PUT", url: "/api/admin/model-settings/chat", payload: { ...valid, temperature: 0.7, maxTokens: 512 } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().extra, undefined);
+});
+
+test("GET /api/admin/model-settings — returns every capability, null when unset", async () => {
+  const app = buildTestApp();
+  app.get("/api/admin/model-settings", async () => ({
+    chat: null, rerank: null,
+    embedding: { capability: "embedding", providerId: UUID, model: "BAAI/bge-m3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01" },
+  }));
+  await app.ready();
+
+  const res = await app.inject({ method: "GET", url: "/api/admin/model-settings" });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), {
+    chat: null, rerank: null,
+    embedding: { capability: "embedding", providerId: UUID, model: "BAAI/bge-m3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01" },
+  });
+});
+
+test("GET /api/admin/model-providers/:id/models — non-UUID → 400", async () => {
+  const app = buildTestApp();
+  app.get("/api/admin/model-providers/:id/models", async () => ({ models: [] }));
+  await app.ready();
+
+  assertError(await app.inject({ method: "GET", url: `/api/admin/model-providers/${BAD_ID}/models` }), 400);
+});
+
+test("POST /api/admin/model-providers/models — validates the endpoint body", async () => {
+  const app = buildTestApp();
+  app.post("/api/admin/model-providers/models", async () => ({ models: ["a"] }));
+  await app.ready();
+
+  for (const payload of [{ baseUrl: "https://example.com/v1" }, { provider: "x", baseUrl: "https://example.com/v1", providerId: BAD_ID }, { provider: "x", baseUrl: "", extra: 1 }]) {
+    assertError(await app.inject({ method: "POST", url: "/api/admin/model-providers/models", payload }), 400);
+  }
+  const res = await app.inject({ method: "POST", url: "/api/admin/model-providers/models", payload: { provider: "x", baseUrl: "https://example.com/v1", apiKey: "k" } });
+  assert.deepEqual(res.json(), { models: ["a"] });
+});
+
+test("PUT /api/admin/settings/article-token — rejects blank or whitespace tokens and never returns the value", async () => {
+  const app = buildTestApp();
+  app.put("/api/admin/settings/article-token", async () => ({ configured: true, updatedAt: "2026-01-01", encryptionReady: true, value: "must-not-leak" }));
+  await app.ready();
+
+  for (const payload of [{}, { value: "" }, { value: "has space" }, { value: "x", extra: 1 }]) {
+    assertError(await app.inject({ method: "PUT", url: "/api/admin/settings/article-token", payload }), 400);
+  }
+  const res = await app.inject({ method: "PUT", url: "/api/admin/settings/article-token", payload: { value: "token-123" } });
+  assert.deepEqual(res.json(), { configured: true, updatedAt: "2026-01-01", encryptionReady: true });
 });
 
 test("DELETE /api/admin/model-providers/:id — non-UUID → 400", async () => {
