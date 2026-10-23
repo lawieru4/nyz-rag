@@ -113,6 +113,13 @@ export interface ChatSource {
   url: string;
   /** 文章的原始转载源。 */
   repostSource?: string;
+  /** 本轮送入模型的该文章片段摘录，按相关度排列；用户端问答返回，管理端问答记录不含。 */
+  excerpts?: ChatSourceExcerpt[];
+}
+
+export interface ChatSourceExcerpt {
+  sectionPath: string[];
+  text: string;
 }
 
 /** generated：由 Chat 模型生成；extractive：未配置或调用失败时直接摘录原文片段。 */

@@ -40,7 +40,7 @@ watch(() => props.id, load, { immediate: true });
 </script>
 
 <template>
-  <section class="mx-auto min-h-[calc(100vh-4rem)] max-w-250 px-9 pt-8 pb-18 max-md:px-6 max-sm:px-4 max-sm:pt-5" aria-live="polite">
+  <section class="mx-auto min-h-[calc(100dvh-3.5rem)] max-w-250 px-9 pt-8 pb-18 max-md:px-6 max-sm:px-4 max-sm:pt-5" aria-live="polite">
     <Button as="a" href="#/" variant="link" class="mb-8 h-auto px-0 text-xs text-link"><ArrowLeft /> 返回知识问答</Button>
     <div v-if="loading" class="mx-auto grid max-w-190 gap-4" role="status" aria-label="正在加载文章…">
       <Skeleton class="h-3 w-24" /><Skeleton class="h-9 w-4/5" /><Skeleton class="h-5 w-full" /><Skeleton class="h-5 w-2/3" />
@@ -73,7 +73,7 @@ watch(() => props.id, load, { immediate: true });
         <template v-for="(block, index) in blocks" :key="index">
           <component :is="`h${block.level}`" v-if="block.kind === 'heading'" class="markdown-heading"><MarkdownInline :text="block.text || ''" /></component>
           <p v-else-if="block.kind === 'paragraph'" class="markdown-paragraph"><MarkdownInline :text="block.text || ''" /></p>
-          <component :is="block.ordered ? 'ol' : 'ul'" v-else-if="block.kind === 'list'" :class="['markdown-list', block.ordered ? 'list-decimal' : 'list-disc']"><li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li></component>
+          <component :is="block.ordered ? 'ol' : 'ul'" v-else-if="block.kind === 'list'" :start="block.start" :class="['markdown-list', block.ordered ? 'list-decimal' : 'list-disc']"><li v-for="(item, itemIndex) in block.items" :key="itemIndex"><MarkdownInline :text="item" /></li></component>
           <pre v-else-if="block.kind === 'code'" class="markdown-code"><code>{{ block.text }}</code></pre>
           <div v-else-if="block.kind === 'table'" class="markdown-table-wrap"><table><tbody><tr v-for="(row, rowIndex) in block.rows" :key="rowIndex"><template v-if="rowIndex === 0"><th v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</th></template><template v-else><td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td></template></tr></tbody></table></div>
         </template>

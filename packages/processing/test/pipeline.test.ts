@@ -301,7 +301,9 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal((await fetch(`${apiBase}/api/messages/${chat.messageId}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating: "positive" }) })).status, 204);
     const logs = await (await fetch(`${apiBase}/api/admin/chat-logs?rating=rated&query=vector`)).json();
     assert.equal(logs.total, 1);
-    assert.deepEqual(logs.logs[0].sources, chat.sources);
+    assert.deepEqual(chat.sources[0].excerpts, [{ sectionPath: [], text: "First chunk. Second chunk." }]);
+    // 管理端问答记录的来源不含摘录（片段在 chunks 中）。
+    assert.deepEqual(logs.logs[0].sources, chat.sources.map(({ excerpts: _excerpts, ...source }: { excerpts?: unknown }) => source));
     assert.equal(logs.logs[0].model, "test-chat");
     assert.equal(logs.logs[0].promptTokens, 20);
     assert.equal(typeof logs.logs[0].retrievalMs, "number");
@@ -338,6 +340,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     const sessionMessages = await (await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).json();
     assert.deepEqual(sessionMessages.messages.map((message: { id: string }) => message.id), [first[3].data.id, regenerated.at(-1)!.data.id]);
     assert.equal(sessionMessages.session.title, "vector test");
+    assert.deepEqual(sessionMessages.messages[0].sources, first[3].data.sources, "saved sources carry the same excerpts as the live answer");
     const sessions = await (await fetch(`${apiBase}/api/chat/sessions`)).json();
     assert.deepEqual([sessions.total, sessions.sessions[0].messageCount], [1, 2]);
     const followUpLogs = await (await fetch(`${apiBase}/api/admin/chat-logs?query=${encodeURIComponent("第二段")}`)).json();
@@ -471,7 +474,9 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.ok(includedStream.some((item) => item.event === "source" && item.data.documentId === synced[0].id));
 
     const articleChat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ question: "文章一的正文结论" }) })).json();
-    assert.deepEqual(articleChat.sources.find((source: { title: string }) => source.title === "文章一"), { documentId: synced[0].id, title: "文章一", url: detail.url, repostSource: "测试公众号" });
+    const { excerpts: articleExcerpts, ...citedArticle } = articleChat.sources.find((source: { title: string }) => source.title === "文章一");
+    assert.deepEqual(citedArticle, { documentId: synced[0].id, title: "文章一", url: detail.url, repostSource: "测试公众号" });
+    assert.ok(articleExcerpts.length > 0);
     const articleLog = (await (await fetch(`${apiBase}/api/admin/chat-logs?query=${encodeURIComponent("文章一的正文结论")}`)).json()).logs[0];
     assert.ok(articleLog.chunks.find((chunk: { documentId: string }) => chunk.documentId === synced[0].id)?.summaryScore > 0.9, "summary recall contributes to the fused ranking");
 

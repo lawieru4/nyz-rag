@@ -116,7 +116,10 @@ export interface AnswerContext {
   sources: ChatSource[];
 }
 
-/** 按相关度依次选取切片，正文总字数不超过上限（第一个切片超长时截断）；同一文章共用一个引用编号。 */
+/**
+ * 按相关度依次选取切片，正文总字数不超过上限（第一个切片超长时截断）；同一文章共用一个引用编号。
+ * 来源附带各切片的摘录（与问答记录中保存的摘录一致），供用户端查看引用原文。
+ */
 export function buildAnswerContext(chunks: RetrievedChunk[], maxContextLength: number): AnswerContext {
   const context: AnswerContext = { chunks: [], sources: [] };
   const citations = new Map<string, number>();
@@ -130,8 +133,9 @@ export function buildAnswerContext(chunks: RetrievedChunk[], maxContextLength: n
     if (!citation) {
       citation = citations.size + 1;
       citations.set(chunk.documentId, citation);
-      context.sources.push({ documentId: chunk.documentId, title: chunk.title, url: chunk.url, ...(chunk.repostSource ? { repostSource: chunk.repostSource } : {}) });
+      context.sources.push({ documentId: chunk.documentId, title: chunk.title, url: chunk.url, ...(chunk.repostSource ? { repostSource: chunk.repostSource } : {}), excerpts: [] });
     }
+    context.sources[citation - 1].excerpts!.push({ sectionPath: chunk.sectionPath, text: content.slice(0, EXCERPT_CHARS) });
     context.chunks.push({ ...chunk, content, citation });
     used += content.length;
   }
