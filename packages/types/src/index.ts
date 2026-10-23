@@ -505,24 +505,75 @@ export interface ChatFeedbackRequest {
   rating: ChatFeedbackRating;
 }
 
+/** 模型供应商只描述连接（地址与密钥），具体使用哪个模型在业务模型配置（ModelSettingRecord）中选择。 */
 export interface ModelProviderRecord {
   id: string;
   name: string;
   provider: string;
   baseUrl: string;
-  chatModel: string;
-  embeddingModel: string;
-  rerankModel: string;
-  /** Chat 模型的采样温度（0～2）与单次回答最大 Token 数。 */
-  temperature: number;
-  maxTokens: number;
+  /** 后备的密钥环境变量名，可为空；后台保存了密钥时优先使用后者。都没有时请求不带认证头（如本地模型）。 */
   credentialEnv: string;
+  /** 后台是否保存了加密的 API 密钥；密钥本身从不返回。 */
+  hasApiKey: boolean;
   enabled: boolean;
-  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
+/**
+ * credentialEnv 省略时新建为空、更新保持不变。
+ * apiKey 非空时保存（加密）新密钥；clearApiKey 为 true 时删除已保存的密钥；都省略时保持不变。
+ */
+export type SaveModelProviderRequest = Pick<ModelProviderRecord, "name" | "provider" | "baseUrl" | "enabled">
+  & Partial<Pick<ModelProviderRecord, "credentialEnv">>
+  & { apiKey?: string; clearApiKey?: boolean };
+
+/** 业务模型的用途：问答生成、向量化与检索、重排序。 */
+export type ModelCapability = "chat" | "embedding" | "rerank";
+
+/** 某项用途选定的供应商与模型；temperature / maxTokens 只用于 Chat。 */
+export interface ModelSettingRecord {
+  capability: ModelCapability;
+  providerId: string;
+  model: string;
+  temperature: number;
+  maxTokens: number;
+  updatedAt: string;
+}
+
+/** 各用途当前的模型配置，未配置为 null。 */
+export type ModelSettingsResponse = Record<ModelCapability, ModelSettingRecord | null>;
+
 /** temperature 与 maxTokens 省略时新建使用默认值（0.3 / 1024），更新保持不变。 */
-export type SaveModelProviderRequest = Omit<ModelProviderRecord, "id" | "createdAt" | "updatedAt" | "temperature" | "maxTokens">
-  & Partial<Pick<ModelProviderRecord, "temperature" | "maxTokens">>;
+export interface SaveModelSettingRequest {
+  providerId: string;
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+/** 按表单中的地址获取供应商可选模型；密钥依次取 apiKey、已保存供应商（providerId）的密钥、credentialEnv。 */
+export interface ListProviderModelsRequest {
+  name?: string;
+  provider: string;
+  baseUrl: string;
+  apiKey?: string;
+  providerId?: string;
+  credentialEnv?: string;
+}
+
+export interface ListProviderModelsResponse {
+  models: string[];
+}
+
+/** 全局密钥设置（如 nyzdata 文章接口 token）的状态；值本身从不返回。 */
+export interface SecretSettingStatus {
+  configured: boolean;
+  updatedAt: string | null;
+  /** 服务端是否配置了可用的 NYZ_SECRET_KEY；未配置时无法保存或读取。 */
+  encryptionReady: boolean;
+}
+
+export interface SaveSecretSettingRequest {
+  value: string;
+}

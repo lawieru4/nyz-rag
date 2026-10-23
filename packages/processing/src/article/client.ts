@@ -33,7 +33,7 @@ export function createArticleClient(options: { listUrl: string; token: string; t
   const listUrl = new URL(options.listUrl);
   if (!["http:", "https:"].includes(listUrl.protocol)) throw new ArticleApiError("文章接口地址必须是 http(s)", true);
   if (listUrl.searchParams.has("token")) throw new ArticleApiError("文章接口地址不能包含 token，请通过环境变量配置", true);
-  if (!options.token.trim()) throw new ArticleApiError("未配置文章接口 token（NYZ_ARTICLE_TOKEN）", true);
+  if (!options.token.trim()) throw new ArticleApiError("未配置文章接口 token，请在管理后台数据源页面填写", true);
   const doFetch = options.fetch ?? fetch;
   const timeoutMs = options.timeoutMs ?? 20000;
   const detailPath = `${listUrl.pathname.replace(/\/$/, "")}/articleDetail`;

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
-import { embedChunks, selectEmbeddingProvider } from "../src/embedding.js";
+import { embedChunks, requireEmbeddingModel } from "../src/embedding.js";
+import type { ModelTarget } from "../src/provider.js";
 import { noopLimiter } from "./admission-helpers.js";
 
 function provider(overrides: Partial<ModelProviderRecord> = {}): ModelProviderRecord {
@@ -10,27 +11,21 @@ function provider(overrides: Partial<ModelProviderRecord> = {}): ModelProviderRe
     name: "Compatible API",
     provider: "compatible",
     baseUrl: "https://embeddings.example/v1/",
-    chatModel: "chat-model",
-    embeddingModel: "embedding-model",
-    rerankModel: "",
     credentialEnv: "PROCESSING_TEST_API_KEY",
     enabled: true,
-    isDefault: true,
+    hasApiKey: false,
     createdAt: "",
     updatedAt: "",
     ...overrides,
   };
 }
 
-test("selects only one enabled default with a configured embedding model", () => {
-  const configured = provider();
-  assert.equal(selectEmbeddingProvider([
-    provider({ id: "disabled", enabled: false }),
-    provider({ id: "no-model", embeddingModel: " " }),
-    configured,
-  ]), configured);
-  assert.throws(() => selectEmbeddingProvider([]), /No enabled default embedding provider/);
-  assert.throws(() => selectEmbeddingProvider([configured, provider({ id: "second" })]), /Multiple enabled default/);
+const target = (overrides: Partial<ModelProviderRecord> = {}, model = "embedding-model"): ModelTarget => ({ provider: provider(overrides), model });
+
+test("requires a configured embedding model", () => {
+  const configured = target();
+  assert.equal(requireEmbeddingModel(configured), configured);
+  assert.throws(() => requireEmbeddingModel(null), /未配置可用的 Embedding 模型/);
 });
 
 test("batches requests and restores vectors by response index", async (context) => {
@@ -54,7 +49,7 @@ test("batches requests and restores vectors by response index", async (context) 
     }), { status: 200 });
   }) as typeof fetch;
 
-  const vectors = await embedChunks(provider(), Array.from({ length: 33 }, (_, index) => `chunk-${index}`), noopLimiter());
+  const vectors = await embedChunks(target(), Array.from({ length: 33 }, (_, index) => `chunk-${index}`), noopLimiter());
   assert.deepEqual(batchSizes, [32, 1]);
   assert.deepEqual(requestUrls, [
     "https://embeddings.example/v1/embeddings",
@@ -81,9 +76,9 @@ test("uses the OpenAI default URL only for a recognized OpenAI provider", async 
     return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1] }] }), { status: 200 });
   }) as typeof fetch;
 
-  await embedChunks(provider({ name: "OpenAI", provider: "openai", baseUrl: "" }), ["input"], noopLimiter());
+  await embedChunks(target({ name: "OpenAI", provider: "openai", baseUrl: "" }), ["input"], noopLimiter());
   assert.equal(requestUrl, "https://api.openai.com/v1/embeddings");
-  await assert.rejects(embedChunks(provider({ baseUrl: "" }), ["input"], noopLimiter()), /base URL is required/);
+  await assert.rejects(embedChunks(target({ baseUrl: "" }), ["input"], noopLimiter()), /base URL is required/);
 });
 
 test("rejects malformed vectors and hides provider response bodies", async (context) => {
@@ -97,7 +92,7 @@ test("rejects malformed vectors and hides provider response bodies", async (cont
   process.env.PROCESSING_TEST_API_KEY = "test-secret";
 
   globalThis.fetch = (async () => new Response("sensitive provider body test-secret", { status: 401 })) as typeof fetch;
-  await assert.rejects(embedChunks(provider(), ["input"], noopLimiter()), (error: unknown) => {
+  await assert.rejects(embedChunks(target(), ["input"], noopLimiter()), (error: unknown) => {
     assert(error instanceof Error);
     assert.match(error.message, /HTTP 401/);
     assert.doesNotMatch(error.message, /sensitive provider body|test-secret/);
@@ -110,5 +105,5 @@ test("rejects malformed vectors and hides provider response bodies", async (cont
       { index: 0, embedding: [3, 4] },
     ],
   }), { status: 200 })) as typeof fetch;
-  await assert.rejects(embedChunks(provider(), ["input", "input-2"], noopLimiter()), /invalid vector indices/);
+  await assert.rejects(embedChunks(target(), ["input", "input-2"], noopLimiter()), /invalid vector indices/);
 });

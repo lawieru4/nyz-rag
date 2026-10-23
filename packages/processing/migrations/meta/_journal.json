@@ -85,6 +85,20 @@
       "when": 1792721136844,
       "tag": "0011_article_only_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792724047516,
+      "tag": "0012_provider_defaults_and_secrets",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792725612848,
+      "tag": "0013_model_settings",
+      "breakpoints": true
     }
   ]
 }

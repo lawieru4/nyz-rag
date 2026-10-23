@@ -2,9 +2,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, getSource, getSourceSyncState,
-  getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, listModelProviders, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
-  reindexChunkSearchTerms, reindexDocumentMetadataTerms, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, selectEmbeddingProvider, setEmbeddingState, setProcessingState,
+  ARTICLE_TOKEN_SETTING, backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, getSource, getSourceSyncState,
+  getModelSelection, getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
+  readSecretSetting, reindexChunkSearchTerms, reindexDocumentMetadataTerms, requireEmbeddingModel, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, setEmbeddingState, setProcessingState,
   syncArticles, updateTask, upsertDocument, withDocumentWork, withTransaction, type Database, type ProcessDocumentResult,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
@@ -29,16 +29,16 @@ async function embedDocument(documentId: string, db: Database) {
       await setEmbeddingState(documentId, "processing", null, tx);
       return { version: target.processingVersion, chunks, summary: await getSummaryInput(documentId, tx) };
     });
-    const provider = selectEmbeddingProvider(await listModelProviders(db));
+    const embedding = requireEmbeddingModel(await getModelSelection("embedding", db));
     // 文章级向量（标题 + 摘要）与切片在同一次调用中生成，保证同模型同维度。
-    const vectors = await embedChunks(provider, [...chunks.map(embeddingInput), ...(summary ? [summary] : [])]);
+    const vectors = await embedChunks(embedding, [...chunks.map(embeddingInput), ...(summary ? [summary] : [])]);
     const summaryVector = summary ? vectors.pop()! : null;
     await db.transaction(async (tx) => {
       const target = await lockDocument(tx, documentId);
       if (!target || target.processingStatus !== "chunked" || target.processingVersion !== version) {
         throw new Error("Document changed during embedding; retry after processing finishes");
       }
-      await saveDocumentEmbeddings(tx, documentId, chunks, vectors, provider, summaryVector);
+      await saveDocumentEmbeddings(tx, documentId, chunks, vectors, embedding, summaryVector);
     });
   } catch (error) {
     await setEmbeddingState(documentId, "failed", errorMessage(error, "Embedding failed"), db);
@@ -49,8 +49,7 @@ async function embedDocument(documentId: string, db: Database) {
 /** 切片后自动向量化：本文档（重复文档除外）及接替为主文档的文档。 */
 async function autoEmbedDocuments({ embed }: ProcessDocumentResult, db: Database) {
   if (!embed.length) return;
-  const providers = await listModelProviders(db);
-  if (!providers.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
+  if (!await getModelSelection("embedding", db)) return;
   // An embedding failure remains retryable without discarding successfully synced content.
   for (const documentId of embed) await embedDocument(documentId, db).catch(() => console.error(`Embedding failed for document ${documentId}`));
 }
@@ -58,7 +57,8 @@ async function autoEmbedDocuments({ embed }: ProcessDocumentResult, db: Database
 const duplicateNote = (count: number) => count ? `${count} 篇与已有文档内容相同，标记为重复，未切片和向量化` : "";
 
 async function syncArticleSource(source: DataSourceRecord, taskId: string) {
-  const client = createArticleClient({ listUrl: source.url, token: process.env.NYZ_ARTICLE_TOKEN ?? "", timeoutMs: requestTimeoutMs });
+  // token 在管理后台配置，每次同步时读取，修改后无需重启 Worker。
+  const client = createArticleClient({ listUrl: source.url, token: await readSecretSetting(ARTICLE_TOKEN_SETTING) ?? "", timeoutMs: requestTimeoutMs });
   let duplicates = 0;
   const result = await syncArticles({
     client,
@@ -156,19 +156,18 @@ async function backfillSearchTerms() {
 }
 
 /**
- * 升级前已向量化的文章没有文章级向量，启动时在后台用默认 Embedding 供应商补齐（只处理与当前模型一致的文档，
+ * 升级前已向量化的文章没有文章级向量，启动时在后台用当前 Embedding 模型补齐（只处理与当前模型一致的文档，
  * 其余文档需重新向量化）；回写时校验切片版本与模型，与并发任务冲突的文档跳过，由后续向量化任务生成。
  */
 async function backfillSummaryEmbeddings() {
-  const providers = await listModelProviders();
-  if (!providers.some((provider) => provider.enabled && provider.isDefault && provider.embeddingModel.trim())) return;
-  const provider = selectEmbeddingProvider(providers);
-  const model = provider.embeddingModel.trim();
+  const embedding = await getModelSelection("embedding");
+  if (!embedding) return;
+  const model = embedding.model.trim();
   let saved = 0;
   for (let cursor: string | null = ""; cursor !== null;) {
     const batch = await listMissingSummaryEmbeddings(cursor, 32, model);
     if (batch.items.length) {
-      const vectors = await embedChunks(provider, batch.items.map((item) => item.input));
+      const vectors = await embedChunks(embedding, batch.items.map((item) => item.input));
       for (const [index, item] of batch.items.entries()) if (await saveSummaryEmbedding(item.id, item.version, vectors[index], model)) saved += 1;
     }
     cursor = batch.cursor;

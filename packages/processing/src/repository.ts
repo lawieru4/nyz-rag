@@ -3,16 +3,19 @@ import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull,
 import type { ArticleDetail } from "./article/parse.js";
 import { embeddingInput, summaryEmbeddingInput } from "./chunking.js";
 import { contentFingerprint } from "./dedup.js";
+import type { ModelProviderConfig, ModelSelection, ModelTarget } from "./provider.js";
 import type { ChunkHit } from "./rag.js";
+import { decryptSecret, encryptSecret, providerSecretContext, secretKeyConfigured } from "./secrets.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
   AdminAccount, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
-  KnowledgeStats, ModelProviderRecord, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest,
+  KnowledgeStats, ModelCapability, ModelProviderRecord, ModelSettingRecord, ModelSettingsResponse, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest, SaveModelSettingRequest,
+  SecretSettingStatus,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, users } from "./schema.js";
+import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -372,8 +375,8 @@ export async function setEmbeddingState(id: string, status: Exclude<DocumentEmbe
   await db.update(documents).set({ embeddingStatus: status, embeddingError: error, ...resetEmbedding, embeddingUpdatedAt: sql`now()` }).where(eq(documents.id, id));
 }
 
-function validateVectors(vectors: number[][], provider: ModelProviderRecord): void {
-  if (!provider.id.trim() || !provider.embeddingModel.trim()) throw new Error("Vector provider ID and embedding model are required.");
+function validateVectors(vectors: number[][], { provider, model }: ModelTarget): void {
+  if (!provider.id.trim() || !model.trim()) throw new Error("Vector provider ID and embedding model are required.");
   for (const vector of vectors) {
     if (!Array.isArray(vector) || vector.length === 0 || !vector.every((value) => Number.isFinite(value))) throw new Error("Vectors must contain finite numeric values.");
     if (!vector.some((value) => value !== 0)) throw new Error("Vectors must not be zero vectors.");
@@ -383,13 +386,14 @@ function validateVectors(vectors: number[][], provider: ModelProviderRecord): vo
 
 /** 在调用方事务内写入整篇文档的切片向量与文章级向量（没有摘要时为 null），并把文档向量状态置为 ready。 */
 export async function saveDocumentEmbeddings(
-  tx: Executor, documentId: string, chunks: DocumentChunkRecord[], vectors: number[][], provider: ModelProviderRecord, summaryVector: number[] | null = null,
+  tx: Executor, documentId: string, chunks: DocumentChunkRecord[], vectors: number[][], embedding: ModelTarget, summaryVector: number[] | null = null,
 ): Promise<void> {
   if (chunks.length !== vectors.length) throw new Error("The number of chunks and vectors must match.");
   // 文章级向量与切片向量必须同维度（共用文档的模型与维度信息）。
-  validateVectors(summaryVector ? [...vectors, summaryVector] : vectors, provider);
+  validateVectors(summaryVector ? [...vectors, summaryVector] : vectors, embedding);
   if (!chunks.length) throw new Error("Document must have chunks before embedding");
-  const model = provider.embeddingModel.trim();
+  const { provider } = embedding;
+  const model = embedding.model.trim();
   const dimensions = vectors[0].length;
   for (const [index, chunk] of chunks.entries()) {
     const updated = await tx.update(documentChunks)
@@ -660,35 +664,111 @@ export async function updateKnowledgeBase(id: string, input: SaveKnowledgeBaseRe
 
 // ---- 模型供应商 ----
 
-const toModelProvider = (row: typeof modelProviders.$inferSelect): ModelProviderRecord => ({ ...row, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
+// 接口记录不含密钥密文，只标记是否已保存；运行时配置（listModelProviderConfigs）才带密文。
+const toModelProvider = ({ apiKeyCiphertext, ...row }: typeof modelProviders.$inferSelect): ModelProviderRecord =>
+  ({ ...row, hasApiKey: apiKeyCiphertext !== null, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
 
 export async function listModelProviders(db: Executor = getDb()): Promise<ModelProviderRecord[]> {
   return (await db.select().from(modelProviders).orderBy(desc(modelProviders.createdAt))).map(toModelProvider);
 }
 
-const modelProviderValues = (input: SaveModelProviderRequest) => ({
-  name: input.name, provider: input.provider, baseUrl: input.baseUrl, chatModel: input.chatModel, embeddingModel: input.embeddingModel,
-  rerankModel: input.rerankModel, temperature: input.temperature, maxTokens: input.maxTokens, credentialEnv: input.credentialEnv, enabled: input.enabled, isDefault: input.isDefault,
+/** 运行时（问答、向量化）使用的供应商配置，带密钥密文，由 providerCredential 在调用时解密。 */
+export async function listModelProviderConfigs(db: Executor = getDb()): Promise<ModelProviderConfig[]> {
+  return (await db.select().from(modelProviders).orderBy(desc(modelProviders.createdAt)))
+    .map((row) => ({ ...toModelProvider(row), apiKeyCiphertext: row.apiKeyCiphertext }));
+}
+
+/** 未传入的可选字段：新建时取默认值，更新时保持不变（drizzle 会忽略 undefined）。apiKey 非空时加密保存，clearApiKey 删除已保存的密钥。 */
+const modelProviderValues = (id: string, input: SaveModelProviderRequest) => ({
+  name: input.name, provider: input.provider, baseUrl: input.baseUrl, credentialEnv: input.credentialEnv, enabled: input.enabled,
+  apiKeyCiphertext: input.apiKey?.trim() ? encryptSecret(input.apiKey.trim(), providerSecretContext(id)) : input.clearApiKey ? null : undefined,
 });
 
-export async function createModelProvider(input: SaveModelProviderRequest): Promise<ModelProviderRecord> {
+export async function createModelProvider(input: SaveModelProviderRequest, db: Executor = getDb()): Promise<ModelProviderRecord> {
+  const id = randomUUID();
+  const [row] = await db.insert(modelProviders).values({ id, ...modelProviderValues(id, input) }).returning();
+  return toModelProvider(row);
+}
+
+export async function updateModelProvider(id: string, input: SaveModelProviderRequest, db: Executor = getDb()): Promise<ModelProviderRecord | null> {
+  const [row] = await db.update(modelProviders).set({ ...modelProviderValues(id, input), updatedAt: sql`now()` }).where(eq(modelProviders.id, id)).returning();
+  return row ? toModelProvider(row) : null;
+}
+
+/** 正在被业务模型使用的供应商不能删除（外键 RESTRICT）：返回是否已删除，以及使用它的用途。 */
+export async function deleteModelProvider(id: string): Promise<{ deleted: boolean; usedBy: ModelCapability[] }> {
   return withTransaction(async (tx) => {
-    if (input.isDefault) await tx.update(modelProviders).set({ isDefault: false }).where(eq(modelProviders.isDefault, true));
-    const [row] = await tx.insert(modelProviders).values({ id: randomUUID(), ...modelProviderValues(input) }).returning();
-    return toModelProvider(row);
+    const usedBy = (await tx.select({ capability: modelSettings.capability }).from(modelSettings).where(eq(modelSettings.providerId, id)).for("update"))
+      .map((row) => row.capability);
+    if (usedBy.length) return { deleted: false, usedBy };
+    const deleted = await tx.delete(modelProviders).where(eq(modelProviders.id, id)).returning({ id: modelProviders.id });
+    return { deleted: deleted.length > 0, usedBy };
   });
 }
 
-export async function updateModelProvider(id: string, input: SaveModelProviderRequest): Promise<ModelProviderRecord | null> {
-  return withTransaction(async (tx) => {
-    if (input.isDefault) await tx.update(modelProviders).set({ isDefault: false }).where(and(eq(modelProviders.isDefault, true), ne(modelProviders.id, id)));
-    const [row] = await tx.update(modelProviders).set({ ...modelProviderValues(input), updatedAt: sql`now()` }).where(eq(modelProviders.id, id)).returning();
-    return row ? toModelProvider(row) : null;
-  });
+// ---- 业务模型（Chat / Embedding / Rerank 各选一个供应商与模型） ----
+
+const MODEL_CAPABILITIES: ModelCapability[] = ["chat", "embedding", "rerank"];
+const toModelSetting = (row: typeof modelSettings.$inferSelect): ModelSettingRecord => ({ ...row, updatedAt: iso(row.updatedAt)! });
+
+export async function getModelSettings(db: Executor = getDb()): Promise<ModelSettingsResponse> {
+  const rows = new Map((await db.select().from(modelSettings)).map((row) => [row.capability, toModelSetting(row)]));
+  return Object.fromEntries(MODEL_CAPABILITIES.map((capability) => [capability, rows.get(capability) ?? null])) as ModelSettingsResponse;
 }
 
-export async function deleteModelProvider(id: string, db: Executor = getDb()): Promise<boolean> {
-  return (await db.delete(modelProviders).where(eq(modelProviders.id, id)).returning({ id: modelProviders.id })).length > 0;
+/** 新建时 temperature / maxTokens 省略则取默认值，更新时保持不变。供应商须存在（外键保证）。 */
+export async function saveModelSetting(capability: ModelCapability, input: SaveModelSettingRequest, db: Executor = getDb()): Promise<ModelSettingRecord> {
+  const values = { providerId: input.providerId, model: input.model.trim(), temperature: input.temperature, maxTokens: input.maxTokens };
+  const [row] = await db.insert(modelSettings).values({ capability, ...values })
+    .onConflictDoUpdate({ target: modelSettings.capability, set: { ...values, updatedAt: sql`now()` } }).returning();
+  return toModelSetting(row);
+}
+
+export async function deleteModelSetting(capability: ModelCapability, db: Executor = getDb()): Promise<boolean> {
+  return (await db.delete(modelSettings).where(eq(modelSettings.capability, capability)).returning({ capability: modelSettings.capability })).length > 0;
+}
+
+/** 运行时各用途的模型（带供应商密钥密文）；未配置或供应商已停用的用途为 null。 */
+export async function getModelSelections(db: Executor = getDb()): Promise<Record<ModelCapability, ModelSelection | null>> {
+  const rows = await db.select({ setting: modelSettings, provider: modelProviders }).from(modelSettings)
+    .innerJoin(modelProviders, eq(modelProviders.id, modelSettings.providerId)).where(eq(modelProviders.enabled, true));
+  const selections = new Map(rows.map(({ setting, provider }) => [setting.capability, {
+    provider: { ...toModelProvider(provider), apiKeyCiphertext: provider.apiKeyCiphertext },
+    model: setting.model, temperature: setting.temperature, maxTokens: setting.maxTokens,
+  }]));
+  return Object.fromEntries(MODEL_CAPABILITIES.map((capability) => [capability, selections.get(capability) ?? null])) as Record<ModelCapability, ModelSelection | null>;
+}
+
+export async function getModelSelection(capability: ModelCapability, db: Executor = getDb()): Promise<ModelSelection | null> {
+  return (await getModelSelections(db))[capability];
+}
+
+// ---- 后台配置的全局密钥 ----
+
+/** nyzdata 文章接口 token（所有文章来源共用）。 */
+export const ARTICLE_TOKEN_SETTING = "nyzdata_article_token";
+
+export async function getSecretSettingStatus(name: string, db: Executor = getDb()): Promise<SecretSettingStatus> {
+  const [row] = await db.select({ updatedAt: secretSettings.updatedAt }).from(secretSettings).where(eq(secretSettings.name, name));
+  return { configured: Boolean(row), updatedAt: row ? iso(row.updatedAt)! : null, encryptionReady: secretKeyConfigured() };
+}
+
+/** 加密保存；密文绑定设置名，不能挪作他用。 */
+export async function saveSecretSetting(name: string, value: string, db: Executor = getDb()): Promise<SecretSettingStatus> {
+  const ciphertext = encryptSecret(value, name);
+  await db.insert(secretSettings).values({ name, ciphertext })
+    .onConflictDoUpdate({ target: secretSettings.name, set: { ciphertext, updatedAt: sql`now()` } });
+  return getSecretSettingStatus(name, db);
+}
+
+export async function deleteSecretSetting(name: string, db: Executor = getDb()): Promise<boolean> {
+  return (await db.delete(secretSettings).where(eq(secretSettings.name, name)).returning({ name: secretSettings.name })).length > 0;
+}
+
+/** 解密后的值；未配置时为 null，无法解密时抛出 SecretKeyError。 */
+export async function readSecretSetting(name: string, db: Executor = getDb()): Promise<string | null> {
+  const [row] = await db.select({ ciphertext: secretSettings.ciphertext }).from(secretSettings).where(eq(secretSettings.name, name));
+  return row ? decryptSecret(row.ciphertext, name) : null;
 }
 
 // ---- 用户 ----

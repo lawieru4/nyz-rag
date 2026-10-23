@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
 import { createChatModel, createRerankModel } from "../src/models.js";
+import type { ModelSelection } from "../src/provider.js";
 import { summaryEmbeddingInput } from "../src/chunking.js";
 import { buildAnswerContext, buildChatMessages, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, SUMMARY_RECALL_LIMIT, type ChunkHit } from "../src/rag.js";
 import { metadataScore, metadataSearchFields, metadataSearchTerms, metadataTermWeights, searchTerms, termCounts } from "../src/search-terms.js";
@@ -15,10 +16,11 @@ const settings = { topK: 3, similarityThreshold: 0.5, rerankEnabled: false, maxC
 
 function provider(overrides: Partial<ModelProviderRecord> = {}): ModelProviderRecord {
   return {
-    id: "provider-1", name: "Compatible", provider: "compatible", baseUrl: "https://models.example/v1", chatModel: "chat-model", embeddingModel: "", rerankModel: "rerank-model",
-    temperature: 0.2, maxTokens: 256, credentialEnv: "RETRIEVAL_TEST_API_KEY", enabled: true, isDefault: true, createdAt: "", updatedAt: "", ...overrides,
+    id: "provider-1", name: "Compatible", provider: "compatible", baseUrl: "https://models.example/v1", credentialEnv: "RETRIEVAL_TEST_API_KEY", enabled: true, hasApiKey: false,
+    createdAt: "", updatedAt: "", ...overrides,
   };
 }
+const selection = (model: string): ModelSelection => ({ provider: provider(), model, temperature: 0.2, maxTokens: 256 });
 
 function mockFetch(context: { after(fn: () => void): void }, handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   const oldKey = process.env.RETRIEVAL_TEST_API_KEY;
@@ -188,7 +190,7 @@ test("chat model streams tokens and usage from server-sent events", async (conte
     return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
   });
   const chunks = [];
-  for await (const chunk of createChatModel(provider(), noopLimiter()).streamChat([{ role: "user", content: "问题" }])) chunks.push(chunk);
+  for await (const chunk of createChatModel(selection("chat-model"), noopLimiter()).streamChat([{ role: "user", content: "问题" }])) chunks.push(chunk);
   assert.equal(request?.url, "https://models.example/v1/chat/completions");
   assert.equal(request?.body.model, "chat-model");
   assert.equal(request?.body.temperature, 0.2);
@@ -199,22 +201,22 @@ test("chat model streams tokens and usage from server-sent events", async (conte
 
 test("chat and rerank errors hide provider bodies; rerank results are validated", async (context) => {
   mockFetch(context, () => new Response("sensitive provider body test-secret", { status: 401 }));
-  const consume = async () => { for await (const _chunk of createChatModel(provider(), noopLimiter()).streamChat([{ role: "user", content: "问题" }])) { /* drain */ } };
+  const consume = async () => { for await (const _chunk of createChatModel(selection("chat-model"), noopLimiter()).streamChat([{ role: "user", content: "问题" }])) { /* drain */ } };
   await assert.rejects(consume(), (error: unknown) => {
     assert(error instanceof Error);
     assert.match(error.message, /chat request failed with HTTP 401/);
     assert.doesNotMatch(error.message, /sensitive|test-secret/);
     return true;
   });
-  await assert.rejects(createRerankModel(provider(), noopLimiter()).rerank("q", ["a", "b"]), /rerank request failed with HTTP 401/);
+  await assert.rejects(createRerankModel(selection("rerank-model"), noopLimiter()).rerank("q", ["a", "b"]), /rerank request failed with HTTP 401/);
 
   let body: Record<string, unknown> = {};
   globalThis.fetch = (async (_input: string, init?: RequestInit) => {
     body = JSON.parse(String(init?.body));
     return new Response(JSON.stringify({ results: [{ index: 0, relevance_score: 0.1 }, { index: 1, relevance_score: 0.8 }] }), { status: 200 });
   }) as typeof fetch;
-  assert.deepEqual(await createRerankModel(provider(), noopLimiter()).rerank("q", ["a", "b"], 5), [{ index: 1, score: 0.8 }, { index: 0, score: 0.1 }]);
+  assert.deepEqual(await createRerankModel(selection("rerank-model"), noopLimiter()).rerank("q", ["a", "b"], 5), [{ index: 1, score: 0.8 }, { index: 0, score: 0.1 }]);
   assert.equal(body.top_n, 2);
   globalThis.fetch = (async () => new Response(JSON.stringify({ output: { results: [{ index: 3, relevance_score: 0.5 }] } }), { status: 200 })) as typeof fetch;
-  await assert.rejects(createRerankModel(provider(), noopLimiter()).rerank("q", ["a", "b"]), /invalid results/);
+  await assert.rejects(createRerankModel(selection("rerank-model"), noopLimiter()).rerank("q", ["a", "b"]), /invalid results/);
 });

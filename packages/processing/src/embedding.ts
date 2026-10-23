@@ -1,23 +1,13 @@
-import type { ModelProviderRecord } from "@nyz-rag/types";
 import { acquireModelLease, type AdmissionLimiter } from "./model-admission.js";
-import { providerCredential, providerUrl } from "./provider.js";
+import { authorizationHeaders, providerCredential, providerUrl, type ModelTarget } from "./provider.js";
 
 const BATCH_SIZE = 32;
 const REQUEST_TIMEOUT_MS = 30_000;
 
-export function selectEmbeddingProvider(providers: ModelProviderRecord[]): ModelProviderRecord {
-  const candidates = providers.filter((provider) =>
-    provider.enabled && provider.isDefault && provider.embeddingModel.trim().length > 0,
-  );
-
-  if (candidates.length === 0) {
-    throw new Error("No enabled default embedding provider is configured.");
-  }
-  if (candidates.length > 1) {
-    throw new Error("Multiple enabled default embedding providers are configured.");
-  }
-
-  return candidates[0];
+/** 业务模型中的 Embedding 模型；未配置或供应商已停用时报错。 */
+export function requireEmbeddingModel<T extends ModelTarget>(selection: T | null): T {
+  if (!selection) throw new Error("未配置可用的 Embedding 模型，请在模型配置中选择");
+  return selection;
 }
 
 function readEmbeddingResponse(payload: unknown, expectedCount: number): number[][] {
@@ -56,14 +46,14 @@ function readEmbeddingResponse(payload: unknown, expectedCount: number): number[
 }
 
 /**
- * Embed an array of text inputs using the given provider.
+ * Embed an array of text inputs using the given provider and model.
  * Each batch of up to BATCH_SIZE texts counts as one request against the admission limiter.
  * @param limiter  Optional injected limiter; uses the shared lazy limiter if omitted.
  */
-export async function embedChunks(provider: ModelProviderRecord, inputs: string[], limiter?: AdmissionLimiter): Promise<number[][]> {
+export async function embedChunks({ provider, model: configuredModel }: ModelTarget, inputs: string[], limiter?: AdmissionLimiter): Promise<number[][]> {
   const apiKey = providerCredential(provider, "embedding");
 
-  const model = provider.embeddingModel.trim();
+  const model = configuredModel.trim();
   if (!model) {
     throw new Error("An embedding model is required.");
   }
@@ -86,7 +76,7 @@ export async function embedChunks(provider: ModelProviderRecord, inputs: string[
         response = await fetch(url, {
           method: "POST",
           headers: {
-            authorization: `Bearer ${apiKey}`,
+            ...authorizationHeaders(apiKey),
             "content-type": "application/json",
           },
           body: JSON.stringify({ model, input: batch }),

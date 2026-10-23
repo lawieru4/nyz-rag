@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import {
   AdmissionError, buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
-  DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, hasProviderCredential, HISTORY_TURNS, keywordSearchChunks,
-  listChatMessages, listChatSessions, listKnowledgeBases, listModelProviders, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, selectDefaultProvider,
-  summarySearchChunks, vectorSearchChunks, type AnswerContext, type ChatOwner, type ChatTurn,
+  DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, getModelSelections, HISTORY_TURNS, keywordSearchChunks,
+  listChatMessages, listChatSessions, listKnowledgeBases, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve,
+  summarySearchChunks, usableModel, vectorSearchChunks, type AnswerContext, type ChatOwner, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
   ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
@@ -45,8 +45,8 @@ async function resolveKnowledgeBase(id: string | undefined) {
 }
 
 /**
- * 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用默认供应商的 Chat 模型回答；
- * 未配置 Chat 模型、密钥缺失或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
+ * 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用业务模型配置中的 Chat 模型回答；Embedding、Rerank 同样取各自配置的供应商与模型。
+ * 未配置 Chat 模型、密钥不可用或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
  * 限流拒绝与限流服务故障不降级，返回错误且不保存回答。
  * signal 中止（客户端断开）时直接返回，由调用方丢弃结果。
  */
@@ -54,10 +54,13 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   const { question, knowledgeBase, log } = options;
   const started = performance.now();
   const settings = knowledgeBase ?? DEFAULT_RETRIEVAL_SETTINGS;
-  const defaultProvider = selectDefaultProvider(await listModelProviders());
-  const provider = defaultProvider && hasProviderCredential(defaultProvider) ? defaultProvider : null;
-  const embedding = provider?.embeddingModel.trim() ? createEmbeddingModel(provider) : null;
-  const reranker = provider?.rerankModel.trim() ? createRerankModel(provider) : null;
+  // 未配置、供应商已停用或密钥不可用（环境变量缺失、无法解密）的用途视为未配置。
+  const selections = await getModelSelections();
+  const chatModel = usableModel(selections.chat);
+  const embeddingModel = usableModel(selections.embedding);
+  const rerankModel = usableModel(selections.rerank);
+  const embedding = embeddingModel ? createEmbeddingModel(embeddingModel) : null;
+  const reranker = rerankModel ? createRerankModel(rerankModel) : null;
 
   // 切片与摘要两路向量召回共用同一个查询向量，只调用一次 Embedding。
   const queryVectors = new Map<string, Promise<number[]>>();
@@ -79,8 +82,8 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   let answer = extractiveAnswer(context);
   let answerMode: ChatAnswerMode = "extractive";
   const usage: AnswerResult["usage"] = {};
-  if (context.chunks.length && provider?.chatModel.trim() && !options.signal?.aborted) {
-    const chat = createChatModel(provider);
+  if (context.chunks.length && chatModel && !options.signal?.aborted) {
+    const chat = createChatModel(chatModel);
     try {
       let text = "";
       for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context, options.history), { signal: options.signal })) {

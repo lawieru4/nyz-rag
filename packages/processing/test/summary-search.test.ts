@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import type { ArticleMetadata, ModelProviderRecord } from "@nyz-rag/types";
+import type { ArticleMetadata } from "@nyz-rag/types";
+import type { ModelTarget } from "../src/provider.js";
 import { closeDatabase, getPool, migrate, withTransaction } from "../src/db.js";
 import {
   createSource, getSummaryInput, listDocumentChunks, listMissingSummaryEmbeddings, replaceDocumentChunks, saveDocumentEmbeddings, saveSummaryEmbedding, setEmbeddingState,
@@ -14,9 +15,9 @@ import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 const DIMENSIONS = 384;
 // 若干单位向量之和（未归一化，余弦相似度与长度无关）。
 const vec = (...axes: number[]) => Array.from({ length: DIMENSIONS }, (_, index) => axes.includes(index) ? 1 : 0);
-const provider: ModelProviderRecord = {
-  id: "provider-1", name: "Test", provider: "compatible", baseUrl: "", chatModel: "", embeddingModel: "test-model", rerankModel: "",
-  temperature: 0.3, maxTokens: 256, credentialEnv: "UNUSED", enabled: true, isDefault: true, createdAt: "", updatedAt: "",
+const embedding: ModelTarget = {
+  provider: { id: "provider-1", name: "Test", provider: "compatible", baseUrl: "", credentialEnv: "UNUSED", enabled: true, hasApiKey: false, createdAt: "", updatedAt: "" },
+  model: "test-model",
 };
 
 test("summary recall finds articles by summary vector and locates their best chunk", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
@@ -36,7 +37,7 @@ test("summary recall finds articles by summary vector and locates their best chu
       await replaceDocumentChunks(tx, id, { content: name, category, metadata: summary === null ? null : { summary } as ArticleMetadata },
         chunkVectors.map((_, index) => ({ id: `${id}-${index}`, index, content: `${name} 切片 ${index}`, tokenEstimate: 5 })));
       if (summary !== null) assert.equal(await getSummaryInput(id, tx), `文章：${name}\n\n${summary}`);
-      await saveDocumentEmbeddings(tx, id, await listDocumentChunks(id, tx), chunkVectors, provider, summaryVector);
+      await saveDocumentEmbeddings(tx, id, await listDocumentChunks(id, tx), chunkVectors, embedding, summaryVector);
       return id;
     });
     const a = await create("a", "research", "钠离子电池综述", [vec(1), vec(0, 2)], vec(0));
@@ -53,7 +54,7 @@ test("summary recall finds articles by summary vector and locates their best chu
     assert.deepEqual((await summarySearchChunks(vec(0), "test-model", 1)).map((hit) => hit.documentId), [a]);
     assert.deepEqual(await summarySearchChunks(vec(0), "other-model", 10), []);
     await assert.rejects(summarySearchChunks([], "test-model", 1), /Invalid query vector/);
-    await assert.rejects(withTransaction((tx) => saveDocumentEmbeddings(tx, c, [{ id: `${c}-0`, index: 0, content: "c", tokenEstimate: 1 }], [vec(0)], provider, [1, 0, 0])), /same dimensions/);
+    await assert.rejects(withTransaction((tx) => saveDocumentEmbeddings(tx, c, [{ id: `${c}-0`, index: 0, content: "c", tokenEstimate: 1 }], [vec(0)], embedding, [1, 0, 0])), /same dimensions/);
 
     const client = await getPool().connect();
     try {

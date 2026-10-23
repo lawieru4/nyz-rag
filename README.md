@@ -67,9 +67,9 @@ pnpm dev
 
 nyzdata 文章 API 增量同步（数据源只支持文章接口，已移除网页站点采集）、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通，用户端支持多轮会话、流式输出、停止生成、重新生成与复制回答；模块进度见 [模块清单](docs/module-status.md)。
 
-API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。使用向量化时，在 `.env` 中设置模型密钥和 `DATABASE_URL`，并在管理后台配置默认、启用的 OpenAI 兼容供应商及 Embedding 模型。问答使用同一默认供应商的 Chat 模型（温度与最大 Token 在模型配置中设置），未配置或调用失败时直接摘录原文片段；填写 Rerank 模型并在知识库中开启重排序后，召回结果会先经过重排序。检索参数（召回数量、相似度阈值、最大上下文、回答提示词）取最近创建的知识库，请求也可通过 `knowledgeBaseId` 指定。
+API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。先在 `.env` 中设置 `NYZ_SECRET_KEY`（至少 32 个字符，API 与 Worker 相同），后台填写的模型 API Key 与 nyzdata token 用它加密保存；更换后需重新填写。模型在管理后台「模型配置」中分两步配置：先添加供应商——选择服务类型（硅基流动、OpenAI、本地 Ollama 或其他 OpenAI 兼容服务）、填写 API Key（本地模型可不填，也可改填密钥环境变量名），可点「测试连接」；再在「业务模型」中为 Chat、Embedding、Rerank 分别选择供应商和模型（从供应商的模型列表中选或直接输入），三者可以来自不同供应商，例如硅基流动的 `BAAI/bge-m3` 做向量化、DeepSeek 做问答。问答使用 Chat 模型（温度与最大 Token 在 Chat 模型中设置），未配置或调用失败时直接摘录原文片段；配置 Rerank 模型并在知识库中开启重排序后，召回结果会先经过重排序。正在被业务模型使用的供应商不能删除。更换 Embedding 模型后需要重新向量化全部文档。检索参数（召回数量、相似度阈值、最大上下文、回答提示词）取最近创建的知识库，请求也可通过 `knowledgeBaseId` 指定。
 
-接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 写在 `.env` 的 `NYZ_ARTICLE_TOKEN`，只有 Worker 读取。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200），请求间隔与超时由 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS` 设置。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
+接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 在数据源页「nyzdata 接口 Token」中设置（加密保存，所有来源共用，修改后下次同步生效）。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200），请求间隔与超时由 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS` 设置。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
 
 元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。关键词检索的词项随切片生成；从旧版本升级时，Worker 启动会自动为已有切片补齐，修改词项规则后运行 `pnpm db:reindex-search` 全量重建。迁移 `0011` 删除网页站点来源及其文档（以及没有原始文章 JSON 的文档）；原本是这些文档重复项的文章会标记为处理失败，需在文档管理中「重新处理」。
 

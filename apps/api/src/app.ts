@@ -12,6 +12,7 @@ import { createMailer, type Mailer } from "./mailer.js";
 import { modelProviderRoutes } from "./model-providers.js";
 import { createDocumentQueue, type DocumentQueue } from "./queue.js";
 import { searchRoutes } from "./search.js";
+import { settingRoutes } from "./settings.js";
 import { adminAuthConfig, configureAdminAuth, createAdminAuthStore, databaseAdmins, type AdminAuthConfig, type AdminRepository } from "./admin-auth.js";
 import { createAuthStore, type AuthStore } from "./auth-store.js";
 import { configureUserAuth, databaseUsers, userAuthConfig, type UserAuthConfig, type UserRepository } from "./user-auth.js";
@@ -57,6 +58,7 @@ export function buildApp(options: {
   app.register(crawlTaskRoutes, { queue });
   app.register(knowledgeBaseRoutes);
   app.register(modelProviderRoutes);
+  app.register(settingRoutes);
   app.register(userRoutes);
   app.register(adminAccountRoutes, { admins: options.admins ?? databaseAdmins });
   return app;

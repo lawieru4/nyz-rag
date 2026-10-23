@@ -30,7 +30,7 @@
 | 文档管理 | 部分实现 | 分页、搜索、筛选、详情、删除、重新切片和向量化；展示模型、维度、向量数量与失败原因；文章详情展示元数据、切片、推荐追问与完整 Markdown；重复文档显示主文档，主文档显示同内容的其他来源 |
 | 知识库管理 | 部分实现 | 知识库列表、新建、编辑及检索参数维护 |
 | 问答管理 | 部分实现 | 问答记录、搜索（含用户邮箱）、评价筛选、详情和引用查看，显示提问人（账号/访客/无归属）；另有用户管理页（账号列表、停用/启用）；详情展示回答方式、模型、检索/首 Token/总耗时、Token 用量与召回片段得分 |
-| 模型配置 | 部分实现 | Provider 元数据 CRUD、启停、默认项与模型名维护；Embedding、Chat（温度、最大 Token）与 Rerank 均已接入运行时，密钥通过 API/Worker 环境变量引用 |
+| 模型配置 | 部分实现 | 供应商 CRUD、启停、测试连接；服务类型预设、API Key 加密保存（或引用环境变量、或无需密钥）；业务模型为 Chat、Embedding、Rerank 分别选择供应商与模型（可从模型列表选择）并接入运行时 |
 
 ## 推荐实施顺序
 
@@ -88,12 +88,14 @@
 - 验证：`pnpm typecheck`、`pnpm build`、processing/API/api-client 测试通过；`node:24-alpine` 镜像构建通过。用无头 Chrome 对接本机 API 检查了 web 首页、筛选、登录框、文章错误态、注入数据的问答线程与 390px 布局，以及 admin 登录、各模块、文档详情抽屉、表单对话框与 600px 折叠侧栏；确认框的确定/取消/Esc 返回值已验证。
 - 本轮完成（只保留文章接口数据源，2026-10-23）：按范围调整移除网页站点采集。Worker 删除网页抓取（正文正则提取、robots.txt 检查、同源链接遍历、canonical 识别）与 `CRAWL_MAX_PAGES`，同步任务只走文章接口；请求间隔与超时改名为 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS`（默认值不变）。processing 删除 `chunkText`、`canonicalUrlFromHtml`、`findDocumentByCanonicalUrl` 与旧版 JSON 快照导入命令 `db:import-snapshot`（旧快照只含网页数据）；`prepareDocument` 只从原始 JSON 解析，`upsertDocument` 只按来源内 articleKey 识别文章。迁移 `0011_article_only_sources`：删除网页站点来源（任务、文档、切片级联删除）及没有原始 JSON 的文档，原本是被删文档重复项的文章置为处理失败并提示重新处理；删除 `documents.raw_html`，`raw_json`、`external_id` 改为必填，来源类型约束只允许 `文章 API`。API 来源类型枚举只剩 `文章 API`，文档响应 `externalId` 必填、去掉 `rawHtml`；管理端数据源页去掉类型选择与类型列，文档详情去掉原始 HTML。保留 `normalizeUrl`、正文指纹去重与 `canonical_url` 列（与文章地址相同）。图片、PDF 附件不处理。
 - 验证：`pnpm typecheck`、`pnpm build` 通过；processing 单元测试 66 项通过（12 项集成测试默认跳过），API 105 项（103 通过、2 项真实 Redis 测试跳过），api-client 12 项通过；加载根 `.env` 启用集成测试后 processing 78 项中 73 项通过、5 项真实 Redis 准入测试跳过、无失败。集成测试夹具改为文章详情 JSON（`test/article-fixtures.ts`），端到端测试改用第二个文章来源验证同内容判重、重复文档不向量化与删除主文档后接替，并验证网页站点来源返回 400。迁移在临时 schema 上先执行到 `0010` 并写入网页来源、网页文档、指向网页文档的重复文章和无原始 JSON 的文档后再执行 `0011`，确认上述数据按预期删除或置为失败，之后插入网页来源或缺少原始 JSON 的文档被约束拒绝。本地业务库无来源与文档，迁移不影响现有数据。
+- 本轮完成（后台配置密钥与业务模型配置，2026-10-23）：新增 `secrets.ts`，后台填写的密钥以 AES-256-GCM 加密入库，主密钥为 `NYZ_SECRET_KEY`（API 与 Worker 相同，≥32 字符），密文绑定用途（供应商 ID 或设置名），接口只返回是否已配置。nyzdata token 改为全局一个、在数据源页设置或清除（`secret_settings` 表，`GET/PUT/DELETE /api/admin/settings/article-token`），Worker 每次同步时读取，移除 `NYZ_ARTICLE_TOKEN` 环境变量。模型供应商新增加密的 API Key（`api_key_ciphertext`，写入用 `apiKey`、清除用 `clearApiKey`，响应只有 `hasApiKey`），密钥依次取已保存密钥、`credentialEnv` 环境变量、无（不带认证头，便于本地模型）。供应商与模型解耦：供应商只保存连接（地址、密钥、启用），新增 `model_settings` 表为 Chat / Embedding / Rerank 各选一个供应商与模型（温度、最大 Token 只属于 Chat），问答、向量化与重排序分别使用，可组合不同供应商；被使用的供应商不能删除（外键 RESTRICT，接口 409），停用后对应用途视为未配置。新增接口 `GET /api/admin/model-settings`、`PUT|DELETE /api/admin/model-settings/:capability`、`POST /api/admin/model-providers/models`（测试连接，按地址与密钥读取 `/models`）和 `GET /api/admin/model-providers/:id/models`（业务模型选择时列出已保存供应商的模型）。管理端模型配置页分为「业务模型」与「供应商」两部分：供应商表单有服务类型预设（硅基流动、OpenAI、本地 Ollama、其他）、API Key 与测试连接；业务模型对话框选择供应商后自动获取模型列表，按用途给出候选，也可直接输入；更换 Embedding 模型前提示需重新向量化。迁移 `0012_provider_defaults_and_secrets` 增加密钥列与 `secret_settings`，`0013_model_settings` 把原默认供应商的 Chat / Embedding / Rerank 模型转为业务模型配置后删除供应商上的模型、温度与默认标记列。
+- 验证：`pnpm typecheck`、`pnpm build` 通过；processing 单元测试 82 项（70 通过、12 项集成测试默认跳过），新增加密往返与用途绑定、主密钥更换与缺失、密钥解析顺序与无密钥不带认证头、密钥不可用的模型视为未配置、模型列表解析与错误脱敏；API 109 项（107 通过、2 项真实 Redis 测试跳过），覆盖供应商请求体拒绝模型字段、业务模型的用途与请求体校验、响应不含密钥密文；api-client 12 项通过。加载根 `.env` 启用集成测试后 processing 82 项中 77 项通过、5 项真实 Redis 测试跳过、无失败：端到端测试经管理接口设置 token 后同步文章，模型密钥以加密形式保存并用于向量化与问答，验证数据库中无明文、日志不含 token/主密钥/模型密钥、保留与清除密钥，用已保存密钥获取模型列表（按地址与按供应商 ID）、错误密钥返回 502，业务模型的读取、保存（模型名去空白、Chat 温度与最大 Token）、清除，停用供应商不能选择、被使用的供应商删除返回 409。迁移 `0012` 在执行到 `0011` 并写入默认与非默认供应商的临时 schema 上验证了默认项转换；`0013` 在执行到 `0012` 并写入三个供应商（含停用、未设默认）的临时 schema 上验证了 Chat（含温度与最大 Token）、Embedding、Rerank 的转换、供应商表只剩连接列，以及删除被使用的供应商被外键拒绝。未用真实硅基流动或 Ollama 服务验证。
 
 ## 向量化运行配置
 
-- 在根目录 `.env` 设置 `DATABASE_URL`、`REDIS_URL` 和模型密钥，API/Worker 的 dev/start 命令会加载该文件。
-- 在模型配置中填写 OpenAI 兼容基础 URL（例如 `https://api.openai.com/v1`，系统追加 `/embeddings`）、Embedding 模型名与密钥环境变量名称，启用并设为默认。只有明确标识为 OpenAI 的供应商可省略 URL。
+- 在根目录 `.env` 设置 `DATABASE_URL`、`REDIS_URL` 和 `NYZ_SECRET_KEY`，API/Worker 的 dev/start 命令会加载该文件。
+- 在模型配置中选择服务类型或填写 OpenAI 兼容基础 URL（例如 `https://api.siliconflow.cn/v1`，系统追加 `/embeddings`），填写 API Key（本地模型可不填，也可改填密钥环境变量名），启用后在「业务模型」中为 Embedding 选择该供应商和模型。只有明确标识为 OpenAI 的供应商可省略 URL。
 - `vector` 扩展需管理员预先创建；表结构由迁移创建。向量列不限维度，384/512/768/1024/1536/2000 维使用 HNSW 部分表达式索引，其他维度保留精确扫描，均按模型与维度过滤。ANN 过滤后候选不足时精确回退；首次建索引宜安排维护窗口，不是并发建索引。
-- 问答使用同一默认供应商：填写 Chat 模型即启用生成回答（系统追加 `/chat/completions`，流式调用）；填写 Rerank 模型并在知识库开启重排序后调用 `/rerank`（Jina/Cohere/SiliconFlow 兼容格式）。检索参数取请求指定或最近创建的知识库，没有知识库时为 topK 5、相似度阈值 0.3、上下文 6000 字。
+- 问答使用业务模型中的 Chat 模型生成回答（系统追加 `/chat/completions`，流式调用）；配置 Rerank 模型并在知识库开启重排序后调用 `/rerank`（Jina/Cohere/SiliconFlow 兼容格式）。三项可来自不同供应商。检索参数取请求指定或最近创建的知识库，没有知识库时为 topK 5、相似度阈值 0.3、上下文 6000 字。
 - 根目录 `pnpm dev` 和 `pnpm typecheck` 会先构建共享处理包；单独启动 API 或 Worker 前，先执行 `pnpm --filter @nyz-rag/processing build`。
 - 验证命令：`pnpm --filter @nyz-rag/processing test`、`pnpm --filter @nyz-rag/api test`、`pnpm --filter @nyz-rag/api-client test`；本地基础设施启动后运行 `NYZ_INTEGRATION_TEST=1 pnpm --filter @nyz-rag/processing test`。集成测试使用临时 PostgreSQL schema、本地模拟模型接口及隔离的 Redis 队列，结束时删除该 schema。

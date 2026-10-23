@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import {
-  deleteDocument, DocumentBusyError, getDocument, getDocumentDetail, getDocumentSummary, listDocuments, listModelProviders,
-  selectEmbeddingProvider, setEmbeddingState, setProcessingState,
+  deleteDocument, DocumentBusyError, getDocument, getDocumentDetail, getDocumentSummary, getModelSelection, hasProviderCredential, listDocuments,
+  requireEmbeddingModel, setEmbeddingState, setProcessingState,
 } from "@nyz-rag/processing";
 import type { DocumentListResponse } from "@nyz-rag/types";
 import { pageParams } from "./common.js";
@@ -47,8 +47,8 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     if (document.processingStatus === "duplicate") return reply.code(409).send({ error: "重复文档不单独向量化，内容由主文档提供" });
     if (document.processingStatus !== "chunked" || !document.chunkCount) return reply.code(409).send({ error: "请先完成文档清洗与切片" });
     try {
-      const provider = selectEmbeddingProvider(await listModelProviders());
-      if (!process.env[provider.credentialEnv]?.trim()) throw new Error(`请在 API 和 Worker 环境配置 ${provider.credentialEnv}`);
+      const { provider } = requireEmbeddingModel(await getModelSelection("embedding"));
+      if (!hasProviderCredential(provider)) throw new Error("Embedding 模型所用供应商的密钥不可用，请在模型配置中检查 API 密钥或密钥环境变量");
     } catch (cause) {
       return reply.code(409).send({ error: cause instanceof Error ? cause.message : "Embedding configuration is invalid" });
     }
