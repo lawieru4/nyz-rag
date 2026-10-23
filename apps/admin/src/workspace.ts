@@ -3,7 +3,7 @@ import { AdminApiClient, ApiError } from "./adminClient";
 
 export { ApiError };
 
-export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string };
+export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; updated: string; syncedAt: string | null };
 export type Task = { id: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number; started: string; error?: string };
 
 export const client = new AdminApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
@@ -18,7 +18,7 @@ export async function loadKnowledge() {
     sources: Array<{ id: string; name: string; url: string; kind: string; frequency: string; status: Source["status"]; documentCount: number; updatedAt: string | null }>;
     tasks: Array<{ id: string; sourceName: string; status: Task["status"]; progress: number; createdAt: string; error?: string }>;
   }>("/api/admin/knowledge");
-  sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
+  sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, syncedAt: source.updatedAt, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
   tasks.value = data.tasks.map((task) => ({ id: task.id, source: task.sourceName, status: task.status, progress: task.progress, started: new Date(task.createdAt).toLocaleString(), error: task.error }));
 }
 
