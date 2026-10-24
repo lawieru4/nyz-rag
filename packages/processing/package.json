@@ -19,6 +19,7 @@
     "evaluate:retrieval": "tsx --env-file-if-exists=../../.env src/cli/evaluate-retrieval.ts",
     "evaluate:generate": "tsx --env-file-if-exists=../../.env src/cli/evaluate-generate.ts",
     "evaluate:compare": "tsx src/cli/evaluate-compare.ts",
+    "evaluate:answer": "tsx --env-file-if-exists=../../.env src/cli/evaluate-answer.ts",
     "evaluate:index": "tsx --env-file-if-exists=../../.env src/cli/evaluate-index.ts",
     "db:generate": "drizzle-kit generate && node scripts/unqualify-migrations.mjs"
   },

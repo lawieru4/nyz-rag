@@ -10,8 +10,44 @@
 - **只对正文做 RAG**：暂不处理图片与 PDF 附件，相关条目移到「暂不实施」；解析器已存入 `metadata` 的附件、图片信息保留，不参与检索。
 - **当前优先级**：
   1. ~~移除网页站点来源（第四阶段）~~，已完成；
-  2. 文章派生合成评估集与基线，方案见 [evaluation-plan.md](evaluation-plan.md)（第三阶段）；
-  3. 章节父块 + 语义子块切片，方案见 [chunking-design.md](chunking-design.md)，以评估基线验收（第四阶段）。
+  2. ~~文章派生合成评估集与基线，方案见 [evaluation-plan.md](evaluation-plan.md)（第三阶段）~~，已完成（2026-10-24）；
+  3. ~~章节父块 + 语义子块切片，方案见 [chunking-design.md](chunking-design.md)，以评估基线验收（第四阶段）~~，已实现并完成实验，没有正收益，暂不上线（2026-10-24）。
+
+## 当前待办（2026-10-24）
+
+按优先级排列；各阶段中其他未完成的条目（问题改写、近似去重、授权确认、角色权限、审计日志、成本统计等）见下文。
+
+### 优先
+
+- [x] **回答层评估（I）**：对评估集运行完整问答（不保存问答记录），统计来源文章被引用的比例，由 LLM 评审回答是否忠实于上下文、是否完整。
+  - [x] 工具 `evaluate:answer`（2026-10-24），方案见 [evaluation-plan.md](evaluation-plan.md) 第 8.7 节；
+  - [x] 换用不同的审核模型：Chat 为 gemini-3.8-flash-high（CLIProxy），审核为 gpt-6.1-sol；
+  - [x] dev 集基线 `answer-topk`、`answer-budget`（2026-10-24）：faithful / complete / citation 通过率 100.0 / 97.5 / 99.6，见 evaluation-plan.md 第 8.8 节。
+- [x] **上下文字数预算**：已用回答层评估比较（2026-10-24），结论为暂不调整。线上 topK=5 平均只送入约 3000 字，是 `maxContextLength`（6144）的一半。填满预算后，fused 证据命中由 76.8 升到 94.0，rerank 由 96.8 升到 97.3（evaluation-plan.md 第 8.6 节）。
+  - 按字数预算组装与 topK=5 相比，回答质量的差别在 1～2 道题以内，输入 Token 翻倍，首 Token 耗时基本不变（evaluation-plan.md 第 8.8 节）；
+  - 线上开启了 Rerank，证据命中已有 96.8，填满预算的收益很小；只有关闭 Rerank 时，才值得按预算组装。
+- [x] **业务库有 1 篇主文档未向量化**（覆盖率 99.91%）：已重试，覆盖率 100%（1126 篇，2026-10-24）。
+  - 原因：文章 `10383539889` 在 2026-10-23 同步后自动向量化时，Embedding 服务返回 HTTP 503；`embedChunks` 不重试瞬时错误，自动向量化失败后也不重新入队，只能在管理端手动重试；
+- [ ] **Embedding 瞬时错误不重试**：同步时自动向量化遇到 503 等瞬时错误即标记失败，需人工重试。可在 `embedChunks` 对 429/5xx/超时退避重试 1～2 次，或让失败的自动向量化入队 `embed-document` 并设置 `attempts`。
+
+### 其次
+
+- [ ] **切片规则 1 丢字**：`chunking.ts` 的 `SENTENCE` 拆超长段落时，会丢掉没有句末标点、以换行结尾的行（如长列表的条目）。规则 2 的 `splitSentences` 没有这个问题。
+  - 修复会改变现有切片，需要提升 `CHUNKER_VERSION`；
+  - 修复后全量「重新处理」，并重新运行基线。
+- [ ] **失败题复判（H）**：AI 判断排在来源文章之前的文章能否回答该问题，报告宽松 Hit（evaluation-plan.md 第 7.3 节）。各变体都未召回来源文章的 s0152、s0163 优先复判。
+- [ ] **test 集阶段验收**：按 evaluation-plan.md 第十一节，在 test 集（112 道题）上运行一次当前配置，记录到 module-status.md，注明「合成基线，单来源标注」。
+
+### 继续父子块时才做
+
+- [ ] 上下文依赖专项题：结论与条件分处相邻段落、表格数值需要结合正文解释等（[父子块建议](parent-child-chunking-recommendations.md)第五节），单独报告。
+- [ ] 子块下向量召回集中在少数文章（排名深度不足的题由 67 道增至 131 道）：加大向量召回的候选数，或按文章去重后再评估。
+- [ ] 上线：问答改用 `buildSectionContext`，`message_chunks` 记录父块；`CHUNKER_VERSION` 改为 2，业务库全量「重新处理」。
+
+### 清理
+
+- [ ] 删除实验 schema `eval_legacy`、`eval_sections`（`DROP SCHEMA … CASCADE`），或在下次切片实验前用 `evaluate:index --reset` 重建。
+- [ ] 确认业务库已执行迁移 `0017_document_sections`：API/Worker 启动时会自动执行；在业务库上直接运行 `evaluate:retrieval` 前，需要先完成迁移。
 
 ## 样本评估结论（200 篇，2026-10-21）
 
@@ -86,12 +122,13 @@
 - [ ] 文章派生合成评估集与基线（方案见 [evaluation-plan.md](evaluation-plan.md)）：AI 按文章生成带原文证据的问题，经程序校验与 AI 审核，单来源标注（来源文章 + 证据），标记 `source=synthetic`、单独报告，作为切片与检索调整的回归基线；目前没有人工标注资源
   - [x] 前置：语料入库并完成向量化（2026-10-23：主文档 1126 篇，同步暂停，未全量），评估用知识库参数随运行记录保存
   - [x] 数据集 schemaVersion 2（题型、具体度、来源、参考答案、多段证据、dev/test 按文章划分），兼容 v1
-  - [x] `evaluate:generate`：语料快照、分层抽样（首版 400 篇）、生成、程序校验（证据存在、指代、词面重叠、重复）、AI 审核、重试与断点续跑、冻结导出；试点 50 篇进行中（2026-10-23）
-  - [ ] 评估命令 `--mode=hybrid`：调用真实 `retrieve()`，`--variant` 逐路消融；排名列表（30 个候选）与回答上下文分离；输出来源文章 Hit@K、MRR、Evidence Hit、上下文命中、耗时与降级，按题型/具体度/词面重叠分组
-  - [ ] 运行结果保存（语料指纹、参数、逐题排名）与 `evaluate:compare` 对比
-  - [ ] 产出 `synthetic-v1` 与基线运行记录
+  - [x] `evaluate:generate`：语料快照、分层抽样（首版 400 篇）、生成、程序校验（证据存在、指代、词面重叠、重复）、AI 审核、重试与断点续跑、冻结导出
+  - [x] 评估命令 `--mode=hybrid`：调用真实 `retrieve()`，`--variant` 逐路消融；排名列表（30 个候选）与回答上下文分离；输出来源文章 Hit@K、MRR、Evidence Hit、上下文命中、耗时与降级，按题型/具体度/词面重叠分组
+  - [x] 运行结果保存（语料指纹、参数、逐题排名）与 `evaluate:compare` 对比
+  - [x] 产出 `synthetic-v1`（350 题，dev 238 / test 112）与 dev 基线运行记录（2026-10-24）
+  - [x] 实验索引 `evaluate:index`（`eval_*` schema）、`--schema` 与 `--context=topk|budget|section`、全部证据覆盖率与上下文字数（2026-10-24）
   - [ ] 失败题复判：AI 判断排在来源文章之前的文章能否回答，报告宽松 Hit
-  - [ ] 回答层评估：来源文章引用比例、LLM 评审忠实度
+  - [x] 回答层评估工具 `evaluate:answer`：来源文章引用比例、LLM 评审忠实度与完整度（2026-10-24），dev 基线 `answer-topk` 已运行
   - [ ] 后续（有真实提问积累后）：真实问题 AI 银标集（候选池 + AI 分级判定 + 抽查）；人力到位后再做人工标注集与管理端标注模块
 - [ ] 问题改写：追问时结合历史把问题改写为独立问题后再检索，失败时用原问题；以评估集中的多轮追问题验收
 - [x] 混合召回（向量/关键词各 20 条）、RRF 合并去重（前 30 条）、可选 Rerank，取知识库 `topK` 条送入模型；向量检索或 Rerank 失败时降级。问题改写未做
@@ -117,7 +154,7 @@
 - [x] 文档补充字段：`canonical_url`、`author`、`category`、`published_at`、`content_hash`、`parse_status`、`parse_error` 等。（已加 `external_id`、`canonical_url`、`author`、`category`、`tags`、`published_at`、`source_updated_at`、`content_hash`、`duplicate_of`、`markdown`、`metadata`；解析状态复用 `processing_status`/`processing_error`）
 - [x] 去重：URL 规范化、canonical URL、正文指纹（`content_hash`）。跨来源重复保留为重复文档（`duplicate_of` 指向最早入库的主文档，不切片、不向量化、不参与检索），管理端展示其他来源；主文档变化或删除时由重复文档接替；按指纹咨询锁处理并发。标题 + 发布时间去重未做
 - [x] 结构化切片（`packages/processing/src/chunking.ts`）：同章节累积约 800 字，过短章节并入下一节，表格不超过两倍目标长度时整块保留（更长按行切分并重复表头），超长段落按句切分；网页按行切分，不再折叠空白
-- [ ] 章节父块 + 语义子块切片（方案见 [chunking-design.md](chunking-design.md)）：章节为父块（短章节并入上级、长章节按下级标题或块边界拆分），1～3 个连续内容块为子块；子块召回、按父块聚合放入上下文；新增 `document_sections`、`chunker_version`；修正短章节切片章节路径错误。须在评估基线就绪后实施并按基线验收
+- [x] 章节父块 + 段落子块切片（切片规则 2，方案与实际实现见 [chunking-design.md](chunking-design.md) 第六节）：`chunkSections`、`document_sections`、`chunker_version`、`buildSectionContext` 已实现。在实验索引上与基线对比后，没有正收益，暂不启用（`CHUNKER_VERSION` 仍为 1，[evaluation-plan.md](evaluation-plan.md) 第 8.6 节）。继续推进的条目见「当前待办」
 - [x] 向量化前为 chunk 添加上下文前缀（文章标题、章节、前 8 个关键词），存于 `document_chunks.context`；保存 `section_path`、`content_type`。节点范围未保存
 - [ ] Worker 拆分为独立阶段任务（采集 → 解析 → 切片 → 向量化），各阶段可单独重试。Worker 并发为 1 且「重新处理」可从 `raw_json` 重跑，优先级低
 
