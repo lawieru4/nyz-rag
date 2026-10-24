@@ -263,8 +263,10 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal((await embedding())?.chunkCount, 2);
 
     mode = "failure";
+    const requestedBeforeFailure = requested;
     assert.equal((await post("embed")).status, 202);
     await waitEmbedding("failed");
+    assert.equal(requested - requestedBeforeFailure, 3, "transient provider failures are retried twice before failing");
     assert.doesNotMatch((await embedding())?.error ?? "", /do-not-leak-provider-body|integration-test-key/);
     assert.equal((await embeddedChunks()).length, 2, "failed embedding preserves previous vectors");
 
