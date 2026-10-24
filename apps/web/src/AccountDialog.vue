@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import type { UserAccount, UserSessionResponse } from "@nyz-rag/types";
+import { errorMessage } from "@nyz-rag/api-client";
 import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
 import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
-import { ApiError, client } from "./webClient";
+import { client } from "./webClient";
 
 export type AccountMode = "login" | "register" | "forgot" | "password";
 
@@ -46,8 +47,6 @@ function startCooldown() {
   cooldownTimer = setInterval(() => { if (--cooldown.value <= 0) clearInterval(cooldownTimer); }, 1000);
 }
 
-const message = (err: unknown, fallback: string) => err instanceof ApiError ? err.message : fallback;
-
 function validEmail() {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim())) { error.value = "请输入有效的邮箱地址"; return false; }
   return true;
@@ -70,7 +69,7 @@ async function sendCode() {
     info.value = props.mode === "register" ? "邮件已发送，请查收验证码（10 分钟内有效）。" : "如果该邮箱已注册，验证码将发送到该邮箱（10 分钟内有效）。";
     startCooldown();
   } catch (err) {
-    error.value = message(err, "验证码发送失败，请稍后重试");
+    error.value = errorMessage(err, "验证码发送失败，请稍后重试");
   } finally {
     sending.value = false;
   }
@@ -98,7 +97,7 @@ async function submit() {
     const { user } = await client.request<UserSessionResponse>(path, { method: "POST", body: JSON.stringify(body) });
     emit("authenticated", user!);
   } catch (err) {
-    error.value = message(err, "请求失败，请检查网络后重试");
+    error.value = errorMessage(err, "请求失败，请检查网络后重试");
   } finally {
     busy.value = false;
   }

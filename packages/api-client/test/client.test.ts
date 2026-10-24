@@ -6,7 +6,8 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ApiClient, ApiError } from "../src/client.js";
+import { ApiClient, ApiError, errorMessage, withSession } from "../src/index.js";
+import { AdminApiClient } from "../../../apps/admin/src/adminClient.js";
 
 // ---------------------------------------------------------------------------
 // Fetch-stub helpers
@@ -67,6 +68,128 @@ before(() => {
 
 after(() => {
   restoreFetch();
+});
+
+describe("errorMessage", () => {
+  it("returns only ApiError messages, including an empty message", () => {
+    assert.equal(errorMessage(new ApiError(400, "server message"), "fallback"), "server message");
+    assert.equal(errorMessage(new ApiError(400, ""), "fallback"), "");
+    for (const err of [new Error("network error"), { message: "not an ApiError" }, "error", null, undefined]) {
+      assert.equal(errorMessage(err, "fallback"), "fallback");
+    }
+  });
+});
+
+describe("withSession", () => {
+  for (const csrfHeader of ["X-NYZ-Client", "X-NYZ-Admin"]) {
+    it(`uses ${csrfHeader} only for non-GET/HEAD methods`, () => {
+      for (const method of [undefined, "GET", "get", "HEAD", "head", "POST", "post", "PUT", "PATCH", "DELETE", "OPTIONS", ""]) {
+        const init = withSession({ method, credentials: "omit" }, csrfHeader);
+        const safe = method === undefined || ["GET", "HEAD"].includes(method.toUpperCase());
+        assert.ok(init.headers instanceof Headers);
+        assert.equal(init.headers.get(csrfHeader), safe ? null : "1");
+        assert.equal(init.headers.has(csrfHeader === "X-NYZ-Client" ? "X-NYZ-Admin" : "X-NYZ-Client"), false);
+        assert.equal(init.credentials, "include");
+        assert.equal(init.method, method);
+      }
+    });
+
+    it(`copies every HeadersInit form without mutating the caller for ${csrfHeader}`, () => {
+      const entries: [string, string][] = [[csrfHeader.toLowerCase(), "original"], ["X-Custom", "kept"]];
+      for (const headers of [new Headers(entries), Object.fromEntries(entries), entries]) {
+        const init: RequestInit = Object.freeze({ method: "POST", headers, credentials: "same-origin", body: "{}", signal: new AbortController().signal });
+        const result = withSession(init, csrfHeader);
+        assert.notEqual(result, init);
+        assert.notEqual(result.headers, headers);
+        assert.ok(result.headers instanceof Headers);
+        assert.equal(result.headers.get(csrfHeader), "1");
+        assert.equal(result.headers.get("x-custom"), "kept");
+        assert.equal(new Headers(headers).get(csrfHeader), "original");
+        assert.equal(init.credentials, "same-origin");
+        assert.equal(result.body, init.body);
+        assert.equal(result.signal, init.signal);
+        for (const method of [undefined, "get", "HEAD"]) {
+          const safe = withSession({ ...init, method }, csrfHeader);
+          assert.equal(new Headers(safe.headers).get(csrfHeader), "original");
+        }
+      }
+    });
+  }
+
+  it("preserves session options and custom content type through JSON requests and SSE", async () => {
+    const client = new ApiClient("http://api.test");
+    const signal = new AbortController().signal;
+    const headers = new Headers({ "Content-Type": "text/plain", "X-Custom": "kept" });
+    let calls = 0;
+    installFetch((_input, init) => {
+      calls++;
+      assert.equal(init?.credentials, "include");
+      assert.equal(init?.signal, signal);
+      assert.equal(init?.body, "{}");
+      const actualHeaders = new Headers(init?.headers);
+      assert.equal(actualHeaders.get("X-NYZ-Client"), "1");
+      assert.equal(actualHeaders.get("content-type"), "text/plain");
+      assert.equal(actualHeaders.get("X-Custom"), "kept");
+      return Promise.resolve(calls === 1 ? makeJsonResponse({}) : makeSseResponse(['event: done\ndata: {}\n\n']));
+    });
+    const init = withSession({ method: "POST", body: "{}", signal, headers }, "X-NYZ-Client");
+    await client.request("/json", init);
+    await client.stream("/stream", init, { onEvent: () => {}, onIncomplete: () => assert.fail("unexpected incomplete stream") });
+    assert.equal(calls, 2);
+    assert.equal(headers.has("X-NYZ-Client"), false);
+  });
+});
+
+describe("AdminApiClient", () => {
+  it("applies only the admin session header to JSON requests", async () => {
+    installFetch((_input, init) => {
+      assert.equal(init?.credentials, "include");
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("X-NYZ-Admin"), "1");
+      assert.equal(headers.has("X-NYZ-Client"), false);
+      assert.equal(headers.get("content-type"), "application/json");
+      return Promise.resolve(makeJsonResponse({ ok: true }));
+    });
+    assert.deepEqual(await new AdminApiClient("http://api.test").request("/api/admin/test", { method: "POST", body: "{}" }), { ok: true });
+  });
+
+  it("notifies only for non-login ApiError 401 and rethrows the same error", async () => {
+    const client = new AdminApiClient("http://api.test");
+    let notifications = 0;
+    client.onUnauthorized = () => { notifications++; };
+    for (const [path, err, expected] of [
+      ["/api/admin/test", new ApiError(401, "expired"), 1],
+      ["/api/admin/auth/login", new ApiError(401, "invalid login"), 1],
+      ["/api/admin/auth/login?next=home", new ApiError(401, "expired"), 2],
+      ["/api/admin/test", new ApiError(403, "forbidden"), 2],
+      ["/api/admin/test", new Error("network"), 2],
+      ["/api/admin/test", { status: 401 }, 2],
+    ] as const) {
+      installFetch(() => Promise.reject(err));
+      await assert.rejects(client.request(path), (actual: unknown) => actual === err);
+      assert.equal(notifications, expected);
+    }
+    client.onUnauthorized = null;
+    const err = new ApiError(401, "expired without handler");
+    installFetch(() => Promise.reject(err));
+    await assert.rejects(client.request("/api/admin/test"), (actual: unknown) => actual === err);
+  });
+
+  it("handles HTTP 401 responses but leaves inherited streams unchanged", async () => {
+    const client = new AdminApiClient("http://api.test");
+    let notifications = 0;
+    client.onUnauthorized = () => { notifications++; };
+    installFetch(() => Promise.resolve(makeJsonResponse({ error: "expired" }, 401)));
+    await assert.rejects(client.request("/api/admin/test"), { name: "ApiError", status: 401, message: "expired" });
+    await assert.rejects(client.request("/api/admin/auth/login"), { name: "ApiError", status: 401 });
+    installFetch((_input, init) => {
+      assert.equal(init?.credentials, undefined);
+      assert.equal(new Headers(init?.headers).has("X-NYZ-Admin"), false);
+      return Promise.resolve(makeJsonResponse({ error: "expired" }, 401));
+    });
+    await assert.rejects(client.stream("/stream", { method: "POST" }, { onEvent: () => {}, onIncomplete: () => {} }), { status: 401 });
+    assert.equal(notifications, 1);
+  });
 });
 
 // ---------------------------------------------------------------------------

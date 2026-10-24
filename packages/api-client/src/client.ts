@@ -13,6 +13,17 @@ export class ApiError extends Error {
   }
 }
 
+export function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof ApiError ? err.message : fallback;
+}
+
+/** Include session cookies and mark non-GET/HEAD requests with the caller's CSRF header. */
+export function withSession(init: RequestInit, csrfHeader: string): RequestInit {
+  const headers = new Headers(init.headers);
+  if (!["GET", "HEAD"].includes((init.method ?? "GET").toUpperCase())) headers.set(csrfHeader, "1");
+  return { ...init, headers, credentials: "include" };
+}
+
 async function errorFrom(response: Response): Promise<ApiError> {
   const data = await response.json().catch(() => ({})) as Record<string, unknown>;
   return new ApiError(response.status, typeof data["error"] === "string" ? data["error"] : `请求失败（${response.status}）`);

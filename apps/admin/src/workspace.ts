@@ -3,6 +3,7 @@ import type { KnowledgeOverview } from "@nyz-rag/types";
 import { AdminApiClient, ApiError } from "./adminClient";
 
 export { ApiError };
+export { errorMessage } from "@nyz-rag/api-client";
 
 export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; remoteTotal: number | null; backfillDone: boolean; failedCount: number; updated: string; syncedAt: string | null };
 export type Task = {
@@ -58,8 +59,4 @@ export function resetKnowledge() {
 
 export function sourceName(id: string | undefined) {
   return sources.value.find((source) => source.id === id)?.name ?? "未知数据源";
-}
-
-export function errorMessage(err: unknown, fallback: string) {
-  return err instanceof ApiError ? err.message : fallback;
 }

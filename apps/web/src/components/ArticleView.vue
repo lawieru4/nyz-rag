@@ -7,7 +7,7 @@ import { Button } from "@nyz-rag/ui/components/button";
 import { Skeleton } from "@nyz-rag/ui/components/skeleton";
 import { parseMarkdown, safeLink } from "../markdown";
 import { client } from "../webClient";
-import MarkdownInline from "./MarkdownInline.vue";
+import MarkdownBlocks from "./MarkdownBlocks.vue";
 
 /** 文章 ID；空字符串表示地址无法解析。 */
 const props = defineProps<{ id: string }>();
@@ -70,13 +70,7 @@ watch(() => props.id, load, { immediate: true });
         <p v-if="article.repostSource" class="mt-3 text-xs text-muted-foreground">转载自 {{ article.repostSource }}</p>
       </header>
       <div class="article-body">
-        <template v-for="(block, index) in blocks" :key="index">
-          <component :is="`h${block.level}`" v-if="block.kind === 'heading'" class="markdown-heading"><MarkdownInline :text="block.text || ''" /></component>
-          <p v-else-if="block.kind === 'paragraph'" class="markdown-paragraph"><MarkdownInline :text="block.text || ''" /></p>
-          <component :is="block.ordered ? 'ol' : 'ul'" v-else-if="block.kind === 'list'" :start="block.start" :class="['markdown-list', block.ordered ? 'list-decimal' : 'list-disc']"><li v-for="(item, itemIndex) in block.items" :key="itemIndex"><MarkdownInline :text="item" /></li></component>
-          <pre v-else-if="block.kind === 'code'" class="markdown-code"><code>{{ block.text }}</code></pre>
-          <div v-else-if="block.kind === 'table'" class="markdown-table-wrap"><table><tbody><tr v-for="(row, rowIndex) in block.rows" :key="rowIndex"><template v-if="rowIndex === 0"><th v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</th></template><template v-else><td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td></template></tr></tbody></table></div>
-        </template>
+        <MarkdownBlocks :blocks="blocks" />
       </div>
       <Button v-if="originalUrl" as="a" :href="originalUrl" target="_blank" rel="noopener noreferrer" variant="link" class="mt-4 h-auto px-0 text-xs text-link">查看原文 <ArrowUpRight /></Button>
     </article>

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { ArrowUpRight, Check, Copy, KeyRound, LogOut, Menu, RefreshCw, SlidersHorizontal, Sparkles, Square, SquarePen, ThumbsDown, ThumbsUp, X } from "@lucide/vue";
+import { ArrowUpRight, KeyRound, LogOut, Menu, SlidersHorizontal, Square, SquarePen, X } from "@lucide/vue";
 import type {
-  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource, ChatStreamRequest, KnowledgeStats,
+  ChatFeedbackRating, KnowledgeStats,
   RetrievalFilters, UserAccount, UserSessionResponse,
 } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -19,40 +19,20 @@ import { toast } from "@nyz-rag/ui/lib/toast";
 import AccountDialog, { type AccountMode } from "./AccountDialog.vue";
 import ArticleView from "./components/ArticleView.vue";
 import IconButton from "./components/IconButton.vue";
-import AnswerMarkdown from "./components/AnswerMarkdown.vue";
+import ChatTurn from "./components/ChatTurn.vue";
 import SessionSidebar from "./components/SessionSidebar.vue";
 import SourcePanel from "./components/SourcePanel.vue";
 import { client } from "./webClient";
+import { useChatSession, type ChatTurnState } from "./composables/useChatSession";
 
-interface Turn {
-  id?: string;
-  question: string;
-  answer: string;
-  answerMode?: ChatAnswerMode;
-  sources: ChatSource[];
-  rating: ChatFeedbackRating | null;
-  streaming?: boolean;
-  /** 本轮未完成（出错或已停止），不会保存到会话。 */
-  notice?: string;
-  copied?: boolean;
-  feedbackBusy?: boolean;
-}
-
-const SESSION_KEY = "nyz-rag:session";
 const user = ref<UserAccount | null>(null);
 const accountMode = ref<AccountMode | null>(null);
 const accountNotice = ref("");
-const question = ref("");
-const busy = ref(false);
 /** 知识库统计；null 表示尚未加载成功。 */
 const stats = ref<KnowledgeStats | null>(null);
 const statsError = ref(false);
 const STATS_REFRESH_MS = 60_000;
 let statsTimer: ReturnType<typeof setInterval> | undefined;
-const sessions = ref<ChatSessionRecord[]>([]);
-const sessionId = ref<string | null>(null);
-const turns = ref<Turn[]>([]);
-const sessionError = ref("");
 const thread = ref<HTMLElement | null>(null);
 /** 当前打开的文章 ID（`#/documents/<id>`）；空字符串表示地址无效，null 表示在问答页。 */
 const articleId = ref<string | null>(null);
@@ -61,8 +41,7 @@ const dateTo = ref("");
 const categoriesText = ref("");
 const tagsText = ref("");
 const scenariosText = ref("");
-let controller: AbortController | null = null;
-const copyTimers = new WeakMap<Turn, ReturnType<typeof setTimeout>>();
+const copyTimers = new WeakMap<ChatTurnState, ReturnType<typeof setTimeout>>();
 /** 窄屏下的会话抽屉。 */
 const sidebarOpen = ref(false);
 const filtersOpen = ref(false);
@@ -71,6 +50,14 @@ const citing = ref<{ turn: number; citation: number | null } | null>(null);
 const wideQuery = window.matchMedia("(min-width: 1280px)");
 const wide = ref(wideQuery.matches);
 function onWideChange(event: MediaQueryListEvent) { wide.value = event.matches; }
+
+const { question, busy, sessions, sessionId, turns, sessionError, loadSessions, openSession, newSession, restoreSession, ask, regenerate, stop } = useChatSession({
+  client,
+  storage: localStorage,
+  currentFilters,
+  onSessionChange: () => { citing.value = null; },
+  onContentChange: scrollToEnd,
+});
 
 const activeFilterCount = computed(() => [dateFrom.value, dateTo.value, categoriesText.value, tagsText.value, scenariosText.value].filter(Boolean).length);
 const filterFields = [
@@ -100,7 +87,6 @@ function syncArticleRoute() {
 
 function clearFilters() { dateFrom.value = ""; dateTo.value = ""; categoriesText.value = ""; tagsText.value = ""; scenariosText.value = ""; }
 
-const lastTurn = computed(() => turns.value.at(-1));
 const citedTurn = computed(() => citing.value ? turns.value[citing.value.turn] : undefined);
 const sourceSheetOpen = computed({
   get: () => !!citedTurn.value && !wide.value,
@@ -112,9 +98,6 @@ const sidebarProps = computed(() => ({
   sessions: sessions.value, sessionId: sessionId.value, sessionError: sessionError.value, busy: busy.value,
   user: user.value, stats: stats.value, statsError: statsError.value,
 }));
-const answerCaption = (turn: Turn) => turn.streaming
-  ? (turn.answer ? "正在生成…" : "正在检索知识库…")
-  : turn.answerMode === "generated" ? "由模型依据知识库生成，[n] 对应引用来源" : turn.answerMode === "extractive" ? "知识库原文摘录" : "";
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return client.request<T>(path, init);
@@ -126,8 +109,7 @@ onMounted(async () => {
   // 会话按身份隔离：先确定身份（同时取得访客 Cookie），再加载历史会话，避免并发请求各自分配访客身份。
   try { user.value = (await api<UserSessionResponse>("/api/auth/session")).user; } catch { /* 按访客继续 */ }
   void loadSessions();
-  const saved = localStorage.getItem(SESSION_KEY);
-  if (saved) void openSession(saved);
+  restoreSession();
   // 统计会随管理端同步变化：页面可见时定时刷新，切回页面时立即刷新。
   document.addEventListener("visibilitychange", onVisibilityChange);
   wideQuery.addEventListener("change", onWideChange);
@@ -153,37 +135,6 @@ async function loadStats() {
 
 function onVisibilityChange() {
   if (!document.hidden) void loadStats();
-}
-
-async function loadSessions() {
-  try {
-    sessions.value = (await api<ChatSessionListResponse>("/api/chat/sessions?pageSize=30")).sessions;
-  } catch {
-    sessionError.value = "历史会话加载失败";
-  }
-}
-
-async function openSession(id: string) {
-  if (busy.value) return;
-  try {
-    const data = await api<ChatSessionMessagesResponse>(`/api/chat/sessions/${id}/messages`);
-    sessionId.value = id;
-    citing.value = null;
-    turns.value = data.messages.map((message) => ({ ...message }));
-    localStorage.setItem(SESSION_KEY, id);
-    await scrollToEnd();
-  } catch {
-    if (localStorage.getItem(SESSION_KEY) === id) localStorage.removeItem(SESSION_KEY);
-    if (sessionId.value === id) newSession();
-  }
-}
-
-function newSession() {
-  if (busy.value) return;
-  sessionId.value = null;
-  citing.value = null;
-  turns.value = [];
-  localStorage.removeItem(SESSION_KEY);
 }
 
 /** 抽屉中的操作：先关闭抽屉再执行。 */
@@ -241,73 +192,7 @@ async function scrollToEnd() {
   thread.value?.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });
 }
 
-/** 返回本轮是否完成并保存。 */
-async function stream(turn: Turn, request: ChatStreamRequest): Promise<boolean> {
-  busy.value = true;
-  let finished = false;
-  turn.streaming = true;
-  controller = new AbortController();
-  try {
-    if (!sessionId.value) {
-      const session = await api<ChatSessionRecord>("/api/chat/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-      sessionId.value = session.id;
-      localStorage.setItem(SESSION_KEY, session.id);
-    }
-    await client.stream(
-      `/api/chat/sessions/${sessionId.value}/stream`,
-      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...request, filters: currentFilters() }), signal: controller.signal },
-      {
-        onEvent(ev) {
-          if (ev.event === "source") turn.sources.push({ documentId: ev.data.documentId, title: ev.data.title, url: ev.data.url, repostSource: ev.data.repostSource });
-          else if (ev.event === "token") turn.answer += ev.data.content;
-          else if (ev.event === "done") { Object.assign(turn, ev.data); finished = true; }
-          else if (ev.event === "error") throw new Error(ev.data.error);
-          if (ev.event !== "source") void scrollToEnd();
-        },
-        onIncomplete(reason) {
-          turn.notice = reason;
-        },
-      },
-    );
-    // 读取过程中停止生成时，客户端静默返回而不是抛出 AbortError。
-    if (!finished && controller.signal.aborted) turn.notice = "已停止生成，本轮回答未保存。";
-  } catch (error) {
-    turn.notice = controller.signal.aborted ? "已停止生成，本轮回答未保存。" : error instanceof Error ? error.message : "无法连接 API 服务";
-  } finally {
-    turn.streaming = false;
-    busy.value = false;
-    controller = null;
-    void loadSessions();
-  }
-  return finished;
-}
-
-async function ask() {
-  const value = question.value.trim();
-  if (!value || busy.value) return;
-  // 上一轮未完成的回答没有保存（没有 id），不保留在界面上。
-  if (lastTurn.value && !lastTurn.value.id) turns.value.pop();
-  question.value = "";
-  turns.value.push({ question: value, answer: "", sources: [], rating: null });
-  await scrollToEnd();
-  await stream(turns.value.at(-1)!, { question: value, filters: currentFilters() });
-}
-
-async function regenerate() {
-  const turn = lastTurn.value;
-  if (!turn || busy.value) return;
-  const previous = { ...turn, sources: [...turn.sources] };
-  const request: ChatStreamRequest = turn.id ? { regenerate: turn.id, filters: currentFilters() } : { question: turn.question, filters: currentFilters() };
-  Object.assign(turn, { answer: "", sources: [], rating: null, notice: undefined, copied: false, answerMode: undefined });
-  // 重新生成失败时原回答仍在会话中，恢复显示。
-  if (!await stream(turn, request) && previous.id) Object.assign(turn, previous, { notice: "重新生成未完成，已保留原回答。" });
-}
-
-function stop() {
-  controller?.abort();
-}
-
-async function copy(turn: Turn) {
+async function copy(turn: ChatTurnState) {
   try {
     await navigator.clipboard.writeText(turn.answer);
   } catch {
@@ -324,7 +209,7 @@ async function copy(turn: Turn) {
   copyTimers.set(turn, setTimeout(() => { turn.copied = false; }, 2500));
 }
 
-async function sendFeedback(turn: Turn, rating: ChatFeedbackRating) {
+async function sendFeedback(turn: ChatTurnState, rating: ChatFeedbackRating) {
   if (!turn.id || turn.feedbackBusy || turn.rating) return;
   turn.feedbackBusy = true;
   try {
@@ -399,50 +284,13 @@ function useSuggestion(text: string) {
           <h1 v-else class="mb-5 truncate text-[15px] font-semibold">{{ sessionTitle }}</h1>
 
           <div v-if="turns.length" ref="thread" class="grid gap-6 pb-6">
-            <article v-for="(turn, index) in turns" :key="turn.id ?? `pending-${index}`" class="grid scroll-mb-48 gap-2.5">
-              <p class="max-w-[85%] justify-self-end rounded-lg rounded-br-sm bg-primary px-3.5 py-2.5 text-[13px] leading-[1.7] break-words whitespace-pre-wrap text-primary-foreground">{{ turn.question }}</p>
-              <section class="rounded-lg bg-card p-4.5" aria-live="polite">
-                <div class="flex items-center gap-2.5">
-                  <span class="grid size-7 place-items-center rounded-md bg-brand-soft text-[#566b2f]"><Sparkles class="size-4" /></span>
-                  <div><strong class="block text-xs">回答</strong><small class="mt-0.5 block text-[11px] text-muted-foreground">{{ answerCaption(turn) }}</small></div>
-                </div>
-                <AnswerMarkdown
-                  v-if="turn.answer" :text="turn.answer" :source-count="turn.sources.length" :streaming="turn.streaming"
-                  :active-citation="citing?.turn === index ? citing.citation : null" @cite="(citation) => openSources(index, citation)"
-                />
-                <p v-else-if="turn.streaming" class="streaming-cursor my-4 text-[13px]" />
-                <p v-if="turn.notice" class="mt-3 rounded-md bg-warning-soft px-2.5 py-2 text-[11px] text-warning">{{ turn.notice }}</p>
-                <div v-if="turn.sources.length || (!turn.streaming && turn.answerMode)" class="mt-4 text-[11px] text-muted-foreground">
-                  <div class="mb-2 flex items-center justify-between">
-                    <span>引用来源<span v-if="turn.sources.length" class="font-mono"> · {{ turn.sources.length }}</span></span>
-                    <Button v-if="turn.sources.length" variant="link" size="xs" class="h-auto p-0 text-[11px] font-normal text-link" @click="openSources(index, null)">查看原文片段</Button>
-                  </div>
-                  <div v-if="turn.sources.length" class="flex flex-wrap gap-1.5">
-                    <button
-                      v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" type="button"
-                      :class="['inline-flex max-w-full items-center gap-1.5 rounded-md bg-background py-1 pr-2.5 pl-1 text-left transition-colors hover:bg-accent hover:text-foreground', citing?.turn === index && citing.citation === sourceIndex + 1 && 'bg-accent text-foreground']"
-                      :title="source.title" @click="openSources(index, sourceIndex + 1)"
-                    ><span class="citation m-0 flex-none">{{ sourceIndex + 1 }}</span><span class="truncate">{{ source.title }}</span></button>
-                  </div>
-                  <span v-else class="text-muted-foreground/70">暂无匹配文章</span>
-                </div>
-                <div v-if="!turn.streaming" class="mt-4 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
-                  <Button v-if="turn.answer" variant="ghost" size="xs" class="px-1.5 text-muted-foreground" @click="copy(turn)">
-                    <!-- 复制成功时对勾弹出，2.5 秒后淡出恢复 -->
-                    <span class="grid *:col-start-1 *:row-start-1">
-                      <Copy :class="['transition-opacity duration-300', turn.copied && 'opacity-0']" />
-                      <Check :class="['text-success', turn.copied ? 'motion-safe:animate-pop' : 'opacity-0 transition-opacity duration-300']" />
-                    </span>{{ turn.copied ? '已复制' : '复制' }}
-                  </Button>
-                  <Button v-if="index === turns.length - 1" variant="ghost" size="xs" class="text-muted-foreground" :disabled="busy" @click="regenerate"><RefreshCw />重新生成</Button>
-                  <template v-if="turn.id">
-                    <span class="ml-auto">{{ turn.rating ? '感谢反馈' : '这个回答有帮助吗？' }}</span>
-                    <IconButton label="有帮助" size="icon-sm" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'positive' && 'bg-secondary text-[#5d6b37] disabled:opacity-100 motion-safe:[&_svg]:animate-pop'" @click="sendFeedback(turn, 'positive')"><ThumbsUp /></IconButton>
-                    <IconButton label="需要改进" size="icon-sm" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'negative' && 'bg-secondary text-[#5d6b37] disabled:opacity-100 motion-safe:[&_svg]:animate-pop'" @click="sendFeedback(turn, 'negative')"><ThumbsDown /></IconButton>
-                  </template>
-                </div>
-              </section>
-            </article>
+            <ChatTurn
+              v-for="(turn, index) in turns" :key="turn.id ?? `pending-${index}`"
+              :turn="turn" :is-last="index === turns.length - 1" :busy="busy"
+              :active-citation="citing?.turn === index ? citing.citation : null"
+              @copy="copy(turn)" @retry="regenerate" @feedback="(rating) => sendFeedback(turn, rating)"
+              @source="(citation) => openSources(index, citation)"
+            />
           </div>
 
           <!-- 对话中输入框固定在底部；空会话时随引导内容居中。 -->
