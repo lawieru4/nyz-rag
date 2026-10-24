@@ -353,7 +353,7 @@
 切片规则等需要重建索引的改动，在 `nyzrag` 库的单独 schema 中建立实验索引，业务 schema 与线上问答不受影响，基线可以随时复现：
 
 ```sh
-pnpm evaluate:index --schema=eval_<名称> [--chunker=1|2] [--concurrency=4] [--reset]
+pnpm evaluate:index --schema=eval_<名称> [--chunker=3|2] [--concurrency=4] [--reset]
 ```
 
 - 新建 schema 并执行迁移，从业务 schema 复制 `model_providers`、`model_settings`、`knowledge_bases`、`data_sources`、`documents`。模型密钥按密文原样复制，不解密；nyzdata token 不复制。

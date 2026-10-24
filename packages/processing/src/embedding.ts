@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { acquireModelLease, type AdmissionLimiter } from "./model-admission.js";
 import { authorizationHeaders, providerCredential, providerUrl, type ModelTarget } from "./provider.js";
 
@@ -45,12 +46,68 @@ function readEmbeddingResponse(payload: unknown, expectedCount: number): number[
   return vectors as number[][];
 }
 
+/** 临时错误（限流、5xx、连接失败）的重试等待；超时不重试，单次已等 REQUEST_TIMEOUT_MS，再重试会让问答等待过久。 */
+const RETRY_DELAYS_MS = [1_000, 3_000];
+/** 服务端要求等待（Retry-After）超过此值时不再重试，直接失败。 */
+const MAX_RETRY_WAIT_MS = 10_000;
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+class TransientEmbeddingError extends Error {
+  constructor(message: string, readonly retryAfterMs?: number) { super(message); }
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const seconds = Number(response.headers.get("retry-after") ?? undefined);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
+}
+
+/** 一批输入的一次请求：先取得限流租约，请求结束即释放。 */
+async function requestBatch(url: string, apiKey: string | null, providerId: string, model: string, batch: string[], limiter?: AdmissionLimiter): Promise<number[][]> {
+  const lease = await acquireModelLease(providerId, "embedding", model, limiter);
+  try {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          ...authorizationHeaders(apiKey),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model, input: batch }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      const message = "The embedding request failed or timed out.";
+      throw error instanceof Error && error.name === "TimeoutError" ? new Error(message) : new TransientEmbeddingError(message);
+    }
+
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      const message = `The embedding request failed with HTTP ${response.status}.`;
+      throw RETRYABLE_STATUS.has(response.status) ? new TransientEmbeddingError(message, retryAfterMs(response)) : new Error(message);
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error("The embedding provider returned an invalid response.");
+    }
+    return readEmbeddingResponse(payload, batch.length);
+  } finally {
+    await lease.release();
+  }
+}
+
 /**
  * Embed an array of text inputs using the given provider and model.
- * Each batch of up to BATCH_SIZE texts counts as one request against the admission limiter.
+ * Each batch of up to BATCH_SIZE texts counts as one request against the admission limiter, including each retry.
  * @param limiter  Optional injected limiter; uses the shared lazy limiter if omitted.
+ * @param retryDelaysMs  Waits before each retry of a transient failure (tests pass zeros).
  */
-export async function embedChunks({ provider, model: configuredModel }: ModelTarget, inputs: string[], limiter?: AdmissionLimiter): Promise<number[][]> {
+export async function embedChunks(
+  { provider, model: configuredModel }: ModelTarget, inputs: string[], limiter?: AdmissionLimiter, retryDelaysMs: readonly number[] = RETRY_DELAYS_MS,
+): Promise<number[][]> {
   const apiKey = providerCredential(provider, "embedding");
 
   const model = configuredModel.trim();
@@ -67,47 +124,25 @@ export async function embedChunks({ provider, model: configuredModel }: ModelTar
 
   for (let offset = 0; offset < inputs.length; offset += BATCH_SIZE) {
     const batch = inputs.slice(offset, offset + BATCH_SIZE);
-
-    // Each batch is one HTTP request; acquire admission before sending.
-    const lease = await acquireModelLease(provider.id, "embedding", model, limiter);
-    let response: Response;
-    try {
+    let batchVectors: number[][];
+    for (let attempt = 0; ; attempt += 1) {
       try {
-        response = await fetch(url, {
-          method: "POST",
-          headers: {
-            ...authorizationHeaders(apiKey),
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ model, input: batch }),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-      } catch {
-        throw new Error("The embedding request failed or timed out.");
+        batchVectors = await requestBatch(url, apiKey, provider.id, model, batch, limiter);
+        break;
+      } catch (error) {
+        if (!(error instanceof TransientEmbeddingError) || attempt >= retryDelaysMs.length) throw error;
+        // 等待期间不持有租约，不占用并发名额。
+        const wait = error.retryAfterMs ?? retryDelaysMs[attempt];
+        if (wait > MAX_RETRY_WAIT_MS) throw error;
+        await delay(wait);
       }
-
-      if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new Error(`The embedding request failed with HTTP ${response.status}.`);
+    }
+    for (const vector of batchVectors) {
+      if (dimensions !== undefined && vector.length !== dimensions) {
+        throw new Error("The embedding provider returned inconsistent vector dimensions.");
       }
-
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch {
-        throw new Error("The embedding provider returned an invalid response.");
-      }
-
-      const batchVectors = readEmbeddingResponse(payload, batch.length);
-      for (const vector of batchVectors) {
-        if (dimensions !== undefined && vector.length !== dimensions) {
-          throw new Error("The embedding provider returned inconsistent vector dimensions.");
-        }
-        dimensions = vector.length;
-        vectors.push(vector);
-      }
-    } finally {
-      await lease.release();
+      dimensions = vector.length;
+      vectors.push(vector);
     }
   }
 

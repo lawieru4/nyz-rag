@@ -115,16 +115,18 @@ describe("no fetch when admission is denied", () => {
 describe("lease released on errors", () => {
   test("embedding: HTTP 500 releases the lease", async (context) => {
     withFetch(context, () => new Response("error", { status: 500 }));
-    let released = false;
+    let acquired = 0;
+    let released = 0;
     const trackingLimiter: AdmissionLimiter = {
-      acquire: async () => ({ release: async () => { released = true; } }),
+      acquire: async () => { acquired += 1; return { release: async () => { released += 1; } }; },
       close: async () => undefined,
     };
     await assert.rejects(
-      () => embedChunks(selection("emb-model"), ["hello"], trackingLimiter),
+      () => embedChunks(selection("emb-model"), ["hello"], trackingLimiter, [0, 0]),
       /HTTP 500/,
     );
-    assert.equal(released, true, "lease must be released even when the HTTP request fails");
+    assert.equal(acquired, 3, "each retry is admitted separately");
+    assert.equal(released, 3, "lease must be released after every failed attempt");
   });
 
   test("chat: HTTP 401 releases the lease", async (context) => {

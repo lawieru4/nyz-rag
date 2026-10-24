@@ -3,7 +3,7 @@ import test from "node:test";
 import { ArticleApiError, createArticleClient, type ArticleListItem } from "../src/article/client.js";
 import { PARSER_VERSION, parseArticle, type ArticleDetail } from "../src/article/parse.js";
 import { syncArticles } from "../src/article/sync.js";
-import { articleQuestions, chunkArticle, chunkArticleWith, chunkBlocks, chunkSections, embeddingInput, estimateTokens, type ChunkBlock } from "../src/chunking.js";
+import { articleQuestions, chunkArticle, chunkArticleWith, chunkBlocks, chunkSections, embeddingInput, estimateTokens, LEGACY_CHUNKER_VERSION, SECTION_CHUNKER_VERSION, type ChunkBlock } from "../src/chunking.js";
 import { prepareDocument } from "../src/prepare.js";
 
 const text = (value: string, marks?: Array<{ type: string; attrs?: Record<string, unknown> }>) => ({ type: "text", text: value, ...(marks ? { marks } : {}) });
@@ -191,6 +191,11 @@ test("chunkBlocks keeps sections apart, merges short sections, keeps tables and 
   const tail = chunks.slice(3);
   assert.ok(tail.every((chunk) => chunk.content.length <= 400 && chunk.content.endsWith("。")), "long text splits at sentence ends");
   assert.equal(tail.map((chunk) => chunk.content).join(""), long);
+  // 没有句末标点的行（如长列表）按行切分，不丢字，换行保留。
+  const list = Array.from({ length: 60 }, (_, index) => `第${index}项没有句号`).join("\n");
+  const listChunks = chunkBlocks("p", [{ kind: "text", text: list, sectionPath: [] }], { title: "T" }, { targetChars: 200 });
+  assert.ok(listChunks.length > 1 && listChunks.every((chunk) => chunk.content.length <= 200));
+  assert.equal(listChunks.map((chunk) => chunk.content).join("\n"), list);
 
   const bigTable = ["H1 | H2", ...Array.from({ length: 200 }, (_, index) => `r${index} | v${index}`)].join("\n");
   const tableChunks = chunkBlocks("t", [{ kind: "table", text: bigTable, sectionPath: [] }], { title: "T" }, { targetChars: 300 });
@@ -239,9 +244,9 @@ test("chunkSections keeps short sections, splits long ones and groups blocks int
 
 test("chunkArticleWith keeps rule 1 without sections and uses the summary for image-only articles", () => {
   const article = parseArticle(detail([heading(2, "背景"), paragraph(text("正文内容"))]));
-  assert.deepEqual(chunkArticleWith(1, "doc", article), { sections: [], chunks: chunkArticle("doc", article).map((chunk) => ({ ...chunk, sectionId: null })) });
+  assert.deepEqual(chunkArticleWith(LEGACY_CHUNKER_VERSION, "doc", article), { sections: [], chunks: chunkArticle("doc", article).map((chunk) => ({ ...chunk, sectionId: null })) });
   const imageOnly = parseArticle(detail([{ type: "image", attrs: { src: "https://example.test/a.png" } }], { summary: "摘要文字" }));
-  const sectioned = chunkArticleWith(2, "img", imageOnly);
+  const sectioned = chunkArticleWith(SECTION_CHUNKER_VERSION, "img", imageOnly);
   assert.deepEqual([sectioned.sections.map((section) => section.content), sectioned.chunks.map((chunk) => chunk.content)], [["摘要文字"], ["摘要文字"]]);
 });
 

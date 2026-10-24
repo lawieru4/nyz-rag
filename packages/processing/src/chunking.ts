@@ -1,5 +1,5 @@
 // 结构化切片，两套规则（CHUNKER_VERSION）：
-// - 1：按章节与块累积到目标长度，不跨章节（过短章节并入下一节），表格整块保留，超长段落按句切分。
+// - 1：按章节与块累积到目标长度，不跨章节（过短章节并入下一节），表格整块保留，超长段落按句切分（版本号见 LEGACY_CHUNKER_VERSION）。
 // - 2：章节父块 + 段落子块（docs/chunking-design.md）。父块为一段连续的同章节正文，用于回答上下文；子块为父块内 1～3 个相邻内容块，
 //   用于关键词/向量召回与 Rerank。短章节保留自己的父块，只有标题的父块并入下一个，超长章节按内容块边界拆成几段。
 // 每个切片带上下文前缀（文章标题、章节、关键词），向量化时拼接在正文前。
@@ -41,15 +41,17 @@ export interface ChunkedArticle {
   chunks: Array<StructuredChunk & { sectionId: string | null }>;
 }
 
-/** 切片规则版本，写入 documents.chunker_version。父子块（2）通过评估验收前，新处理的文档仍使用 1。 */
-export const LEGACY_CHUNKER_VERSION = 1;
+/**
+ * 切片规则版本，写入 documents.chunker_version。规则 1 当前为版本 3：版本 1（及引入版本号前为空）按句切分超长段落时
+ * 会丢掉没有句末标点、以换行结尾的行。父子块（2）通过评估验收前，新处理的文档仍使用规则 1。
+ */
+export const LEGACY_CHUNKER_VERSION = 3;
 export const SECTION_CHUNKER_VERSION = 2;
 export type ChunkerVersion = typeof LEGACY_CHUNKER_VERSION | typeof SECTION_CHUNKER_VERSION;
 export const CHUNKER_VERSION: ChunkerVersion = LEGACY_CHUNKER_VERSION;
 
-const SENTENCE = /[^。！？!?；;\n]+(?:[。！？!?；;]+|$)/g;
 // 句子（含句末标点与随后的换行）或连续的标点/换行，依次匹配可拼回原文。
-const SENTENCE_LOSSLESS = /[^。！？!?；;\n]+[。！？!?；;]*\n*|[。！？!?；;\n]+/g;
+const SENTENCE = /[^。！？!?；;\n]+[。！？!?；;]*\n*|[。！？!?；;\n]+/g;
 const MAX_KEYWORDS = 8;
 // 中日韩标点、统一表意文字、兼容表意文字与全角字符。
 const CJK = /[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]/g;
@@ -70,21 +72,10 @@ export function summaryEmbeddingInput(title: string, summary: string | null | un
   return text ? `文章：${title}\n\n${text}` : null;
 }
 
-// 超长文本先按句切分，单句仍超长时按长度硬切。
-function splitLong(text: string, target: number): string[] {
-  if (text.length <= target) return [text];
-  const pieces: string[] = [];
-  for (const sentence of text.match(SENTENCE) ?? [text]) {
-    for (let start = 0; start < sentence.length; start += target) pieces.push(sentence.slice(start, start + target));
-  }
-  return pieces.filter((piece) => piece.trim());
-}
-
-// 规则 2 的句子切分：保留全部字符（规则 1 的 SENTENCE 会丢掉没有句末标点、以换行结尾的行，为保持规则 1 的结果不变未修改），
-// 单句仍超长时按长度硬切。
+// 超长文本按句切分，保留全部字符（含没有句末标点的行），单句仍超长时按长度硬切。
 function splitSentences(text: string, target: number): string[] {
   const pieces: string[] = [];
-  for (const sentence of text.match(SENTENCE_LOSSLESS) ?? [text]) {
+  for (const sentence of text.match(SENTENCE) ?? [text]) {
     for (let start = 0; start < sentence.length; start += target) pieces.push(sentence.slice(start, start + target));
   }
   return pieces;
@@ -159,7 +150,7 @@ export function chunkBlocks(documentId: string, blocks: ChunkBlock[], context: {
       if (size >= target) flush();
       continue;
     }
-    for (const [index, piece] of splitLong(text, target).entries()) {
+    for (const [index, piece] of (text.length > target ? splitSentences(text, target) : [text]).entries()) {
       if (buffer.length && size + piece.length > target) flush();
       push(piece, index === 0);
     }

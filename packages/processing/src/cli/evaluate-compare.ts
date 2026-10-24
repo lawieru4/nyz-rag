@@ -83,7 +83,7 @@ function printComparison(comparison: RunComparison) {
   list("证据由命中变为未命中", comparison.evidence.lost);
 }
 
-const setup = (run: RunRecord) => `上下文 ${run.settings.context ?? "topk"}/${run.settings.retrieval.maxContextLength} 字，索引 ${run.settings.schema ?? "业务库"}（切片规则 ${run.corpus.chunkerVersion ?? 1}）`;
+const setup = (run: RunRecord) => `上下文 ${run.settings.context ?? "topk"}/${run.settings.retrieval.maxContextLength} 字，索引 ${run.settings.schema ?? "业务库"}（切片版本 ${run.corpus.chunkerVersion ?? 1}）`;
 
 const refs = process.argv.slice(2).filter((value) => !value.startsWith("--"));
 if (refs.length !== 2) throw new Error("Usage: evaluate:compare <run A> <run B> [--variant=fused | --variant=fused:rerank] [--json]");

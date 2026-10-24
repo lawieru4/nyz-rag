@@ -77,7 +77,7 @@ export const documents = pgTable("documents", {
   // 正文相同的主文档：重复文档保留来源记录与原始内容，但不切片、不向量化。主文档删除时由 API 选出接替者，此处置空只是兜底。
   duplicateOf: text().references((): AnyPgColumn => documents.id, { onDelete: "set null" }),
   parserVersion: integer(),
-  // 切片规则版本（chunking.ts 的 CHUNKER_VERSION）；引入前切片的文档为空，规则与 1 相同。
+  // 切片规则版本（chunking.ts 的 CHUNKER_VERSION）；为空（引入前）或 1 的文档按丢字修正前的规则 1 切片，规则 1 现为 3。
   chunkerVersion: integer(),
   metadata: jsonb().$type<ArticleMetadata>(),
   // 元数据检索词项（关键词、项目名称、负责人、承担单位），规则与切片词项相同，用于关键词检索加权。
