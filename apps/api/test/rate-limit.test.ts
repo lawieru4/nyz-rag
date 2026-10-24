@@ -39,11 +39,6 @@ function memoryLimiter() {
   return { limiter, calls, active };
 }
 
-const queue = {
-  hasDocumentJob: async () => false,
-  enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-};
-
 test("deployment limits are positive integers; proxy trust requires explicit networks", () => {
   assert.equal(rateLimitConfig({}).ip, 120);
   for (const value of ["", "0", "-1", "NaN", "1.5", "Infinity"]) {
@@ -58,7 +53,7 @@ test("real app rejects admission before auth/database; health and preflight stay
   const limiter: AdmissionLimiter = {
     async acquire() { throw new AdmissionError(429, 7, "Too many requests"); }, async close() {},
   };
-  const app = buildApp({ queue, limiter, authStore: memoryAuthStore(), userAuthStore: memoryAuthStore(), mailer: null });
+  const app = buildApp({ limiter, authStore: memoryAuthStore(), userAuthStore: memoryAuthStore(), mailer: null });
   try {
     for (const url of ["/api/search", "/api/chat", "/api/chat/sessions/00000000-0000-4000-8000-000000000001/stream", "/api/admin/auth/login"]) {
       const response = await app.inject({ method: "POST", url, headers: { origin: "http://localhost:5175" }, payload: {} });
@@ -100,7 +95,7 @@ test("production chat routes acquire chat admission before handler infrastructur
     },
     async close() {},
   };
-  const app = buildApp({ queue, limiter, authStore: memoryAuthStore(), userAuthStore: memoryAuthStore(), mailer: null, users: memoryUsers().repository });
+  const app = buildApp({ limiter, authStore: memoryAuthStore(), userAuthStore: memoryAuthStore(), mailer: null, users: memoryUsers().repository });
   try {
     for (const url of ["/api/chat", "/api/chat/sessions/00000000-0000-4000-8000-000000000001/stream"]) {
       const response = await app.inject({ method: "POST", url, headers: userHeaders, payload: { question: "test" } });
@@ -251,7 +246,7 @@ test("disconnecting an SSE client retains concurrency until handler cleanup fini
 test("real Redis shares IP admission between API replicas", { skip: process.env.NYZ_RATE_LIMIT_REDIS_TEST !== "1" }, async () => {
   const prefix = `nyz-test-api-admission:${randomBytes(12).toString("hex")}:`;
   const apps = [0, 1].map(() => buildApp({
-    queue, limiter: createRedisAdmissionLimiter({ prefix }),
+    limiter: createRedisAdmissionLimiter({ prefix }),
     rateLimits: { ...rateLimitConfig({}), ip: 1, windowMs: 1000 },
     authStore: memoryAuthStore(), userAuthStore: memoryAuthStore(), mailer: null, users: memoryUsers().repository,
   }));

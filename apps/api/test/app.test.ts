@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildTestApp as buildApp } from "./auth-helpers.js";
-import type { DocumentQueue } from "../src/queue.js";
 import { routeSchemas } from "../src/schemas.js";
 import { adminAuth, adminHeaders, memoryAdmins, memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";
 import { hashPassword } from "../src/passwords.js";
@@ -22,14 +21,8 @@ async function makeTestAdmins() {
 }
 
 test("the application registers all domains and rejects bad requests before accessing infrastructure", async () => {
-  let closed = false;
-  const unexpected = async (): Promise<never> => { throw new Error("unexpected queue access"); };
-  const queue: DocumentQueue = {
-    hasDocumentJob: unexpected, enqueueDocument: unexpected, enqueueSource: unexpected,
-    close: async () => { closed = true; },
-  };
   const admins = await makeTestAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins, userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins, userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
   try {
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200);
@@ -57,7 +50,6 @@ test("the application registers all domains and rejects bad requests before acce
   } finally {
     await app.close();
   }
-  assert.equal(closed, true);
 });
 
 test("every route schema declares the shared error responses", () => {
@@ -70,10 +62,7 @@ test("every route schema declares the shared error responses", () => {
 });
 
 test("every application route has a schema entry and every schema entry has a route", async () => {
-  const queue: DocumentQueue = {
-    hasDocumentJob: async () => false, enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-  };
-  const app = buildApp({ queue, admins: memoryAdmins().repository });
+  const app = buildApp({ admins: memoryAdmins().repository });
   const routes = new Set<string>();
   app.addHook("onRoute", (route) => {
     for (const method of [route.method].flat()) if (method !== "HEAD" && method !== "OPTIONS") routes.add(`${method} ${route.url}`);

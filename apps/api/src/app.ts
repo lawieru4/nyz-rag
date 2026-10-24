@@ -12,7 +12,6 @@ import { knowledgeBaseRoutes } from "./knowledge-bases.js";
 import { knowledgeEventRoutes, type OverviewEventsOptions } from "./knowledge-events.js";
 import { createMailer, type Mailer } from "./mailer.js";
 import { modelProviderRoutes } from "./model-providers.js";
-import { createDocumentQueue, type DocumentQueue } from "./queue.js";
 import { searchRoutes } from "./search.js";
 import { settingRoutes } from "./settings.js";
 import { adminAuthConfig, configureAdminAuth, createAdminAuthStore, databaseAdmins, type AdminAuthConfig, type AdminRepository } from "./admin-auth.js";
@@ -22,7 +21,7 @@ import { userRoutes } from "./users.js";
 import { configureRateLimits, rateLimitConfig, trustedProxies } from "./rate-limit.js";
 
 export function buildApp(options: {
-  logger?: FastifyServerOptions["logger"]; queue?: DocumentQueue;
+  logger?: FastifyServerOptions["logger"];
   adminAuth?: AdminAuthConfig; authStore?: AuthStore; admins?: AdminRepository;
   userAuth?: UserAuthConfig; userAuthStore?: AuthStore; mailer?: Mailer | null; users?: UserRepository;
   limiter?: AdmissionLimiter; rateLimits?: ReturnType<typeof rateLimitConfig>;
@@ -32,8 +31,6 @@ export function buildApp(options: {
   const userAuth = options.userAuth ?? userAuthConfig();
   const limits = options.rateLimits ?? rateLimitConfig();
   const app = Fastify({ logger: options.logger ?? false, trustProxy: trustedProxies(), ajv: { customOptions: { coerceTypes: false, removeAdditional: false } } });
-  const queue = options.queue ?? createDocumentQueue();
-  app.addHook("onClose", async () => queue.close());
   configureCommon(app);
   app.register(cors, {
     // 管理端与用户端只对各自配置的来源允许携带 Cookie；其他来源仍可无状态地调用公开接口。
@@ -57,9 +54,9 @@ export function buildApp(options: {
   app.register(async (instance) => knowledgeEventRoutes(instance, options.overviewEvents));
   app.register(chatRoutes);
   app.register(searchRoutes);
-  app.register(documentRoutes, { queue });
+  app.register(documentRoutes);
   app.register(dataSourceRoutes);
-  app.register(crawlTaskRoutes, { queue });
+  app.register(crawlTaskRoutes);
   app.register(knowledgeBaseRoutes);
   app.register(modelProviderRoutes);
   app.register(settingRoutes);

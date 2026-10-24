@@ -16,7 +16,8 @@ import type {
   KnowledgeStats, ModelCapability, ModelProviderRecord, ModelSettingRecord, ModelSettingsResponse, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest, SaveModelSettingRequest,
   SaveAdminRoleRequest, SecretSettingStatus, UpdateAdminRoleRequest,
 } from "@nyz-rag/types";
-import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
+import { DocumentBusyError, getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
+import { activeOperation, insertOperation, sourceSyncRunning } from "./operations.js";
 import { ACTIVE_TASK_INDEX, adminAccounts, adminAuditLogs, adminRoles, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
@@ -93,17 +94,30 @@ export async function getTask(id: string, db: Executor = getDb()): Promise<Crawl
   return row ? toTask(row) : null;
 }
 
-/** 同一来源已有等待中或运行中的任务时返回 null（由部分唯一索引原子互斥）。 */
-export async function createTask(source: DataSourceRecord, db: Executor = getDb()): Promise<CrawlTaskRecord | null> {
+/**
+ * 创建同步任务及执行它的操作（同一事务，由 Worker 的投递器投递）。
+ * 同一来源已有活动操作或等待中/运行中的任务时返回 null（两者都由部分唯一索引原子互斥）。
+ */
+export async function createTask(source: DataSourceRecord): Promise<CrawlTaskRecord | null> {
   try {
-    const [row] = await db.insert(crawlTasks)
-      .values({ id: `CR-${Date.now().toString().slice(-8)}`, sourceId: source.id, sourceName: source.name, status: "等待中" })
-      .returning();
-    return toTask(row);
+    return await withTransaction(async (tx) => {
+      const operation = await insertOperation(tx, "sync-source", source.id);
+      if (!operation) return null;
+      const [row] = await tx.insert(crawlTasks)
+        .values({ id: randomUUID(), sourceId: source.id, sourceName: source.name, status: "等待中", operationId: operation.id })
+        .returning();
+      return toTask(row);
+    });
   } catch (error) {
     if (pgErrorCode(error) === "23505" && pgConstraint(error) === ACTIVE_TASK_INDEX) return null;
     throw error;
   }
+}
+
+/** 同步操作对应的任务。 */
+export async function getTaskByOperation(operationId: string, db: Executor = getDb()): Promise<CrawlTaskRecord | null> {
+  const [row] = await db.select().from(crawlTasks).where(eq(crawlTasks.operationId, operationId));
+  return row ? toTask(row) : null;
 }
 
 const activeTask = inArray(crawlTasks.status, ["等待中", "运行中"]);
@@ -114,20 +128,6 @@ export async function startTask(id: string, articleLimit: number, db: Executor =
     .set({ status: "运行中", progress: 0, processedCount: 0, failedCount: 0, articleLimit, error: null })
     .where(and(eq(crawlTasks.id, id), activeTask)).returning({ id: crawlTasks.id });
   return rows.length > 0;
-}
-
-/** 把仍为等待中或运行中的任务标为失败；已结束的任务不变。 */
-export async function failActiveTask(id: string, error: string, db: Executor = getDb()): Promise<boolean> {
-  const rows = await db.update(crawlTasks).set({ status: "失败", error })
-    .where(and(eq(crawlTasks.id, id), activeTask)).returning({ id: crawlTasks.id });
-  return rows.length > 0;
-}
-
-/** 创建早于 `olderThanMs` 毫秒前、仍为等待中或运行中的任务，供 Worker 启动时与队列对账。 */
-export async function listActiveTaskIds(olderThanMs: number, db: Executor = getDb()): Promise<string[]> {
-  const rows = await db.select({ id: crawlTasks.id }).from(crawlTasks)
-    .where(and(activeTask, lt(crawlTasks.createdAt, sql`now() - make_interval(secs => ${olderThanMs / 1000})`)));
-  return rows.map((row) => row.id);
 }
 
 /** 未传入的字段保持不变；`error: null` 清除错误。 */
@@ -417,20 +417,36 @@ export async function setEmbeddingState(id: string, status: Exclude<DocumentEmbe
   await db.update(documents).set({ embeddingStatus: status, embeddingError: error, ...resetEmbedding, embeddingUpdatedAt: sql`now()` }).where(eq(documents.id, id));
 }
 
-const embeddingInProgress = inArray(documents.embeddingStatus, ["queued", "processing"]);
-
-/** 向量排队中或向量化中、状态更新早于 `olderThanMs` 毫秒前的文档，供 Worker 启动时与队列对账。 */
-export async function listStaleEmbeddingIds(olderThanMs: number, db: Executor = getDb()): Promise<string[]> {
-  const rows = await db.select({ id: documents.id }).from(documents)
-    .where(and(embeddingInProgress, lt(documents.embeddingUpdatedAt, sql`now() - make_interval(secs => ${olderThanMs / 1000})`)));
-  return rows.map((row) => row.id);
+/**
+ * 管理端请求重新处理或向量化：在同一事务内写入文档状态与操作。文档已有活动操作或所属来源正在同步时返回 busy。
+ * 文档行加锁，与删除文档互斥。
+ */
+export async function requestDocumentOperation(id: string, kind: "reprocess-document" | "embed-document"): Promise<"created" | "busy" | "not-found"> {
+  return withTransaction(async (tx) => {
+    const [document] = await tx.select({ sourceId: documents.sourceId }).from(documents).where(eq(documents.id, id)).for("update");
+    if (!document) return "not-found";
+    if (await sourceSyncRunning(document.sourceId, tx) || !await insertOperation(tx, kind, id)) return "busy";
+    if (kind === "reprocess-document") await setProcessingState(id, "pending", null, tx);
+    else await setEmbeddingState(id, "queued", null, tx);
+    return "created";
+  });
 }
 
-/** 仍为排队中或向量化中时标为失败；状态已变化（任务已开始或完成）则不变。 */
-export async function failStaleEmbedding(id: string, error: string, db: Executor = getDb()): Promise<boolean> {
-  const rows = await db.update(documents).set({ embeddingStatus: "failed", embeddingError: error, embeddingUpdatedAt: sql`now()` })
-    .where(and(eq(documents.id, id), embeddingInProgress)).returning({ id: documents.id });
-  return rows.length > 0;
+/** 文档的切片与向量状态（行锁），供向量化操作结束时判断执行期间是否被重新切片。 */
+export async function lockEmbeddingTarget(tx: Executor, id: string) {
+  const [row] = await tx.select({ processingStatus: documents.processingStatus, processingVersion: documents.processingVersion, embeddingStatus: documents.embeddingStatus })
+    .from(documents).where(eq(documents.id, id)).for("update");
+  return row ?? null;
+}
+
+/**
+ * 在调用方事务内为切片后的文档安排向量化操作（同步、重新处理时自动向量化）。已有活动操作的文档由那个操作处理：
+ * 它尚未开始，或在执行时发现内容已重新切片（见 Worker 的 embed-document），会按最新切片向量化。
+ */
+export async function scheduleEmbeddings(tx: Executor, documentIds: string[]): Promise<void> {
+  for (const id of documentIds) {
+    if (await insertOperation(tx, "embed-document", id)) await setEmbeddingState(id, "queued", null, tx);
+  }
 }
 
 function validateVectors(vectors: number[][], { provider, model }: ModelTarget): void {
@@ -506,18 +522,22 @@ export async function saveSummaryEmbedding(id: string, version: number, vector: 
 }
 
 /**
- * 删除文档。被删除的是主文档时，最早入库的重复文档接替为主文档（状态置为待处理，由调用方入队重新切片），
- * 其余重复文档改为指向它。返回 null 表示文档不存在。
+ * 删除文档。被删除的是主文档时，最早入库的重复文档接替为主文档（状态置为待处理，同一事务内建立重新处理操作），
+ * 其余重复文档改为指向它。返回 null 表示文档不存在；文档有活动操作或所属来源正在同步时抛出 DocumentBusyError。
  */
 export async function deleteDocument(id: string): Promise<{ promotedId: string | null } | null> {
   return withTransaction(async (tx) => {
     const target = await lockDocument(tx, id);
     if (!target) return null;
+    const [{ sourceId }] = await tx.select({ sourceId: documents.sourceId }).from(documents).where(eq(documents.id, id));
+    if (await activeOperation("document", id, tx) || await sourceSyncRunning(sourceId, tx)) throw new DocumentBusyError();
     await lockContentHashes(tx, [target.contentHash]);
     const [promoted, ...rest] = await listDuplicateDocuments(tx, id);
     if (promoted) {
       await tx.update(documents).set({ duplicateOf: null, processingStatus: "pending", processingError: null }).where(eq(documents.id, promoted.id));
       await setDuplicateOf(tx, rest.map((row) => row.id), promoted.id);
+      // 接替的文档已有活动操作（例如等待中的重新处理）时由它处理。
+      await insertOperation(tx, "reprocess-document", promoted.id);
     }
     await tx.delete(documents).where(eq(documents.id, id));
     return { promotedId: promoted?.id ?? null };
