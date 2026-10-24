@@ -7,10 +7,6 @@ import { configureCommon } from "../src/common.js";
 import { configureUserAuth, requestOwner, userAuthConfig } from "../src/user-auth.js";
 import { memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";
 
-const queue = {
-  hasDocumentJob: async () => false,
-  enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-};
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const password = "correct horse battery";
 
@@ -244,7 +240,7 @@ test("changing the password requires the current one and rotates the session", a
 
 test("input is validated and bounded; unknown fields are rejected", async () => {
   const { app } = setup();
-  const full = buildApp({ queue, userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
+  const full = buildApp({ userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
   try {
     for (const [url, payload] of [
       ["/api/auth/register/code", { email: "not-an-email" }],
@@ -287,7 +283,7 @@ test("missing mail configuration and unavailable session storage fail closed wit
 });
 
 test("user routes allow credentialed CORS only for web origins", async () => {
-  const app = buildApp({ queue, userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
+  const app = buildApp({ userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), users: memoryUsers().repository });
   try {
     for (const origin of [userAuth.origins[0]!, "https://evil.example"]) {
       const preflight = await app.inject({ method: "OPTIONS", url: "/api/chat/sessions", headers: { origin, "access-control-request-method": "POST", "access-control-request-headers": "content-type,x-nyz-client" } });

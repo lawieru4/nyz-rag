@@ -7,10 +7,6 @@ import { overviewHub } from "../src/knowledge-events.js";
 import { hashPassword } from "../src/passwords.js";
 import { adminAuth, adminHeaders, buildTestApp, memoryAdmins, memoryAuthStore } from "./auth-helpers.js";
 
-const queue = {
-  hasDocumentJob: async () => false,
-  enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-};
 const overview = (documents: number): KnowledgeOverview => ({ sources: [], tasks: [], stats: { documents, sources: 0, processingTasks: 0, lastUpdated: null } });
 
 test("overview hub shares one poll, pushes only changes and stops without subscribers", async () => {
@@ -47,7 +43,7 @@ test("GET /api/admin/knowledge/events requires a session, streams overview chang
   }]);
   let documents = 1;
   const app = buildTestApp({
-    queue, adminAuth, authStore: memoryAuthStore(), admins: repository,
+    adminAuth, authStore: memoryAuthStore(), admins: repository,
     overviewEvents: { load: async () => overview(documents), intervalMs: 10 },
   });
   try {

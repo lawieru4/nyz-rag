@@ -15,6 +15,7 @@ export { ArticleApiError, createArticleClient, type ArticleClient, type ArticleL
 export { parseArticle, PARSER_VERSION, type ArticleBlock, type ArticleDetail, type ParsedArticle } from "./article/parse.js";
 export { syncArticles, type ArticleSyncOptions, type ArticleSyncResult } from "./article/sync.js";
 export * from "./repository.js";
+export * from "./operations.js";
 export * as schema from "./schema.js";
 export {
   AdmissionError,

@@ -21,11 +21,6 @@ import { adminAuth, adminHeaders, memoryAdmins, memoryAuthStore } from "./auth-h
 import { hashPassword } from "../src/passwords.js";
 import type { MemoryAdminInput } from "./auth-helpers.js";
 
-const queue = {
-  hasDocumentJob: async () => false,
-  enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-};
-
 const SUPER_EMAIL = "super@example.com";
 const REGULAR_EMAIL = "regular@example.com";
 const PASSWORD = "test-only-password-not-for-deployment";
@@ -33,7 +28,7 @@ const PASSWORD = "test-only-password-not-for-deployment";
 test("legacy login alias is restricted to the bootstrap super administrator", async () => {
   const account = await makeAccount({ email: "admin@example.com" });
   const { accounts, repository } = memoryAdmins([account]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     await loginAs(app, "admin");
     accounts.get(account.id)!.isSuper = false;
@@ -71,7 +66,7 @@ test("GET /api/admin/admins returns list; only accessible by super admin", async
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const regularAccount = await makeAccount({ id: randomUUID(), email: REGULAR_EMAIL, isSuper: false });
   const { repository } = memoryAdmins([superAccount, regularAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const cookie = await loginAs(app, SUPER_EMAIL);
     const result = await app.inject({ url: "/api/admin/admins", headers: { cookie } });
@@ -103,7 +98,7 @@ test("GET /api/admin/admins returns list; only accessible by super admin", async
 test("POST /api/admin/admins creates a regular admin; duplicate email returns 409", async () => {
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const { repository } = memoryAdmins([superAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const cookie = await loginAs(app, SUPER_EMAIL);
     const newEmail = "newadmin@example.com";
@@ -132,7 +127,7 @@ test("POST /api/admin/admins creates a regular admin; duplicate email returns 40
 test("POST /api/admin/admins rejects short password, blank nickname, invalid email", async () => {
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const { repository } = memoryAdmins([superAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const cookie = await loginAs(app, SUPER_EMAIL);
     for (const payload of [
@@ -158,7 +153,7 @@ test("PATCH /api/admin/admins/:id can disable and re-enable a regular admin; ses
   };
   const { repository } = memoryAdmins([superAccount, regularAccount]);
   const store = memoryAuthStore();
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
   try {
     const superCookie = await loginAs(app, SUPER_EMAIL);
     // Regular admin logs in
@@ -192,7 +187,7 @@ test("PATCH /api/admin/admins/:id can disable and re-enable a regular admin; ses
 test("PATCH /api/admin/admins/:id forbids disabling the super admin", async () => {
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const { repository } = memoryAdmins([superAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const cookie = await loginAs(app, SUPER_EMAIL);
     const disable = await app.inject({
@@ -208,7 +203,7 @@ test("PATCH /api/admin/admins/:id forbids disabling the super admin", async () =
 test("PATCH /api/admin/admins/:id returns 404 for non-existent admin", async () => {
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const { repository } = memoryAdmins([superAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const cookie = await loginAs(app, SUPER_EMAIL);
     const result = await app.inject({
@@ -224,7 +219,7 @@ test("regular admin is forbidden from all admin-management routes", async () => 
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const regularAccount = await makeAccount({ id: randomUUID(), email: REGULAR_EMAIL, isSuper: false });
   const { repository } = memoryAdmins([superAccount, regularAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const cookie = await loginAs(app, REGULAR_EMAIL);
     assert.equal((await app.inject({ url: "/api/admin/admins", headers: { cookie } })).statusCode, 403);
@@ -237,7 +232,7 @@ test("roles: create, edit, disable and delete; assignment drives the admin's per
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
   const regularAccount = await makeAccount({ id: randomUUID(), email: REGULAR_EMAIL, isSuper: false });
   const { repository } = memoryAdmins([superAccount, regularAccount]);
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const headers = { ...adminHeaders, cookie: await loginAs(app, SUPER_EMAIL) };
     const regularHeaders = { ...adminHeaders, cookie: await loginAs(app, REGULAR_EMAIL) };
@@ -297,7 +292,7 @@ test("audit log records admin writes and denied access without request bodies", 
   const { audits, repository } = memoryAdmins([superAccount, regularAccount]);
   const lines: string[] = [];
   const app = buildApp({
-    queue, adminAuth, authStore: memoryAuthStore(), admins: repository,
+    adminAuth, authStore: memoryAuthStore(), admins: repository,
     logger: { level: "info", stream: { write: (line: string) => { lines.push(line); } } },
   });
   try {

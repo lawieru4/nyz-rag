@@ -36,6 +36,42 @@ export const dataSources = pgTable("data_sources", {
   check("data_sources_status_check", sql`${table.status} IN ('运行中', '已暂停')`),
 ]);
 
+export type OperationKind = "sync-source" | "reprocess-document" | "embed-document";
+export type OperationStatus = "pending" | "dispatched" | "running" | "succeeded" | "failed";
+export const ACTIVE_OPERATION_INDEX = "operations_active_target_idx";
+
+/**
+ * 后台操作（outbox）：API 与 Worker 在修改业务状态的同一事务内写入，由 Worker 的投递器按 `op-<id>-<step>` 投递到 BullMQ。
+ * 状态 pending → dispatched → running → succeeded | failed；临时失败、租约过期或重新处理后转为向量化时回到 pending，step 加一。
+ * 同一目标（来源或文档）同时只有一个活动操作。见 operations.ts。
+ */
+export const operations = pgTable("operations", {
+  id: text().primaryKey(),
+  kind: text().$type<OperationKind>().notNull(),
+  targetType: text().$type<"source" | "document">().notNull(),
+  targetId: text().notNull(),
+  status: text().$type<OperationStatus>().notNull().default("pending"),
+  // 每次回到 pending 加一，jobId 随之变化；Worker 只认领与 job 中 step 相同的操作，重复或过期的投递直接跳过。
+  step: integer().notNull().default(0),
+  // 已失败重试（向量化临时错误）或租约过期后重新执行的次数。
+  attempt: integer().notNull().default(0),
+  runAfter: timestamptz().notNull().defaultNow(),
+  leaseOwner: text(),
+  leaseExpiresAt: timestamptz(),
+  error: text(),
+  createdAt: timestamptz().notNull().defaultNow(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+  dispatchedAt: timestamptz(),
+  finishedAt: timestamptz(),
+}, (table) => [
+  uniqueIndex(ACTIVE_OPERATION_INDEX).on(table.targetType, table.targetId).where(sql`${table.status} IN ('pending', 'dispatched', 'running')`),
+  index("operations_active_status_idx").on(table.status, table.runAfter).where(sql`${table.status} IN ('pending', 'dispatched', 'running')`),
+  index("operations_finished_at_idx").on(table.finishedAt).where(sql`${table.finishedAt} IS NOT NULL`),
+  check("operations_kind_check", sql`${table.kind} IN ('sync-source', 'reprocess-document', 'embed-document')`),
+  check("operations_target_check", sql`(${table.kind} = 'sync-source') = (${table.targetType} = 'source')`),
+  check("operations_status_check", sql`${table.status} IN ('pending', 'dispatched', 'running', 'succeeded', 'failed')`),
+]);
+
 export const ACTIVE_TASK_INDEX = "crawl_tasks_active_source_idx";
 
 export const crawlTasks = pgTable("crawl_tasks", {
@@ -49,8 +85,11 @@ export const crawlTasks = pgTable("crawl_tasks", {
   failedCount: integer().notNull().default(0),
   articleLimit: integer(),
   error: text(),
+  // 执行这次同步的操作；操作记录清理后置空。升级前的任务为空。
+  operationId: text().references(() => operations.id, { onDelete: "set null" }),
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
+  index("crawl_tasks_operation_id_idx").on(table.operationId),
   index("crawl_tasks_created_at_idx").on(table.createdAt.desc()),
   // 同一来源同时只能有一个等待中或运行中的同步任务（API 创建任务时由它原子互斥）。
   uniqueIndex(ACTIVE_TASK_INDEX).on(table.sourceId).where(sql`${table.status} IN ('等待中', '运行中')`),

@@ -36,7 +36,7 @@
  * ## commonRoutes
  *
  * A FastifyPluginAsync that registers infrastructure routes that belong at the
- * root level and do NOT depend on a BullMQ queue:
+ * root level:
  *  - GET /health
  *  - GET /api/knowledge
  *  - GET /api/admin/knowledge (authenticated operational overview)
@@ -122,8 +122,7 @@ export function configureCommon(app: FastifyInstance): void {
 // ─── commonRoutes ─────────────────────────────────────────────────────────────
 
 /**
- * Registers infrastructure routes that belong at the root level and do not
- * require a document queue:
+ * Registers infrastructure routes that belong at the root level:
  *  - GET /health
  *  - GET /api/knowledge
  *  - GET /api/admin/knowledge

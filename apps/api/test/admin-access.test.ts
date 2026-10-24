@@ -16,11 +16,6 @@ import type { AdminAccess } from "../src/admin-auth.js";
 import { adminAuth, adminHeaders, buildTestApp, memoryAdmins, memoryAuthStore, type MemoryAdminInput } from "./auth-helpers.js";
 import { hashPassword } from "../src/passwords.js";
 
-const queue = {
-  hasDocumentJob: async () => false,
-  enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-};
-
 const PASSWORD = "test-only-password-not-for-deployment";
 const UUID = "00000000-0000-4000-8000-000000000001";
 const PASSED = 299;
@@ -85,7 +80,7 @@ async function account(email: string, isSuper: boolean): Promise<MemoryAdminInpu
 
 async function setup() {
   const admins = memoryAdmins([await account("super@example.com", true), await account("regular@example.com", false)]);
-  const app = buildTestApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: admins.repository });
+  const app = buildTestApp({ adminAuth, authStore: memoryAuthStore(), admins: admins.repository });
   const loginAs = async (email: string) => {
     const result = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password: PASSWORD } });
     assert.equal(result.statusCode, 200, result.body);
@@ -95,7 +90,7 @@ async function setup() {
 }
 
 test("every admin route declares the access level in the matrix", async () => {
-  const app = buildTestApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: memoryAdmins().repository });
+  const app = buildTestApp({ adminAuth, authStore: memoryAuthStore(), admins: memoryAdmins().repository });
   const declared: Record<string, string[]> = {};
   app.addHook("onRoute", (route) => {
     if (!route.url.startsWith("/api/admin/")) return;
@@ -109,7 +104,7 @@ test("every admin route declares the access level in the matrix", async () => {
 });
 
 test("admin routes without an access declaration fail at startup", async () => {
-  const app = buildTestApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: memoryAdmins().repository });
+  const app = buildTestApp({ adminAuth, authStore: memoryAuthStore(), admins: memoryAdmins().repository });
   app.register(async (instance) => { instance.get("/api/admin/undeclared", async () => ({})); });
   try {
     await assert.rejects(app.ready(), /GET \/api\/admin\/undeclared must declare config\.adminAccess/);

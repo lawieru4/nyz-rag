@@ -9,11 +9,6 @@ import { routeSchemas } from "../src/schemas.js";
 import { adminAuth, adminHeaders, memoryAuthStore, memoryAdmins, userAuth } from "./auth-helpers.js";
 import { hashPassword } from "../src/passwords.js";
 
-const queue = {
-  hasDocumentJob: async () => false,
-  enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
-};
-
 async function makeAdmins(options: { email?: string; password?: string; isSuper?: boolean; disabled?: boolean } = {}) {
   const email = options.email ?? "admin@example.com";
   const password = options.password ?? "test-only-password-not-for-deployment";
@@ -57,7 +52,7 @@ test("deployment config defaults to secure production cookies and rejects unsafe
 
 test("every admin domain is guarded before validation and infrastructure; public routes remain open", async () => {
   const { repository } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     for (const key of Object.keys(routeSchemas).filter((key) => key.includes(" /api/admin/") && !key.endsWith("/login"))) {
       const [method, path] = key.split(" ");
@@ -75,7 +70,7 @@ test("every admin domain is guarded before validation and infrastructure; public
 test("login with email succeeds and session contains AdminAccount; login with wrong password fails", async () => {
   const { repository, email, password } = await makeAdmins();
   const store = memoryAuthStore();
-  const app = buildApp({ queue, adminAuth: { ...adminAuth, secureCookie: true }, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth: { ...adminAuth, secureCookie: true }, authStore: store, admins: repository });
   try {
     const bad = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password: "wrong" } });
     assert.equal(bad.statusCode, 401);
@@ -102,8 +97,8 @@ test("login with email succeeds and session contains AdminAccount; login with wr
 test("login rotates cookie; session returns updated state; logout revokes across replicas", async () => {
   const { repository, email, password } = await makeAdmins();
   const store = memoryAuthStore();
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
-  const replica = buildApp({ queue, adminAuth, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
+  const replica = buildApp({ adminAuth, authStore: store, admins: repository });
   try {
     const login1 = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     const cookie1 = getCookie(login1);
@@ -124,7 +119,7 @@ test("login rotates cookie; session returns updated state; logout revokes across
 
 test("CSRF header and exact origins are enforced on admin routes", async () => {
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     // Missing x-nyz-admin header
     assert.equal((await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: {}, payload: { username: email, password } })).statusCode, 403);
@@ -137,7 +132,7 @@ test("CSRF header and exact origins are enforced on admin routes", async () => {
 
 test("CORS preflight allows every method used by admin and credentialed user routes", async () => {
   const { repository } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository, userAuth });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository, userAuth });
   try {
     for (const key of Object.keys(routeSchemas)) {
       const [method, path] = key.split(" ") as [string, string];
@@ -155,7 +150,7 @@ test("sessions expire and per-request DB check invalidates sessions of disabled 
   const { repository, email, password } = await makeAdmins();
   let clock = Date.now();
   const store = memoryAuthStore(() => clock);
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
   try {
     const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     const cookie = getCookie(login);
@@ -183,8 +178,8 @@ test("login throttling is shared between replicas and expires", async () => {
   let clock = Date.now();
   const { repository, email } = await makeAdmins();
   const store = memoryAuthStore(() => clock);
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
-  const replica = buildApp({ queue, adminAuth, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
+  const replica = buildApp({ adminAuth, authStore: store, admins: repository });
   try {
     for (let i = 0; i < 10; i++) {
       assert.equal((await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password: "bad" } })).statusCode, 401);
@@ -202,7 +197,7 @@ test("login throttling is shared between replicas and expires", async () => {
 
 test("blocked IPs cannot consume the remaining global login budget", async () => {
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     for (let i = 0; i < 105; i++) {
       const response = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password: "bad" } });
@@ -215,7 +210,7 @@ test("blocked IPs cannot consume the remaining global login budget", async () =>
 
 test("login input is bounded and unknown fields are rejected", async () => {
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     for (const payload of [
       {},
@@ -233,7 +228,7 @@ test("login input is bounded and unknown fields are rejected", async () => {
 test("missing auth store availability fails closed", async () => {
   const { repository, email, password } = await makeAdmins();
   const store = memoryAuthStore();
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
   try {
     const cookie = getCookie(await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } }));
     const unavailable = async (): Promise<never> => { throw new Error("secret redis URL"); };
@@ -249,7 +244,7 @@ test("missing auth store availability fails closed", async () => {
 
 test("PATCH /api/admin/auth/profile updates email and nickname; returns new session with admin object", async () => {
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     const cookie = getCookie(login);
@@ -268,7 +263,7 @@ test("PATCH /api/admin/auth/profile updates email and nickname; returns new sess
 
 test("PATCH /api/admin/auth/profile rejects missing or invalid fields", async () => {
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     const cookie = getCookie(login);
@@ -287,7 +282,7 @@ test("PATCH /api/admin/auth/profile rejects missing or invalid fields", async ()
 test("POST /api/admin/auth/password changes password, revokes session, requires re-login", async () => {
   const { repository, email, password } = await makeAdmins();
   const store = memoryAuthStore();
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
   try {
     const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     const cookie = getCookie(login);
@@ -320,7 +315,7 @@ test("POST /api/admin/auth/password changes password, revokes session, requires 
 
 test("POST /api/admin/auth/password rejects short or blank new passwords", async () => {
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const login = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     const cookie = getCookie(login);
@@ -337,7 +332,7 @@ test("POST /api/admin/auth/password rejects short or blank new passwords", async
 
 test("disabled admin cannot log in", async () => {
   const { repository, email, password } = await makeAdmins({ disabled: true });
-  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), admins: repository });
   try {
     const response = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     assert.equal(response.statusCode, 403);
@@ -360,8 +355,8 @@ test("real Redis shares and revokes sessions across API instances", { skip: proc
   if (previous === undefined) delete process.env.DOCUMENT_QUEUE_NAME;
   else process.env.DOCUMENT_QUEUE_NAME = previous;
   const { repository, email, password } = await makeAdmins();
-  const app = buildApp({ queue, adminAuth, authStore: store, admins: repository });
-  const replica = buildApp({ queue, adminAuth, authStore: replicaStore, admins: repository });
+  const app = buildApp({ adminAuth, authStore: store, admins: repository });
+  const replica = buildApp({ adminAuth, authStore: replicaStore, admins: repository });
   try {
     const result = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: email, password } });
     assert.equal(result.statusCode, 200, result.body);

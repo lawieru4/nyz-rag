@@ -178,7 +178,7 @@ function startCrawl(source: Source) {
       <div v-for="task in tasks" :key="task.id" class="flex min-h-14 items-center gap-3 border-b px-4 last:border-b-0">
         <span :class="['grid size-6 flex-none place-items-center rounded-full', taskState[task.status].class]"><component :is="taskState[task.status].icon" class="size-3.5" /></span>
         <div class="grid w-56 min-w-0 gap-1 max-lg:w-44">
-          <b class="truncate text-xs font-semibold">{{ task.source }} <span class="ml-1.5 font-mono text-[10px] font-normal text-muted-foreground/70">{{ task.id }}</span></b>
+          <b class="truncate text-xs font-semibold">{{ task.source }} <span class="ml-1.5 font-mono text-[10px] font-normal text-muted-foreground/70" :title="task.id">{{ task.id.startsWith('CR-') ? task.id : task.id.slice(0, 8) }}</span></b>
           <small class="truncate text-[11px] text-muted-foreground">{{ task.error || task.started }}</small>
         </div>
         <div class="flex max-w-80 flex-1 items-center gap-2.5">
