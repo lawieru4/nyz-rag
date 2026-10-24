@@ -92,8 +92,9 @@ async function saveSetting() {
   const capability = props.capability;
   const { providerId, model, temperature, maxTokens } = settingForm.value;
   const previous = props.setting;
-  if (capability.id === "embedding" && previous && previous.model !== model.trim()
-    && !await confirm({ title: "更换 Embedding 模型", description: "更换后，已向量化的文档需要重新向量化；在此之前向量检索只会使用同一模型的文档。确定更换？", confirmText: "更换" })) return;
+  // 向量检索只比较同一供应商、同一模型写入的向量，两者任一变化都要重新向量化。
+  if (capability.id === "embedding" && previous && (previous.providerId !== providerId || previous.model !== model.trim())
+    && !await confirm({ title: "更换 Embedding 模型", description: "更换供应商或模型后，已向量化的文档需要重新向量化；在此之前向量检索只会使用同一供应商、同一模型的文档。确定更换？", confirmText: "更换" })) return;
   const body: SaveModelSettingRequest = { providerId, model: model.trim(), ...(capability.generative ? { temperature, maxTokens } : {}) };
   // 确认弹窗期间可能已提交过一次。
   if (saving.value) return;
@@ -148,7 +149,7 @@ async function saveSetting() {
           <p v-if="capability.id === 'chat'" class="col-span-2 text-xs leading-relaxed text-muted-foreground">最大输出 Token 是单次回答的长度上限（max_tokens），不是上下文窗口；不要超过模型的最大输出长度，否则调用会失败并退回原文摘录。问答回答一般 1024～4096 足够。</p>
           <p v-else class="col-span-2 text-xs leading-relaxed text-muted-foreground">审核输出逐项判断与理由，温度建议为 0 以便结果稳定；最大输出 1024～2048 一般足够，推理模型需要留出思考的长度。</p>
         </div>
-        <p v-if="capability.id === 'embedding'" class="text-xs leading-relaxed text-muted-foreground">更换 Embedding 模型后，已向量化的文档需要重新向量化。</p>
+        <p v-if="capability.id === 'embedding'" class="text-xs leading-relaxed text-muted-foreground">更换 Embedding 供应商或模型后，已向量化的文档需要重新向量化。</p>
         <DialogFooter>
           <Button type="button" variant="outline" :disabled="saving" @click="dialogOpen = false">取消</Button>
           <Button type="submit" :disabled="saving || !settingForm.providerId || !settingForm.model.trim()" :aria-busy="saving">{{ saving ? '保存中…' : '保存' }}</Button>

@@ -71,8 +71,8 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   };
   const { chunks, warnings } = await retrieve(question, settings, {
     keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit, undefined, options.filters),
-    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedQuery(text), embedding.model, limit, undefined, options.filters) : undefined,
-    summarySearch: embedding ? async (text, limit) => summarySearchChunks(await embedQuery(text), embedding.model, limit, undefined, options.filters) : undefined,
+    vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedQuery(text), embedding, limit, undefined, options.filters) : undefined,
+    summarySearch: embedding ? async (text, limit) => summarySearchChunks(await embedQuery(text), embedding, limit, undefined, options.filters) : undefined,
     rerank: reranker ? (query, documents, topN) => reranker.rerank(query, documents, topN) : undefined,
   });
   for (const warning of warnings) log.warn(warning);

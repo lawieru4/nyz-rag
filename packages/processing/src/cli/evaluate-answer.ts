@@ -211,8 +211,8 @@ async function run() {
         embeddingMs = ms(started);
         const dependencies: RetrievalDependencies = {
           keywordSearch: (terms, count) => keywordSearchChunks(terms, count),
-          vectorSearch: (_text, count) => vectorSearchChunks(vector, embedding.model, count),
-          summarySearch: (_text, count) => summarySearchChunks(vector, embedding.model, count),
+          vectorSearch: (_text, count) => vectorSearchChunks(vector, embedding, count),
+          summarySearch: (_text, count) => summarySearchChunks(vector, embedding, count),
           ...(reranker ? { rerank: (query: string, texts: string[], topN: number) => withRetry(() => reranker.rerank(query, texts, topN)) } : {}),
         };
         retrieved = await runVariantWithContext(question, variant, settings, dependencies, articleKeyOf, { mode: contextMode, loadSections: (ids) => listSectionContexts(ids) });

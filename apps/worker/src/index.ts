@@ -217,19 +217,19 @@ async function backfillSearchTerms() {
 }
 
 /**
- * 升级前已向量化的文章没有文章级向量，启动时在后台用当前 Embedding 模型补齐（只处理与当前模型一致的文档，
- * 其余文档需重新向量化）；回写时校验切片版本与模型，与并发任务冲突的文档跳过，由后续向量化任务生成。
+ * 升级前已向量化的文章没有文章级向量，启动时在后台用当前 Embedding 模型补齐（只处理与当前供应商、模型一致的文档，
+ * 其余文档需重新向量化）；回写时校验切片版本与向量空间，与并发任务冲突的文档跳过，由后续向量化任务生成。
  */
 async function backfillSummaryEmbeddings() {
   const embedding = await getModelSelection("embedding");
   if (!embedding) return;
-  const model = embedding.model.trim();
+  const space = { providerId: embedding.provider.id, model: embedding.model };
   let saved = 0;
   for (let cursor: string | null = ""; cursor !== null;) {
-    const batch = await listMissingSummaryEmbeddings(cursor, 32, model);
+    const batch = await listMissingSummaryEmbeddings(cursor, 32, space);
     if (batch.items.length) {
       const vectors = await embedChunks(embedding, batch.items.map((item) => item.input));
-      for (const [index, item] of batch.items.entries()) if (await saveSummaryEmbedding(item.id, item.version, vectors[index], model)) saved += 1;
+      for (const [index, item] of batch.items.entries()) if (await saveSummaryEmbedding(item.id, item.version, vectors[index], space)) saved += 1;
     }
     cursor = batch.cursor;
   }

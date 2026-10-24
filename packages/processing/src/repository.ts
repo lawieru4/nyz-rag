@@ -467,13 +467,26 @@ export async function saveDocumentEmbeddings(
 }
 
 /**
- * 升级前已向量化、缺少文章级向量的文档，按 ID 分批返回（只含当前模型的 ready 文档且有摘要），
+ * 向量空间：供应商 ID + 模型名（再加上向量维度）。不同供应商的同名模型可能不是同一个模型，
+ * 向量不可比较，所以检索与回填都只匹配同一供应商、同一模型写入的向量；更换 Embedding 供应商后需重新向量化。
+ */
+export interface VectorSpace {
+  providerId: string;
+  model: string;
+}
+
+// 写入时模型名已去掉首尾空白（saveDocumentEmbeddings），比较时同样处理。
+const documentSpace = (space: VectorSpace) => [eq(documents.embeddingProviderId, space.providerId), eq(documents.embeddingModel, space.model.trim())];
+const chunkSpace = (space: VectorSpace) => [eq(documentChunks.providerId, space.providerId), eq(documentChunks.model, space.model.trim())];
+
+/**
+ * 升级前已向量化、缺少文章级向量的文档，按 ID 分批返回（只含当前向量空间的 ready 文档且有摘要），
  * 供 Worker 回填；没有更多文档时 cursor 为 null。
  */
-export async function listMissingSummaryEmbeddings(afterId: string, batchSize: number, model: string, db: Executor = getDb()) {
+export async function listMissingSummaryEmbeddings(afterId: string, batchSize: number, space: VectorSpace, db: Executor = getDb()) {
   const rows = await db.select({ id: documents.id, version: documents.processingVersion, title: documents.title, summary: sql<string | null>`${documents.metadata}->>'summary'` })
     .from(documents)
-    .where(and(sql`${documents.id} > ${afterId}`, eq(documents.embeddingStatus, "ready"), eq(documents.embeddingModel, model), isNull(documents.summaryEmbedding),
+    .where(and(sql`${documents.id} > ${afterId}`, eq(documents.embeddingStatus, "ready"), ...documentSpace(space), isNull(documents.summaryEmbedding),
       sql`btrim(coalesce(${documents.metadata}->>'summary', '')) <> ''`))
     .orderBy(asc(documents.id)).limit(batchSize);
   return {
@@ -482,11 +495,11 @@ export async function listMissingSummaryEmbeddings(afterId: string, batchSize: n
   };
 }
 
-/** 回填文章级向量：只在文档仍为同一切片版本、同一模型与维度的 ready 状态时写入，避免覆盖并发的重新处理或向量化。 */
-export async function saveSummaryEmbedding(id: string, version: number, vector: number[], model: string, db: Executor = getDb()): Promise<boolean> {
+/** 回填文章级向量：只在文档仍为同一切片版本、同一向量空间与维度的 ready 状态时写入，避免覆盖并发的重新处理或向量化。 */
+export async function saveSummaryEmbedding(id: string, version: number, vector: number[], space: VectorSpace, db: Executor = getDb()): Promise<boolean> {
   if (!vector.length || !vector.every((value) => Number.isFinite(value)) || !vector.some((value) => value !== 0)) throw new Error("Invalid summary vector");
   const updated = await db.update(documents).set({ summaryEmbedding: vector })
-    .where(and(eq(documents.id, id), eq(documents.processingVersion, version), eq(documents.embeddingStatus, "ready"), eq(documents.embeddingModel, model),
+    .where(and(eq(documents.id, id), eq(documents.processingVersion, version), eq(documents.embeddingStatus, "ready"), ...documentSpace(space),
       eq(documents.embeddingDimensions, vector.length), isNull(documents.summaryEmbedding)))
     .returning({ id: documents.id });
   return updated.length > 0;
@@ -628,8 +641,8 @@ export async function keywordSearchChunks(terms: string[], limit: number, db: Ex
   return scored.map((item) => item.hit).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-/** 向量召回：同模型/维度的 ready 文档，常用维度走 HNSW，过滤后不足时精确回退。得分为余弦相似度。 */
-export async function vectorSearchChunks(vector: number[], model: string, limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
+/** 向量召回：同一向量空间（供应商 + 模型）与维度的 ready 文档，常用维度走 HNSW，过滤后不足时精确回退。得分为余弦相似度。 */
+export async function vectorSearchChunks(vector: number[], space: VectorSpace, limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
   if (!vector.length || vector.length > 16000 || vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0)) throw new Error("Invalid query vector");
   const dimensions = vector.length;
   const indexed = HNSW_DIMENSIONS.some((size) => size === dimensions);
@@ -637,7 +650,7 @@ export async function vectorSearchChunks(vector: number[], model: string, limit:
   const queryVector = `[${vector.join(",")}]`;
   const distance = sql`${expression} <=> ${queryVector}::vector`;
   // Literal dimension matches the partial-index predicate, including generic prepared plans.
-  const where = and(documentFilter(filters), eq(documentChunks.model, model), sql`${documentChunks.dimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documentChunks.embedding));
+  const where = and(documentFilter(filters), ...chunkSpace(space), sql`${documentChunks.dimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documentChunks.embedding));
   const hits = await db.select({ ...chunkHitColumns, score: sql<number>`1 - (${distance})` }).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
     .where(where)
     .orderBy(distance).limit(limit);
@@ -660,17 +673,17 @@ export async function vectorSearchChunks(vector: number[], model: string, limit:
 }
 
 /**
- * 摘要召回：先按文章级向量（标题 + 摘要）召回同模型/维度的 ready 文档，再用同一查询向量定位每篇文章内最相关的切片。
+ * 摘要召回：先按文章级向量（标题 + 摘要）召回同一向量空间与维度的 ready 文档，再用同一查询向量定位每篇文章内最相关的切片。
  * 每篇返回一个切片，得分为摘要的余弦相似度，按文章排序。常用维度走 HNSW，过滤后不足时精确回退。
  */
-export async function summarySearchChunks(vector: number[], model: string, limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
+export async function summarySearchChunks(vector: number[], space: VectorSpace, limit: number, db: Executor = getDb(), filters: RetrievalFilters = {}): Promise<ChunkHit[]> {
   if (!vector.length || vector.length > 16000 || vector.some((value) => !Number.isFinite(value)) || !vector.some((value) => value !== 0)) throw new Error("Invalid query vector");
   const dimensions = vector.length;
   const indexed = HNSW_DIMENSIONS.some((size) => size === dimensions);
   const expression = indexed ? sql`${documents.summaryEmbedding}::vector(${sql.raw(String(dimensions))})` : sql`${documents.summaryEmbedding}`;
   const queryVector = `[${vector.join(",")}]`;
   const distance = sql`${expression} <=> ${queryVector}::vector`;
-  const where = and(documentFilter(filters), eq(documents.embeddingModel, model), sql`${documents.embeddingDimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documents.summaryEmbedding));
+  const where = and(documentFilter(filters), ...documentSpace(space), sql`${documents.embeddingDimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documents.summaryEmbedding));
   let matched = await db.select({ id: documents.id, score: sql<number>`1 - (${distance})` }).from(documents).where(where).orderBy(distance, asc(documents.id)).limit(limit);
   if (indexed && matched.length < limit) {
     ({ rows: matched } = await db.execute<{ id: string; score: number }>(sql`
@@ -681,7 +694,7 @@ export async function summarySearchChunks(vector: number[], model: string, limit
 
   const chunkDistance = sql`${documentChunks.embedding} <=> ${queryVector}::vector`;
   const chunks = await db.selectDistinctOn([documentChunks.documentId], chunkHitColumns).from(documentChunks).innerJoin(documents, eq(documents.id, documentChunks.documentId))
-    .where(and(inArray(documentChunks.documentId, matched.map((row) => row.id)), eq(documentChunks.model, model), sql`${documentChunks.dimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documentChunks.embedding)))
+    .where(and(inArray(documentChunks.documentId, matched.map((row) => row.id)), ...chunkSpace(space), sql`${documentChunks.dimensions} = ${sql.raw(String(dimensions))}`, isNotNull(documentChunks.embedding)))
     .orderBy(documentChunks.documentId, chunkDistance, asc(documentChunks.chunkIndex));
   const byDocument = new Map(chunks.map((chunk) => [chunk.documentId, chunk]));
   return matched.flatMap(({ id, score }) => {

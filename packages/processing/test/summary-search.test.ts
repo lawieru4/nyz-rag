@@ -8,7 +8,7 @@ import type { ModelTarget } from "../src/provider.js";
 import { closeDatabase, getPool, migrate, withTransaction } from "../src/db.js";
 import {
   createSource, getSummaryInput, listDocumentChunks, listMissingSummaryEmbeddings, replaceDocumentChunks, saveDocumentEmbeddings, saveSummaryEmbedding, setEmbeddingState,
-  summarySearchChunks, upsertDocument,
+  summarySearchChunks, upsertDocument, type VectorSpace,
 } from "../src/repository.js";
 import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
@@ -19,6 +19,8 @@ const embedding: ModelTarget = {
   provider: { id: "provider-1", name: "Test", provider: "compatible", baseUrl: "", credentialEnv: "UNUSED", enabled: true, hasApiKey: false, createdAt: "", updatedAt: "" },
   model: "test-model",
 };
+const space: VectorSpace = { providerId: "provider-1", model: "test-model" };
+const otherProvider: VectorSpace = { providerId: "provider-2", model: "test-model" };
 
 test("summary recall finds articles by summary vector and locates their best chunk", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
   const previousUrl = process.env.DATABASE_URL;
@@ -46,14 +48,15 @@ test("summary recall finds articles by summary vector and locates their best chu
     const summaryOf = async (id: string) => (await getPool().query("SELECT summary_embedding IS NOT NULL AS present FROM documents WHERE id = $1", [id])).rows[0].present;
     assert.equal(await getSummaryInput(c), null);
 
-    const hits = await summarySearchChunks(vec(0), "test-model", 10);
+    const hits = await summarySearchChunks(vec(0), space, 10);
     assert.deepEqual(hits.map((hit) => hit.chunkId), [`${a}-1`, `${b}-0`], "one best chunk per article, ordered by summary similarity; documents without summaries are skipped");
     assert.ok(Math.abs(hits[0].score - 1) < 1e-6);
     assert.ok(Math.abs(hits[1].score - Math.SQRT1_2) < 1e-6);
-    assert.deepEqual((await summarySearchChunks(vec(0), "test-model", 10, undefined, { categories: ["report"] })).map((hit) => hit.documentId), [b]);
-    assert.deepEqual((await summarySearchChunks(vec(0), "test-model", 1)).map((hit) => hit.documentId), [a]);
-    assert.deepEqual(await summarySearchChunks(vec(0), "other-model", 10), []);
-    await assert.rejects(summarySearchChunks([], "test-model", 1), /Invalid query vector/);
+    assert.deepEqual((await summarySearchChunks(vec(0), space, 10, undefined, { categories: ["report"] })).map((hit) => hit.documentId), [b]);
+    assert.deepEqual((await summarySearchChunks(vec(0), space, 1)).map((hit) => hit.documentId), [a]);
+    assert.deepEqual(await summarySearchChunks(vec(0), { ...space, model: "other-model" }, 10), []);
+    assert.deepEqual(await summarySearchChunks(vec(0), otherProvider, 10), [], "the same model name from another provider is a different vector space");
+    await assert.rejects(summarySearchChunks([], space, 1), /Invalid query vector/);
     await assert.rejects(withTransaction((tx) => saveDocumentEmbeddings(tx, c, [{ id: `${c}-0`, index: 0, content: "c", tokenEstimate: 1 }], [vec(0)], embedding, [1, 0, 0])), /same dimensions/);
 
     const client = await getPool().connect();
@@ -65,7 +68,7 @@ test("summary recall finds articles by summary vector and locates their best chu
         ORDER BY summary_embedding::vector(${DIMENSIONS}) <=> $1::vector LIMIT 2`, [JSON.stringify(vec(0))]);
       assert.match(JSON.stringify(plan.rows), new RegExp(`documents_summary_embedding_${DIMENSIONS}_hnsw_idx`));
       await client.query("SET LOCAL hnsw.ef_search = 1");
-      const recovered = await summarySearchChunks(vec(0), "test-model", 10, drizzle(client, { casing: "snake_case" }), { categories: ["research", "report"] });
+      const recovered = await summarySearchChunks(vec(0), space, 10, drizzle(client, { casing: "snake_case" }), { categories: ["research", "report"] });
       assert.equal(recovered.length, 2, "exact fallback fills results after an underfilled ANN scan");
       await client.query("ROLLBACK");
     } finally { client.release(); }
@@ -73,20 +76,22 @@ test("summary recall finds articles by summary vector and locates their best chu
     // 重新向量化开始时清除文章级向量（模型与维度信息随之清除），重新切片同样清除。
     await setEmbeddingState(b, "processing");
     assert.equal(await summaryOf(b), false);
-    assert.deepEqual((await summarySearchChunks(vec(0), "test-model", 10)).map((hit) => hit.documentId), [a]);
+    assert.deepEqual((await summarySearchChunks(vec(0), space, 10)).map((hit) => hit.documentId), [a]);
 
     // 回填：只处理 ready、同模型、有摘要且缺少文章级向量的文档；切片版本变化后拒绝写入。
     await getPool().query("UPDATE documents SET summary_embedding = NULL WHERE id = $1", [a]);
-    assert.equal((await listMissingSummaryEmbeddings("", 10, "other-model")).items.length, 0);
-    const batch = await listMissingSummaryEmbeddings("", 10, "test-model");
+    assert.equal((await listMissingSummaryEmbeddings("", 10, { ...space, model: "other-model" })).items.length, 0);
+    assert.equal((await listMissingSummaryEmbeddings("", 10, otherProvider)).items.length, 0);
+    const batch = await listMissingSummaryEmbeddings("", 10, space);
     assert.deepEqual(batch.items.map((item) => [item.id, item.input]), [[a, "文章：a\n\n钠离子电池综述"]]);
     assert.equal(batch.cursor, a);
-    assert.equal((await listMissingSummaryEmbeddings(a, 10, "test-model")).cursor, null);
-    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version - 1, vec(0), "test-model"), false, "stale processing version");
-    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, [1, 0, 0], "test-model"), false, "dimension mismatch");
-    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, vec(0), "test-model"), true);
-    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, vec(0), "test-model"), false, "already filled");
-    assert.equal((await summarySearchChunks(vec(0), "test-model", 10))[0].documentId, a);
+    assert.equal((await listMissingSummaryEmbeddings(a, 10, space)).cursor, null);
+    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version - 1, vec(0), space), false, "stale processing version");
+    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, vec(0), otherProvider), false, "another provider's vector space");
+    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, [1, 0, 0], space), false, "dimension mismatch");
+    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, vec(0), space), true);
+    assert.equal(await saveSummaryEmbedding(a, batch.items[0].version, vec(0), space), false, "already filled");
+    assert.equal((await summarySearchChunks(vec(0), space, 10))[0].documentId, a);
 
     await withTransaction((tx) => replaceDocumentChunks(tx, a, { content: "a" }, [{ id: `${a}-0`, index: 0, content: "a", tokenEstimate: 1 }]));
     assert.equal(await summaryOf(a), false, "rechunking clears the summary vector");
