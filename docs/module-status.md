@@ -128,6 +128,12 @@
   - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 109 项（97 通过、12 项集成测试默认跳过）、API 112 项（110 通过、2 项跳过）全部无失败；业务库 dev 前 2 题冒烟运行、续跑、参数不一致拒绝与 `--compare` 正常。
   - **基线**：Chat 为 gemini-3.8-flash-high，审核为 gpt-6.1-sol。dev 集 `answer-topk` 的 faithful / complete / citation 通过率为 100.0 / 97.5 / 99.6，未通过的题主要是证据不在上下文中。按字数预算组装（`answer-budget`）的差别在 1～2 道题以内，输入 Token 翻倍，暂不上线。详见 evaluation-plan.md 第 8.8 节。
   - **本机模型地址**：容器内 `providerUrl` 按 `NYZ_LOOPBACK_HOST`（由 `docker/start.mjs` 设置）把模型供应商地址中的本机地址改为 `host.docker.internal`，后台填 `http://127.0.0.1:<端口>/v1` 即可在容器内外共用。
+- 本轮完成（失败题复判，2026-10-24）：
+  - **命令**：`evaluate:adjudicate <运行>` 对来源文章没有排在第 1 的题目，由审核模型判断排在来源文章之前（最多前 10 篇）的其他文章能否回答。模型只看问题与候选文章，给出 yes / partial / no、答案与原文证据；只有 yes 且证据通过校验（同证据命中的规则）才计入。宽松 Hit@K / MRR 按 split、题型、具体度、词面重叠分组写入运行记录的 `adjudication` 字段，`evaluate:compare` 并列输出。详见 evaluation-plan.md 第 7.3 节。
+  - **缓存**：结论按「题目 + 文章」缓存在 `.nyz-data/eval-adjudications/`，文章正文、复判版本与审核模型不变时各次运行与变体共用，可断点续跑；`--dry-run` 只统计待复判数量。
+  - **重构**：运行记录的读取抽到 `cli/eval-runs.ts`，供 compare 与 adjudicate 共用；`synthetic-questions.ts` 导出 `articleHeader`、`articleBody`。
+  - **结果**：`baseline-chunker3` 的 rerank 宽松 Hit@1 为 98.3（严格 95.0），`high` 题全部命中。s0152 是真正的检索失败，s0163 题目过泛。挽回的 14 道题中，9 道是同一研究的另一篇文章，说明语料中有不少正文指纹识别不了的同源文章。详见 evaluation-plan.md 第 8.9 节。
+  - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 117 项（105 通过、12 项集成测试默认跳过）全部无失败；业务库 dev 集复判 228 篇次，没有调用失败。
 
 ## 向量化运行配置
 

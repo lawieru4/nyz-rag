@@ -12,6 +12,7 @@
     "evaluate:generate": "pnpm --filter @nyz-rag/processing evaluate:generate",
     "evaluate:compare": "pnpm --filter @nyz-rag/processing evaluate:compare",
     "evaluate:answer": "pnpm --filter @nyz-rag/processing evaluate:answer",
+    "evaluate:adjudicate": "pnpm --filter @nyz-rag/processing evaluate:adjudicate",
     "evaluate:index": "pnpm --filter @nyz-rag/processing evaluate:index",
     "db:generate": "pnpm --filter @nyz-rag/processing db:generate"
   }

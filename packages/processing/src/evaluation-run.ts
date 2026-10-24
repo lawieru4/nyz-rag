@@ -1,5 +1,6 @@
 // 检索评估运行（hybrid 模式）：按变体裁剪 retrieve() 的依赖，得到文章排名与回答上下文，计算第七节的指标，并对比两次运行。方案见 docs/evaluation-plan.md 第七、八节。
 import type { CorpusSnapshot, EvaluationLabel, EvaluationQuestion, QuestionType, Specificity, Split } from "./evaluation.js";
+import type { RunAdjudication } from "./evaluation-adjudication.js";
 import { buildAnswerContext, buildSectionContext, CANDIDATE_LIMIT, retrieve, type AnswerContext, type RetrievalDependencies, type RetrievalSettings, type SectionContext } from "./rag.js";
 
 export const RETRIEVAL_VARIANTS = ["keyword", "vector", "summary", "fused", "rerank"] as const;
@@ -120,6 +121,8 @@ export interface RunRecord {
   summary: Partial<Record<RetrievalVariant, VariantSummary>>;
   embedding: { p50: number | null; p95: number | null; failures: number };
   questions: RunQuestion[];
+  /** 失败题复判与宽松指标（7.3），由 evaluate:adjudicate 补写。 */
+  adjudication?: RunAdjudication;
 }
 
 const round = (value: number, digits = 4) => Math.round(value * 10 ** digits) / 10 ** digits;
