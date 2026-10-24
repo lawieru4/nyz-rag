@@ -68,6 +68,32 @@ test("a variant result ranks articles, separates the answer context and checks e
   assert.equal(fused.evidenceHit, null);
 });
 
+test("context modes share one ranking and change only the assembled context", async () => {
+  const { dependencies } = fakeDependencies();
+  const twoPieces = question({ labels: [{ articleKey: "A", relevance: 3, evidence: [EVIDENCE, "正文s2 的结论"] }] });
+  const topk = await runVariant(twoPieces, "keyword", { ...settings, topK: 1 }, dependencies, articleKeyOf);
+  assert.deepEqual(topk.context.map((chunk) => chunk.articleKey), ["B"]);
+  assert.equal(topk.contextChars, "正文k1".length);
+  const budget = await runVariant(twoPieces, "keyword", { ...settings, topK: 1 }, dependencies, articleKeyOf, { mode: "budget" });
+  assert.deepEqual(budget.context.map((chunk) => chunk.articleKey), ["B", "A"], "budget fills past topK");
+  assert.deepEqual([budget.evidenceHit, budget.evidenceFull], [true, false]);
+
+  // 父块补全了命中切片之外的第二段证据。
+  const sectioned: RetrievalDependencies = { ...dependencies, async keywordSearch() { return [{ ...hit("k2", "doc-A", 8, `前文。${EVIDENCE}`), sectionId: "s-A" }]; } };
+  const requested: string[][] = [];
+  const section = await runVariant(twoPieces, "keyword", settings, sectioned, articleKeyOf, {
+    mode: "section",
+    loadSections: async (ids) => {
+      requested.push(ids);
+      return [{ id: "s-A", documentId: "doc-A", sectionPath: [], content: `前文。${EVIDENCE}\n正文s2 的结论。`, chunks: [{ id: "k2", content: `前文。${EVIDENCE}` }, { id: "k3", content: "正文s2 的结论。" }] }];
+    },
+  });
+  assert.deepEqual(requested, [["s-A"]]);
+  assert.deepEqual(section.context, [{ chunkId: "k2", articleKey: "A", sectionId: "s-A" }]);
+  assert.deepEqual([section.evidenceHit, section.evidenceFull], [true, true]);
+  assert.deepEqual(section.articles, ["A"], "the ranking is unchanged");
+});
+
 test("evidence coverage ignores whitespace, punctuation and width, and needs most bigrams", () => {
   assert.equal(evidenceCoverage(EVIDENCE, "前文 Li（110）晶面拥有0.5MPa的最低屈服强度"), 1);
   assert.ok(evidenceCoverage(EVIDENCE, "Li(110) 晶面拥有较低的屈服强度") < 0.8);

@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { ArticleDetail } from "./article/parse.js";
-import { embeddingInput, summaryEmbeddingInput } from "./chunking.js";
+import { embeddingInput, summaryEmbeddingInput, type StructuredSection } from "./chunking.js";
 import { contentFingerprint } from "./dedup.js";
 import type { ModelProviderConfig, ModelSelection, ModelTarget } from "./provider.js";
-import type { ChunkHit } from "./rag.js";
+import type { ChunkHit, SectionContext } from "./rag.js";
 import { decryptSecret, encryptSecret, providerSecretContext, secretKeyConfigured } from "./secrets.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
@@ -15,7 +15,7 @@ import type {
   SecretSettingStatus,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
+import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -262,24 +262,33 @@ export interface DocumentContentUpdate {
   publishedAt?: Date | null;
   contentHash?: string | null;
   parserVersion?: number | null;
+  chunkerVersion?: number | null;
   metadata?: ArticleMetadata | null;
 }
 
-// 写入清洗结果并删除旧切片（向量随之删除），切片版本加一，向量状态重置为待向量化。
+// 写入清洗结果并删除旧切片与父块（向量随之删除），切片版本加一，向量状态重置为待向量化。
 async function writeDocumentContent(tx: Executor, documentId: string, update: DocumentContentUpdate, state: { processingStatus: "chunked" | "duplicate"; duplicateOf: string | null }) {
   await tx.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
+  await tx.delete(documentSections).where(eq(documentSections.documentId, documentId));
   await tx.update(documents).set({
     ...update, ...(update.metadata !== undefined ? { metadataSearchVector: metadataSearchVector(update.metadata) } : {}), ...state, processingError: null, processingVersion: sql`${documents.processingVersion} + 1`,
     embeddingStatus: "pending", ...resetEmbedding, embeddingError: null, embeddingUpdatedAt: null, updatedAt: sql`now()`,
   }).where(eq(documents.id, documentId));
 }
 
-/** 替换正文与全部切片；旧切片的向量随之删除，向量状态重置为待向量化。文档不再是重复文档。 */
-export async function replaceDocumentChunks(tx: Executor, documentId: string, update: DocumentContentUpdate, chunks: DocumentChunkRecord[]): Promise<void> {
+/** 替换正文、全部切片与父块（切片规则 2）；旧切片的向量随之删除，向量状态重置为待向量化。文档不再是重复文档。 */
+export async function replaceDocumentChunks(
+  tx: Executor, documentId: string, update: DocumentContentUpdate, chunks: Array<DocumentChunkRecord & { sectionId?: string | null }>, sections: StructuredSection[] = [],
+): Promise<void> {
   await writeDocumentContent(tx, documentId, update, { processingStatus: "chunked", duplicateOf: null });
+  if (sections.length) {
+    await tx.insert(documentSections).values(sections.map((section) => ({
+      id: section.id, documentId, sectionIndex: section.index, sectionPath: section.sectionPath, part: section.part, content: section.content, tokenEstimate: section.tokenEstimate,
+    })));
+  }
   if (!chunks.length) return;
   await tx.insert(documentChunks).values(chunks.map((chunk) => ({
-    id: chunk.id, documentId, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate,
+    id: chunk.id, documentId, sectionId: chunk.sectionId ?? null, chunkIndex: chunk.index, content: chunk.content, tokenEstimate: chunk.tokenEstimate,
     context: chunk.context ?? "", sectionPath: chunk.sectionPath ?? [], contentType: chunk.contentType ?? "text", searchVector: searchVector(embeddingInput(chunk)),
   })));
 }
@@ -457,13 +466,13 @@ export async function deleteDocument(id: string): Promise<{ promotedId: string |
 // ---- 检索 ----
 
 const chunkHitColumns = {
-  chunkId: documentChunks.id, documentId: documentChunks.documentId, title: documents.title, url: documents.url,
+  chunkId: documentChunks.id, documentId: documentChunks.documentId, sectionId: documentChunks.sectionId, title: documents.title, url: documents.url,
   repostSource: sql<string | null>`${documents.metadata}->'sourceMeta'->>'repostSource'`,
   content: documentChunks.content, context: documentChunks.context, sectionPath: documentChunks.sectionPath, contentType: documentChunks.contentType,
 };
 
-const toChunkHit = ({ repostSource, score, ...row }: Omit<ChunkHit, "repostSource" | "score"> & { repostSource: string | null; score: number | string }): ChunkHit =>
-  ({ ...row, score: Number(score), ...(repostSource ? { repostSource } : {}) });
+const toChunkHit = ({ repostSource, sectionId, score, ...row }: Omit<ChunkHit, "repostSource" | "sectionId" | "score"> & { repostSource: string | null; sectionId: string | null; score: number | string }): ChunkHit =>
+  ({ ...row, score: Number(score), ...(sectionId ? { sectionId } : {}), ...(repostSource ? { repostSource } : {}) });
 
 // 候选只由最少见的若干词项筛选（出现在超过 10% 切片中的词项只参与打分），
 // 避免「如何」「电池」等常见二元组使候选覆盖大部分切片。
@@ -587,14 +596,14 @@ export async function vectorSearchChunks(vector: number[], model: string, limit:
   // ANN post-filtering (including model/status) can underfill. An exact filtered fallback
   // preserves eligible results without requiring pgvector 0.8 iterative-scan settings.
   if (indexed && hits.length < limit) {
-    const { rows } = await db.execute<Omit<ChunkHit, "repostSource"> & { repostSource: string | null } & Record<string, unknown>>(sql`
+    const { rows } = await db.execute<Omit<ChunkHit, "repostSource" | "sectionId"> & { repostSource: string | null; sectionId: string | null } & Record<string, unknown>>(sql`
       WITH eligible AS MATERIALIZED (
-        SELECT ${documentChunks.id} AS "chunkId", ${documentChunks.documentId} AS "documentId", ${documents.title} AS title,
+        SELECT ${documentChunks.id} AS "chunkId", ${documentChunks.documentId} AS "documentId", ${documentChunks.sectionId} AS "sectionId", ${documents.title} AS title,
           ${documents.url} AS url, ${documents.metadata}->'sourceMeta'->>'repostSource' AS "repostSource",
           ${documentChunks.content} AS content, ${documentChunks.context} AS context, ${documentChunks.sectionPath} AS "sectionPath",
           ${documentChunks.contentType} AS "contentType", ${documentChunks.embedding} AS embedding
         FROM ${documentChunks} INNER JOIN ${documents} ON ${documents.id} = ${documentChunks.documentId} WHERE ${where}
-      ) SELECT "chunkId", "documentId", title, url, "repostSource", content, context, "sectionPath", "contentType",
+      ) SELECT "chunkId", "documentId", "sectionId", title, url, "repostSource", content, context, "sectionPath", "contentType",
         1 - (embedding <=> ${queryVector}::vector) AS score FROM eligible
       ORDER BY embedding <=> ${queryVector}::vector, "chunkId" LIMIT ${limit}`);
     return rows.map(toChunkHit);
@@ -631,6 +640,19 @@ export async function summarySearchChunks(vector: number[], model: string, limit
     const chunk = byDocument.get(id);
     return chunk ? [toChunkHit({ ...chunk, score })] : [];
   });
+}
+
+/** 父块正文及其切片（按原文顺序），供按父块组装回答上下文。 */
+export async function listSectionContexts(sectionIds: string[], db: Executor = getDb()): Promise<SectionContext[]> {
+  if (!sectionIds.length) return [];
+  const ids = [...new Set(sectionIds)];
+  const [sections, chunks] = await Promise.all([
+    db.select({ id: documentSections.id, documentId: documentSections.documentId, sectionPath: documentSections.sectionPath, content: documentSections.content })
+      .from(documentSections).where(inArray(documentSections.id, ids)),
+    db.select({ id: documentChunks.id, sectionId: documentChunks.sectionId, content: documentChunks.content })
+      .from(documentChunks).where(inArray(documentChunks.sectionId, ids)).orderBy(asc(documentChunks.chunkIndex)),
+  ]);
+  return sections.map((section) => ({ ...section, chunks: chunks.filter((chunk) => chunk.sectionId === section.id).map(({ id, content }) => ({ id, content })) }));
 }
 
 // ---- 知识库 ----

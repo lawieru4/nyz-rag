@@ -3,7 +3,7 @@ import test from "node:test";
 import { ArticleApiError, createArticleClient, type ArticleListItem } from "../src/article/client.js";
 import { PARSER_VERSION, parseArticle, type ArticleDetail } from "../src/article/parse.js";
 import { syncArticles } from "../src/article/sync.js";
-import { articleQuestions, chunkArticle, chunkBlocks, embeddingInput, estimateTokens } from "../src/chunking.js";
+import { articleQuestions, chunkArticle, chunkArticleWith, chunkBlocks, chunkSections, embeddingInput, estimateTokens, type ChunkBlock } from "../src/chunking.js";
 import { prepareDocument } from "../src/prepare.js";
 
 const text = (value: string, marks?: Array<{ type: string; attrs?: Record<string, unknown> }>) => ({ type: "text", text: value, ...(marks ? { marks } : {}) });
@@ -109,7 +109,7 @@ test("project intro paragraphs become metadata without entering body chunks", ()
   assert.match(update.content, /开发高能量密度电池/);
   assert.doesNotMatch(chunks.map((chunk) => chunk.content).join("\n"), /A\. Smith|National Lab|关键词/);
   assert.match(chunks[0].context, /关键词：锂硫电池、聚合物，复合电解质/);
-  assert.deepEqual(prepareDocument("project", { rawJson }), { update, chunks });
+  assert.deepEqual(prepareDocument("project", { rawJson }), { update, chunks, sections: [] }, "rule 1 has no sections");
 });
 
 test("project intro supports multiline blocks, ASCII colons and plain keywords", () => {
@@ -195,6 +195,54 @@ test("chunkBlocks keeps sections apart, merges short sections, keeps tables and 
   const bigTable = ["H1 | H2", ...Array.from({ length: 200 }, (_, index) => `r${index} | v${index}`)].join("\n");
   const tableChunks = chunkBlocks("t", [{ kind: "table", text: bigTable, sectionPath: [] }], { title: "T" }, { targetChars: 300 });
   assert.ok(tableChunks.length > 1 && tableChunks.every((chunk) => chunk.content.startsWith("H1 | H2\n")), "oversized tables repeat the header");
+});
+
+test("chunkSections keeps short sections, splits long ones and groups blocks into children", () => {
+  const title = (value: string, sectionPath: string[]): ChunkBlock => ({ kind: "text", text: value, sectionPath, heading: true });
+  const body = (value: string, sectionPath: string[]): ChunkBlock => ({ kind: "text", text: value, sectionPath });
+  const { sections, chunks } = chunkSections("d", [
+    body("引导段落。", []),
+    title("一、方法", ["一、方法"]),
+    title("1.1 材料", ["一、方法", "1.1 材料"]),
+    body("甲".repeat(300), ["一、方法", "1.1 材料"]),
+    body("乙".repeat(150), ["一、方法", "1.1 材料"]),
+    body("丙".repeat(100), ["一、方法", "1.1 材料"]),
+    title("小结", ["小结"]),
+    body("短。", ["小结"]),
+    title("小结", ["小结"]),
+    body("另一处同名章节。", ["小结"]),
+  ], { title: "T", keywords: ["锂"] });
+  assert.deepEqual(sections.map((section) => section.sectionPath.join(">")), ["", "一、方法>1.1 材料", "小结", "小结"], "repeated headings stay apart");
+  assert.equal(sections[1].content, `一、方法\n1.1 材料\n${"甲".repeat(300)}\n${"乙".repeat(150)}\n${"丙".repeat(100)}`, "heading-only sections join the next one");
+  assert.equal(sections[2].content, "小结\n短。", "short sections keep their own parent");
+  const children = chunks.filter((chunk) => chunk.sectionId === sections[1].id);
+  assert.deepEqual(children.map((chunk) => chunk.content), [`一、方法\n1.1 材料\n${"甲".repeat(300)}`, `${"乙".repeat(150)}\n${"丙".repeat(100)}`]);
+  assert.ok(chunks.every((chunk) => chunk.context === `文章：T\n${chunk.sectionPath.length ? `章节：${chunk.sectionPath.join(" > ")}\n` : ""}关键词：锂`));
+  assert.deepEqual(chunks.map((chunk) => chunk.index), chunks.map((_, index) => index));
+
+  // 超长章节按内容块边界分段；超长段落按句切分且不丢字（含没有句末标点的行）；表格单独成块，超长时重复表头。
+  const paragraphs = Array.from({ length: 12 }, (_, index) => body(`第${index}段${"字".repeat(300)}。`, ["长"]));
+  const long = chunkSections("l", paragraphs, { title: "T" });
+  assert.ok(long.sections.length === 2 && long.sections.every((section) => section.content.length <= 2000));
+  assert.deepEqual(long.sections.map((section) => section.part), [0, 1]);
+  assert.equal(long.sections.map((section) => section.content).join("\n"), paragraphs.map((block) => block.text).join("\n"));
+  const list = Array.from({ length: 100 }, (_, index) => `第${index}项没有句号`).join("\n");
+  const split = chunkSections("p", [body(list, ["列表"])], { title: "T" });
+  assert.ok(split.chunks.length > 1 && split.chunks.every((chunk) => chunk.content.length <= 600));
+  assert.equal(split.chunks.map((chunk) => chunk.content).join("\n"), list);
+  const table = ["H1 | H2", ...Array.from({ length: 200 }, (_, index) => `r${index} | v${index}`)].join("\n");
+  const tables = chunkSections("t", [body("表前说明文字".repeat(10), ["表"]), { kind: "table", text: table, sectionPath: ["表"] }], { title: "T" });
+  const tableChunks = tables.chunks.filter((chunk) => chunk.contentType === "table");
+  assert.ok(tableChunks.length > 1 && tableChunks.every((chunk) => chunk.content.startsWith("H1 | H2\n")));
+  assert.equal(tables.chunks[0].contentType, "text", "tables do not merge with long enough text");
+});
+
+test("chunkArticleWith keeps rule 1 without sections and uses the summary for image-only articles", () => {
+  const article = parseArticle(detail([heading(2, "背景"), paragraph(text("正文内容"))]));
+  assert.deepEqual(chunkArticleWith(1, "doc", article), { sections: [], chunks: chunkArticle("doc", article).map((chunk) => ({ ...chunk, sectionId: null })) });
+  const imageOnly = parseArticle(detail([{ type: "image", attrs: { src: "https://example.test/a.png" } }], { summary: "摘要文字" }));
+  const sectioned = chunkArticleWith(2, "img", imageOnly);
+  assert.deepEqual([sectioned.sections.map((section) => section.content), sectioned.chunks.map((chunk) => chunk.content)], [["摘要文字"], ["摘要文字"]]);
 });
 
 test("estimateTokens counts CJK characters individually and other text by length", () => {

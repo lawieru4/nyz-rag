@@ -77,6 +77,8 @@ export const documents = pgTable("documents", {
   // 正文相同的主文档：重复文档保留来源记录与原始内容，但不切片、不向量化。主文档删除时由 API 选出接替者，此处置空只是兜底。
   duplicateOf: text().references((): AnyPgColumn => documents.id, { onDelete: "set null" }),
   parserVersion: integer(),
+  // 切片规则版本（chunking.ts 的 CHUNKER_VERSION）；引入前切片的文档为空，规则与 1 相同。
+  chunkerVersion: integer(),
   metadata: jsonb().$type<ArticleMetadata>(),
   // 元数据检索词项（关键词、项目名称、负责人、承担单位），规则与切片词项相同，用于关键词检索加权。
   metadataSearchVector: tsvector().notNull().default(sql`''::tsvector`),
@@ -118,9 +120,26 @@ export const documents = pgTable("documents", {
   check("documents_embedding_status_check", sql`${table.embeddingStatus} IN ('pending', 'queued', 'processing', 'ready', 'failed')`),
 ]);
 
+// 切片规则 2 的父块（章节）：回答上下文的单位，不向量化、不建关键词词项，与切片在同一事务中整体替换。
+export const documentSections = pgTable("document_sections", {
+  id: text().primaryKey(),
+  documentId: text().notNull().references(() => documents.id, { onDelete: "cascade" }),
+  sectionIndex: integer().notNull(),
+  sectionPath: text().array().notNull().default(sql`'{}'::text[]`),
+  // 同一章节拆成多段时的段序号。
+  part: integer().notNull().default(0),
+  content: text().notNull(),
+  tokenEstimate: integer().notNull(),
+}, (table) => [
+  unique("document_sections_document_id_section_index_key").on(table.documentId, table.sectionIndex),
+  check("document_sections_index_check", sql`${table.sectionIndex} >= 0 AND ${table.part} >= 0`),
+]);
+
 export const documentChunks = pgTable("document_chunks", {
   id: text().primaryKey(),
   documentId: text().notNull().references(() => documents.id, { onDelete: "cascade" }),
+  // 所属父块；切片规则 1 没有父块。
+  sectionId: text().references(() => documentSections.id, { onDelete: "cascade" }),
   chunkIndex: integer().notNull(),
   content: text().notNull(),
   // 向量化时拼接在正文前的上下文前缀。
@@ -138,6 +157,7 @@ export const documentChunks = pgTable("document_chunks", {
   embeddedAt: timestamptz(),
 }, (table) => [
   unique("document_chunks_document_id_chunk_index_key").on(table.documentId, table.chunkIndex),
+  index("document_chunks_section_id_idx").on(table.sectionId),
   index("document_chunks_search_vector_idx").using("gin", table.searchVector),
   ...HNSW_DIMENSIONS.map((dimensions) => index(`document_chunks_embedding_${dimensions}_hnsw_idx`)
     .using("hnsw", sql`(${table.embedding}::vector(${sql.raw(String(dimensions))})) vector_cosine_ops`)

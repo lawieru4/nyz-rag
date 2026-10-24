@@ -1,6 +1,6 @@
 # 文章切片方案：章节父块 + 语义子块
 
-状态：方案，未实施。实施前须先完成[评估集](evaluation-plan.md)（文章派生合成基线）并产出基线，切片改造以基线对比验收。
+状态：切片规则 2（父块 + 子块）、父块存储与按父块组装上下文已实现，在实验索引上评估后暂不上线（[evaluation-plan.md](evaluation-plan.md) 第 8.6 节）。新处理的文档仍按规则 1 切片。实际实现与本方案的差异见第六节。
 
 范围：只处理 nyzdata 文章接口的正文（ProseMirror 解析结果中 `role === "content"` 的块）；图片、PDF 附件不参与（见 [TODO](todo.md)「暂不实施」）。
 
@@ -104,3 +104,35 @@
 4. 检索：`rag.ts` 增加按父块聚合与上下文组装；repository 召回结果带 `sectionId`；`message_chunks` 记录父块。
 5. 对比基线（验收规则见 [evaluation-plan.md](evaluation-plan.md) 第十一节）：来源文章 Hit@10、MRR、Evidence Hit 不下降，分题型与具体度无明显退步后再上线。
 6. 业务库执行迁移并全量「重新处理」。
+
+## 六、实施情况（2026-10-24）
+
+已完成第五节第 1～3 步与第 4 步的上下文组装，在实验索引上完成第 5 步，未上线。第 4 步中 `message_chunks` 记录父块、问答接入，以及第 6 步，都留待上线时再做。
+
+- **切片规则版本**：`chunking.ts` 的 `CHUNKER_VERSION` 写入 `documents.chunker_version`。
+  - 1：现有规则，`chunkArticle`；
+  - 2：父块 + 子块，`chunkSections`。
+  - `chunkArticleWith(version, …)` 按版本切分，`prepareDocument` 与 `processDocument` 可以指定版本，默认仍为 1。
+- **父块**：采用[建议文档](parent-child-chunking-recommendations.md)第三节的简化规则，与第 3.2 节有以下不同：
+  - 父块以连续的同章节内容块为单位，每个标题开始一个新父块，重复的标题不会合并；
+  - 短章节保留自己的父块，不跨章节合并；只有标题、没有正文的父块并入下一个；
+  - 超过 2000 字的父块按内容块边界拆成长度相近的几段（`part`）；
+  - 不记录 `parent_id` 与 `level`。
+- **子块**：同一父块内 1～3 个相邻的内容块，目标 200～500 字，上限 600 字，不足 50 字的子块并入相邻子块。表格单独成块，超过 1600 字时按行切分并重复表头。超过 600 字的段落按句切分，不会丢字。
+  - 规则 1 的 `SENTENCE` 正则会丢掉没有句末标点、以换行结尾的行（如超长列表中的条目）。为保持规则 1 的结果不变，暂未修改。
+- **存储**：迁移 `0017_document_sections`：
+  - 新增 `document_sections` 表；
+  - `document_chunks.section_id`，随父块级联删除；
+  - `documents.chunker_version`。
+  - `replaceDocumentChunks` 在同一事务中写入父块与子块。
+  - 规则 1 的切片没有父块。
+- **上下文组装**：`rag.ts` 的 `buildSectionContext`。
+  - 按切片排名依次放入父块，同一父块只放一次。
+  - 放得下就放全文；放不下时保留命中子块及其前后各一个子块，仍放不下时只放命中子块。
+  - 同一父块的后续命中补入已放入的片段，不相邻的片段之间用省略行分隔。
+  - 召回结果带 `sectionId`，`listSectionContexts` 读取父块及其子块。
+  - 知识库 `topK` 的含义没有改变；问答（`apps/api/src/chat.ts`）尚未使用这个函数。
+- **样本统计**（200 篇，`.nyz-data/nyz-articles/raw/`）：
+  - 规则 1：1210 个切片，中位 595 字；
+  - 规则 2：856 个父块（中位 742 字、p90 1545 字），1966 个子块（中位 345 字、p90 493 字）；104 个父块来自超长章节拆段。
+  - 全量（1126 篇）：规则 1 为 6940 个切片；规则 2 为 5347 个父块、12428 个子块。

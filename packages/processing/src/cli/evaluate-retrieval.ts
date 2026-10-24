@@ -1,7 +1,9 @@
 // 用法：pnpm --filter @nyz-rag/processing evaluate:retrieval [--mode=offline|db] [--dataset=<路径>] [--split=dev|test] [--k=1,3,5,10]
-//       pnpm --filter @nyz-rag/processing evaluate:retrieval --mode=hybrid --dataset=<路径> --name=<运行名> [--split=dev|test] [--variant=keyword,vector,summary,fused,rerank] [--concurrency=1] [--limit=N]
+//       pnpm --filter @nyz-rag/processing evaluate:retrieval --mode=hybrid --dataset=<路径> --name=<运行名> [--split=dev|test] [--variant=keyword,vector,summary,fused,rerank]
+//         [--context=topk|budget|section] [--schema=eval_<名称>] [--concurrency=1] [--limit=N]
 // offline / db 为关键词冒烟测试；hybrid 调用问答使用的 retrieve()（业务模型配置中的 Embedding、Rerank 与最近创建的知识库参数），
-// 按变体消融，运行记录保存到 .nyz-data/eval-runs/<时间>-<运行名>.json，用 evaluate:compare 对比。方案见 docs/evaluation-plan.md。
+// 按变体消融，--context 选择回答上下文的组装方式，--schema 改用 evaluate:index 建立的实验索引；
+// 运行记录保存到 .nyz-data/eval-runs/<时间>-<运行名>.json，用 evaluate:compare 对比。方案见 docs/evaluation-plan.md。
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join, relative, resolve, dirname } from "node:path";
@@ -11,8 +13,8 @@ import {
   type DatasetValidationOptions, type EvaluationDataset, type EvaluationQuestion, type Split,
 } from "../evaluation.js";
 import {
-  failedResult, HIT_KS, percentile, RANKING_DEPTH, RETRIEVAL_VARIANTS, RUN_SCHEMA_VERSION, runVariant, sourceLabels, summarizeVariant,
-  type RetrievalVariant, type RunQuestion, type RunRecord,
+  CONTEXT_MODES, failedResult, HIT_KS, percentile, RANKING_DEPTH, RETRIEVAL_VARIANTS, RUN_SCHEMA_VERSION, runVariant, sourceLabels, summarizeVariant,
+  type ContextMode, type RetrievalVariant, type RunQuestion, type RunRecord,
 } from "../evaluation-run.js";
 import { getDb, closeDatabase } from "../db.js";
 import { closeModelAdmissionLimiter } from "../model-admission.js";
@@ -20,10 +22,10 @@ import { createEmbeddingModel, createRerankModel } from "../models.js";
 import { usableModel } from "../provider.js";
 import { DEFAULT_RETRIEVAL_SETTINGS, type RetrievalDependencies, type RetrievalSettings } from "../rag.js";
 import { documents } from "../schema.js";
-import { getModelSelections, keywordSearchChunks, listKnowledgeBases, summarySearchChunks, vectorSearchChunks } from "../repository.js";
+import { getModelSelections, keywordSearchChunks, listKnowledgeBases, listSectionContexts, summarySearchChunks, vectorSearchChunks } from "../repository.js";
 import { searchTerms } from "../search-terms.js";
 import { evidenceSource } from "../synthetic-questions.js";
-import { loadCorpus } from "./evaluation-corpus.js";
+import { loadCorpus, useEvaluationSchema, withRetry } from "./evaluation-corpus.js";
 
 const arg = (name: string, fallback?: string) => process.argv.find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
@@ -115,19 +117,7 @@ async function keywordDb() {
 
 // --- Hybrid mode ---
 
-const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 const message = (error: unknown) => error instanceof Error ? error.message : "unknown error";
-
-/** 模型调用（含限流拒绝）最多重试 2 次，避免偶发故障把 Rerank 降级为合并排序、污染指标。 */
-async function withRetry<T>(call: () => Promise<T>): Promise<T> {
-  for (let retry = 0; ; retry += 1) {
-    try { return await call(); }
-    catch (error) {
-      if (retry >= 2) throw error;
-      await sleep(2_000 * (retry + 1) ** 2);
-    }
-  }
-}
 
 function parseVariants(raw: string | undefined): RetrievalVariant[] {
   const values = [...new Set((raw ?? RETRIEVAL_VARIANTS.join(",")).split(",").map((value) => value.trim()).filter(Boolean))];
@@ -148,6 +138,10 @@ async function hybrid() {
   // --limit 只取前 N 道题，用于冒烟测试，不作为基线。
   const limit = arg("limit") === undefined ? undefined : Number(arg("limit"));
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) throw new Error("--limit must be a positive integer");
+  const contextMode = arg("context", "topk") as ContextMode;
+  if (!CONTEXT_MODES.includes(contextMode)) throw new Error(`--context must be one of ${CONTEXT_MODES.join(", ")}`);
+  const schema = arg("schema");
+  if (schema) useEvaluationSchema(schema);
   const selected = dataset.questions.slice(0, limit);
   const errors = validateEvaluationDataset(fullDataset);
   if (errors.length) throw new Error(`Evaluation dataset invalid:\n${errors.join("\n")}`);
@@ -175,6 +169,7 @@ async function hybrid() {
     if (embedding && snapshot.embeddingModel && embedding.model !== snapshot.embeddingModel) console.warn(`Embedding 模型 ${embedding.model} 与语料的 ${snapshot.embeddingModel} 不同，向量召回只比较同一模型的切片。`);
     const incomplete = snapshot.embeddingCoverage < 1;
     if (incomplete) console.warn(`向量化覆盖率 ${(snapshot.embeddingCoverage * 100).toFixed(2)}%，运行结果标记为不完整。`);
+    if (contextMode === "section" && snapshot.chunkerVersion !== 2) console.warn("语料不是全部按父子块（切片规则 2）切分，没有父块的切片按切片放入上下文。");
 
     // 来源文章被删除或证据已不在原文中（含标题与元数据线索）的题目排除，标注到「文章 + 证据」，与切片无关。
     const staleReason = (question: EvaluationQuestion) => {
@@ -201,7 +196,8 @@ async function hybrid() {
     if (excluded.length) console.warn(`因语料变化排除 ${excluded.length} 道题：${excluded.map(([entry]) => `${entry.id}（${entry.excluded}）`).join("；")}`);
 
     console.info(`数据集 ${dataset.name}@${dataset.version}，${split ?? "全部"} ${selected.length} 道题；变体 ${variants.join(", ")}；`
-      + `知识库 ${knowledgeBase?.name ?? "（默认参数）"} topK=${settings.topK} 阈值=${settings.similarityThreshold}；Embedding ${embedding?.model ?? "-"}，Rerank ${reranker?.model ?? "-"}`);
+      + `知识库 ${knowledgeBase?.name ?? "（默认参数）"} topK=${settings.topK} 阈值=${settings.similarityThreshold} 上下文 ${contextMode}/${settings.maxContextLength} 字；`
+      + `Embedding ${embedding?.model ?? "-"}，Rerank ${reranker?.model ?? "-"}；索引 ${schema ?? "业务库"}（切片规则 ${snapshot.chunkerVersion ?? "1"}）`);
 
     async function processQuestion([entry, question]: [RunQuestion, EvaluationQuestion]) {
       if (entry.excluded) return;
@@ -226,7 +222,7 @@ async function hybrid() {
         ...(reranker ? { rerank: (query: string, texts: string[], topN: number) => withRetry(() => reranker.rerank(query, texts, topN)) } : {}),
       };
       for (const variant of variants) {
-        try { entry.results[variant] = await runVariant(question, variant, settings, dependencies, articleKeyOf); }
+        try { entry.results[variant] = await runVariant(question, variant, settings, dependencies, articleKeyOf, { mode: contextMode, loadSections: (ids) => listSectionContexts(ids) }); }
         catch (error) { entry.results[variant] = failedResult(message(error)); }
       }
     }
@@ -255,7 +251,9 @@ async function hybrid() {
       corpus: snapshot,
       corpusChanged,
       incomplete,
-      settings: { knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, rankingDepth: RANKING_DEPTH },
+      settings: {
+        knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, rankingDepth: RANKING_DEPTH, context: contextMode, ...(schema ? { schema } : {}),
+      },
       models: {
         embedding: embedding && embeddingSelection ? { provider: embeddingSelection.provider.name, model: embedding.model } : null,
         rerank: reranker && rerankSelection ? { provider: rerankSelection.provider.name, model: reranker.model } : null,
@@ -277,13 +275,14 @@ async function hybrid() {
 }
 
 function printSummary(record: RunRecord, data: EvaluationDataset) {
-  const header = ["变体    ", ...HIT_KS.map((k) => `Hit@${k}`.padStart(6)), "   MRR", "  证据", "上下文", " p50ms", " p95ms", " 题数", " 降级", " 失败", " 深度不足"];
-  console.info(`\n${data.name}@${data.version}（${record.dataset.split}）指标（%）：`);
+  const header = ["变体    ", ...HIT_KS.map((k) => `Hit@${k}`.padStart(6)), "   MRR", "  证据", "全证据", "上下文", "  字数", " p50ms", " p95ms", " 题数", " 降级", " 失败", " 深度不足"];
+  console.info(`\n${data.name}@${data.version}（${record.dataset.split}，上下文 ${record.settings.context ?? "topk"}）指标（%，字数为上下文平均字数）：`);
   console.info(header.join(" "));
   for (const variant of record.variants) {
     const { overall, latency, reliability } = record.summary[variant]!;
     console.info([
-      variant.padEnd(8), ...HIT_KS.map((k) => percent(overall.hitAt[String(k)]).padStart(6)), percent(overall.mrr).padStart(6), percent(overall.evidenceHit).padStart(6), percent(overall.contextHit).padStart(6),
+      variant.padEnd(8), ...HIT_KS.map((k) => percent(overall.hitAt[String(k)]).padStart(6)), percent(overall.mrr).padStart(6), percent(overall.evidenceHit).padStart(6), percent(overall.evidenceFull).padStart(6), percent(overall.contextHit).padStart(6),
+      String(Math.round(overall.contextChars ?? 0)).padStart(6),
       String(Math.round(latency.p50 ?? 0)).padStart(6), String(Math.round(latency.p95 ?? 0)).padStart(6),
       String(reliability.evaluated).padStart(5), String(reliability.degraded).padStart(5), String(reliability.errors).padStart(5), String(reliability.shallowRanking).padStart(9),
     ].join(" "));

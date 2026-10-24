@@ -2,7 +2,7 @@
 
 日期：2026-10-23
 
-状态：讨论建议，尚未实施。本文补充现有[切片方案](chunking-design.md)和[评估方案](evaluation-plan.md)，不替代它们。
+状态：按本文第二、三节完成了实验 A、B、C（2026-10-24），结果见[评估方案](evaluation-plan.md)第 8.6 节：没有正收益，暂不上线。本文补充现有[切片方案](chunking-design.md)和[评估方案](evaluation-plan.md)，不替代它们。
 
 ## 一、总体原则
 

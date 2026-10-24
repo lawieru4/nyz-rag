@@ -1,6 +1,6 @@
 # 检索评估集方案：文章派生合成基线
 
-状态：生成（G）、评估（A）与对比（B）已实现，`nyz-rag-synthetic-v1` 已冻结（第 5.5 节），dev 集基线已运行（第 8.4 节）。目标是在没有人工标注资源的条件下，由 AI 按文章生成带原文证据的问题，建立可重复运行的检索回归基线，作为切片、检索、Rerank 等调整的对比依据。[切片改造](chunking-design.md)以本基线验收。
+状态：生成（G）、评估（A）与对比（B）已实现，`nyz-rag-synthetic-v1` 已冻结（第 5.5 节），dev 集基线已运行（第 8.4 节）；实验索引（第 8.5 节）与父子块切片实验（第 8.6 节）已完成，父子块暂不上线。目标是在没有人工标注资源的条件下，由 AI 按文章生成带原文证据的问题，建立可重复运行的检索回归基线，作为切片、检索、Rerank 等调整的对比依据。[切片改造](chunking-design.md)以本基线验收。
 
 ## 一、定位与边界
 
@@ -253,7 +253,10 @@
 线上 `retrieve()` 只返回 `topK`（默认 5）个切片，不能直接当作前 10 篇文章的排名。评估时区分两份列表：
 
 - **排名列表**：以 `topK = 30`（合并后的候选上限）调用 `retrieve()`。开启 Rerank 时，Rerank 的 `topN` 也随之为 30；Rerank 对每个切片独立打分，前 5 名与 `topN = 5` 时相同。切片按名次依次取所属文章、去重，得到文章排名。候选不足 10 篇文章的题目计入「排名深度不足」并单独报告。
-- **回答上下文**：取排名列表前 `知识库 topK` 个切片，经 `buildAnswerContext(…, maxContextLength)` 截取，与线上进入模型的内容一致。
+- **回答上下文**：由 `--context` 选择组装方式，三种方式使用同一份排名列表：
+  - `topk`（默认）：取排名列表前 `知识库 topK` 个切片，经 `buildAnswerContext(…, maxContextLength)` 截取，与线上进入模型的内容一致；
+  - `budget`：按排名依次放入切片，直到 `maxContextLength`。切片长度不同的规则在 `topk` 下送入的字数不同，比较切片规则时用它统一字数预算；
+  - `section`：按父块组装（`buildSectionContext`，切片规则 2），没有父块的切片按切片放入。
 
 运行记录同时保存两份列表的配置，不修改知识库设置。
 
@@ -263,8 +266,10 @@
 | --- | --- |
 | 来源文章 Hit@1 / @5 / @10 | 文章排名前 K 中包含来源文章的题目比例 |
 | 来源文章 MRR | 来源文章名次的倒数，不在排名列表中计 0 |
-| Evidence Hit@topK | 回答上下文中来源文章的切片文本（规范化：NFKC、去空白与标点）覆盖证据原文字符二元组的比例 ≥ 0.8 即为命中，多段证据任一段命中即可；不依赖切片 ID。`metadata` 题不计算 |
+| Evidence Hit@topK | 回答上下文中来源文章的文本（规范化：NFKC、去空白与标点）覆盖证据原文字符二元组的比例 ≥ 0.8 即为命中，多段证据任一段命中即可；不依赖切片 ID。`metadata` 题不计算 |
+| 全部证据覆盖率 | 同上，但要求每段证据都命中。合成题的多段证据不一定都是必要证据，只作参考 |
 | 上下文命中率 | 回答上下文中包含来源文章任一切片的题目比例 |
+| 上下文字数 | 回答上下文的平均正文字数 |
 | 检索耗时 p50 / p95 | `retrieve()` 耗时，不含查询 Embedding；查询 Embedding 耗时单独统计 |
 | 运行可靠性 | 降级（`warnings`）题数、调用失败题数、排名深度不足题数、因语料变化排除的题数 |
 | 数据可靠性 | 生成通过率、退回 `fact` 的比例（取自数据集 `generation`） |
@@ -291,14 +296,16 @@
 
 同一次运行中，每道题只计算一次查询 Embedding，各变体共用，与 API 一致。检索参数取最近创建的知识库（`topK`、`similarityThreshold`、`maxContextLength`），`rerankEnabled` 由变体决定。Embedding 与 Rerank 调用失败时最多重试 2 次，避免偶发故障使 Rerank 降级为合并排序；重试后仍失败的记为降级或调用失败，单独报告。
 
+`--context` 选择回答上下文的组装方式（第 7.1 节），`--schema=eval_<名称>` 改用 `evaluate:index` 建立的实验索引（第 8.5 节），模型配置与知识库参数也从该 schema 读取。
+
 ### 8.2 运行记录
 
 每次运行保存到 `.nyz-data/eval-runs/<时间>-<名称>.json`，内容包括：
 
 - 数据集名称与版本、split；
 - 语料指纹与覆盖率、`parserVersions`、`chunkerVersion`；
-- 知识库参数，以及 Embedding、Rerank 的模型与供应商（不含密钥）；
-- 每题每个变体的文章排名（含各路得分）、回答上下文的切片 ID 与所属文章、耗时、警告；
+- 知识库参数、上下文组装方式与实验 schema，以及 Embedding、Rerank 的模型与供应商（不含密钥）；
+- 每题每个变体的文章排名（含各路得分）、回答上下文的切片 ID、父块 ID 与所属文章、上下文字数、耗时、警告；
 - 汇总指标：每个变体的总体指标、按 split / 题型 / 具体度 / 词面重叠分组的指标、可靠性计数与耗时。
 
 `--limit=N` 只取前 N 道题，用于冒烟测试，不作为基线。
@@ -309,6 +316,7 @@
 
 - 各指标差值；
 - 每题来源文章名次的升降，以及进入或跌出前 5、前 10 的题目清单；
+- 证据由未命中变为命中、由命中变为未命中的题目清单（比较上下文组装方式时名次不变，看这两份清单）；
 - 按题型和具体度的差值。
 
 两次运行的数据集版本或 split 不同时拒绝对比。语料指纹不同时给出警告。只比较两边都有效的题目（未排除、未调用失败）。默认对比两次运行共有的变体；`--variant=fused:rerank` 表示 A 的 `fused` 对比 B 的 `rerank`，两个参数写同一个运行即可对比同一次运行内的两个变体。`--json` 输出完整结果。
@@ -333,6 +341,80 @@
 - **摘要召回**每篇只给一个切片，证据命中低（31.9）是预期的，它的作用是给相关文章加分。
 - Rerank 没有排在第 1 的 12 道题中，2 道（s0152、s0163）任何变体的排名列表里都没有来源文章，都是问题较泛的 `low` 题，可能也能由其他文章回答（第 5.4 节）。
 
+### 8.5 实验索引
+
+切片规则等需要重建索引的改动，在 `nyzrag` 库的单独 schema 中建立实验索引，业务 schema 与线上问答不受影响，基线可以随时复现：
+
+```sh
+pnpm evaluate:index --schema=eval_<名称> [--chunker=1|2] [--concurrency=4] [--reset]
+```
+
+- 新建 schema 并执行迁移，从业务 schema 复制 `model_providers`、`model_settings`、`knowledge_bases`、`data_sources`、`documents`。模型密钥按密文原样复制，不解密；nyzdata token 不复制。
+- 对检索范围内的文章（ready、非重复主文档）按 `--chunker` 指定的切片规则（默认 2）在进程内重新切片并向量化，不经过队列与 Worker。
+- 中断后再次运行，只处理尚未完成的文章。实验 schema 是复制时的文章快照，业务库之后的同步不会进入，需要时用 `--reset` 重建。不再使用时手动执行 `DROP SCHEMA eval_<名称> CASCADE`。
+- 全量约 1126 次 Embedding 调用。模型调用准入（Redis，默认每分钟 120 次，与 API、Worker 共用）拒绝时，按返回的等待时间重试，全程约 10 分钟。期间额度被占满，线上问答的查询 Embedding 可能被拒绝而降级为关键词检索。`--concurrency=2` 即可。
+- 文档级咨询锁的键名与业务库相同，业务 Worker 恰好处理同一篇时，本命令稍后重试。
+
+### 8.6 父子块切片实验（2026-10-24）
+
+对应[父子块建议](parent-child-chunking-recommendations.md)第二节的实验 A、B、C。
+
+- **数据**：dev 238 道题。
+- **索引**：两个实验索引都在 2026-10-24 从业务库复制，共 1126 篇。
+  - `eval_legacy`：切片规则 1，6940 个切片，平均 541 字；
+  - `eval_sections`：切片规则 2，5347 个父块、12428 个子块，子块平均 302 字。
+- **配置**：模型与知识库参数同基线（topK=5、阈值 0.35、上下文 6144 字）。
+- **运行**：
+
+  | 运行 | 实验 | 索引 | 上下文组装 |
+  | --- | --- | --- | --- |
+  | `legacy-topk` | 线上配置 | `eval_legacy` | `topk` |
+  | `legacy-budget` | A | `eval_legacy` | `budget` |
+  | `sections-budget` | B | `eval_sections` | `budget` |
+  | `sections-section` | C | `eval_sections` | `section` |
+
+  B 与 C 的检索结果逐题相同。
+
+rerank 变体（线上配置）：
+
+| 运行 | Hit@1 | Hit@5 | Hit@10 | MRR | 证据命中 | 全部证据 | 上下文字数 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `legacy-topk` | 95.0 | 99.2 | 99.2 | 97.0 | 96.8 | 94.0 | 3026 |
+| `legacy-budget`（A） | 95.0 | 99.2 | 99.2 | 97.0 | 97.3 | 95.7 | 6055 |
+| `sections-budget`（B） | 94.5 | 98.3 | 98.7 | 96.5 | 96.8 | 95.1 | 6065 |
+| `sections-section`（C） | 94.5 | 98.3 | 98.7 | 96.5 | 96.8 | 95.7 | 6082 |
+
+fused 变体（不 Rerank）：
+
+| 运行 | Hit@1 | Hit@5 | Hit@10 | MRR | 证据命中 | 全部证据 | 上下文字数 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `legacy-topk` | 77.7 | 92.9 | 98.7 | 84.5 | 76.8 | 70.8 | 2880 |
+| `legacy-budget`（A） | 77.7 | 92.9 | 98.7 | 84.5 | 94.0 | 90.8 | 6046 |
+| `sections-budget`（B） | 79.4 | 93.7 | 98.3 | 85.5 | 96.2 | 93.5 | 6060 |
+| `sections-section`（C） | 79.4 | 93.7 | 98.3 | 85.5 | 88.1 | 85.4 | 6079 |
+
+观察：
+
+- **基线可以复现**：`legacy-topk` 与 `baseline` 的 keyword、rerank 指标相同，vector、summary、fused 相差不超过 1.2 个百分点。差异来自业务库中有 1 篇文章未向量化，实验索引的覆盖率为 100%。
+- **字数预算的影响远大于切片规则**：线上 topK=5 只用了约 3000 字，是预算的一半。填满 6144 字后，fused 证据命中从 76.8 升到 94.0，rerank 从 96.8 升到 97.3。
+- **B 对比 A（字数预算相同）**：
+  - rerank 各项下降 0.4～0.9 个百分点（1～2 道题），在第十一节的容差内。`low` 组 Hit@10 −1.5（1 道题），词面重叠 `<0.4` 组 Hit@10 由 96.9 降为 95.3、MRR 由 94.1 降为 91.6。
+  - fused 的 Hit@1 +1.7、MRR +1.0、证据命中 +2.2。
+  - vector 单路明显变差，Hit@10 由 91.2 降为 87.0，MRR 由 81.0 降为 77.8。子块更小，前 20 个向量命中集中在更少的文章上，排名深度不足的题由 67 道增至 131 道。
+- **C 对比 B（检索结果相同）**：
+  - rerank 证据命中不变（96.8），全部证据 +0.5（1 道题）。
+  - fused 证据命中 −8.1，16 道题由命中变为未命中。整个父块放入后，同样字数容纳的文章由平均 9.4 篇降为 4.9 篇（rerank 运行中统计），排名靠后的来源文章放不进上下文。可见排序准确时父块扩展没有影响，排序不准时会挤掉其他文章。
+- **数据集已接近上限**：185 道证据题中，各配置的 rerank 只有 5～6 道证据未命中，其中约一半是来源文章根本不在上下文中，属于检索问题。合成题的证据大多是单段原文，父块补全上下文的作用在本数据集上无法体现。
+- **耗时**：
+  - rerank p50 由 604 ms 降为 520 ms，因为 Rerank 的输入切片更短；keyword、fused 的 p95 也下降了。
+  - 三次 `budget`/`section` 运行的 rerank p95 都在 2600 ms 左右，其中包括与 `legacy-topk`（707 ms）同一索引的 `legacy-budget`。这是运行期间 Rerank 服务的波动，与切片规则无关。
+
+结论：
+
+- **父子块暂不上线**：B、C 的指标在第十一节的容差内，但没有可重复的正收益（建议文档第六节）。`CHUNKER_VERSION` 保持 1，切片规则 2、父块表与评估工具保留。
+- **字数预算更值得先做**：线上只用了一半预算。调大 `topK` 或按字数预算组装上下文是检索参数调整，需要回答层评估（I）确认更长的上下文不会让回答变差。
+- **如果继续父子块**：先补上下文依赖专项题（建议文档第五节），再解决子块下向量召回集中在少数文章的问题，例如加大向量召回的候选数，或按文章去重。
+
 ## 九、工具实现
 
 | 步骤 | 内容 | 预估 |
@@ -342,6 +424,7 @@
 | A ✅ | 评估命令 `--mode=hybrid`：复用 API 的检索接线（`retrieve()` + 数据库召回 + 业务模型配置），`--variant` 消融；排名列表与回答上下文分离；输出第七节的指标与分组 | 1 天 |
 | B ✅ | 运行记录保存与 `evaluate:compare` | 1 天 |
 | — | 试点 50 篇 → 调整提示与阈值 → 全量 400 篇 → 冻结 `synthetic-v1` → 基线运行（全部变体） | 0.5 天 + 模型运行时间 |
+| X ✅ | 实验索引 `evaluate:index`、`--schema` 与 `--context`、全部证据覆盖率与上下文字数、对比中的证据变化清单；父子块切片实验（第 8.5、8.6 节） | 1 天 |
 | H | 失败题复判（第 7.3 节） | 1 天，基线产出后 |
 | I | 回答层评估：对评估集运行完整问答（不保存问答记录），计算来源文章被引用的比例；LLM 评审回答是否忠实于上下文 | 2 天，切片改造后 |
 
@@ -360,10 +443,17 @@ pnpm --filter @nyz-rag/processing evaluate:generate --name=nyz-rag-synthetic-v1 
 # 3. 记录基线（--variant 默认为全部五个变体；相对路径按执行命令的目录解析）
 pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --name=baseline
 
-# 4. 修改检索或切片后再运行，并与基线对比
-pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --variant=fused,rerank --name=parent-child
-pnpm evaluate:compare baseline parent-child
+# 4. 修改检索参数后再运行，并与基线对比
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --variant=fused,rerank --name=<运行名>
+pnpm evaluate:compare baseline <运行名>
 pnpm evaluate:compare baseline baseline --variant=fused:rerank   # 同一次运行内对比两个变体
+
+# 5. 切片规则的改动：建立实验索引后在其上运行（第 8.5、8.6 节）
+pnpm evaluate:index --schema=eval_legacy --chunker=1 --concurrency=2
+pnpm evaluate:index --schema=eval_sections --chunker=2 --concurrency=2
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --schema=eval_legacy --context=budget --name=legacy-budget
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --schema=eval_sections --context=section --name=sections-section
+pnpm evaluate:compare legacy-budget sections-section
 ```
 
 根目录的 `evaluate:*` 脚本转发到 `@nyz-rag/processing`。dev 集 238 道题、全部变体按顺序运行约需数分钟，`--concurrency` 可以并行，但会使耗时指标偏高。
