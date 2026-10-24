@@ -8,7 +8,7 @@ import { hashPassword } from "../src/passwords.js";
 import { adminAuth, adminHeaders, buildTestApp, memoryAdmins, memoryAuthStore } from "./auth-helpers.js";
 
 const queue = {
-  hasDocumentJob: async () => false, hasSourceJob: async () => false,
+  hasDocumentJob: async () => false,
   enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
 };
 const overview = (documents: number): KnowledgeOverview => ({ sources: [], tasks: [], stats: { documents, sources: 0, processingTasks: 0, lastUpdated: null } });
