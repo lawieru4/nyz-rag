@@ -118,7 +118,7 @@ try {
   const pending = await db.select({ id: documents.id }).from(documents)
     .where(and(eligible, or(sql`${documents.chunkerVersion} IS DISTINCT FROM ${chunker}`, ne(documents.embeddingStatus, "ready"))))
     .orderBy(documents.createdAt, documents.id);
-  console.info(`实验 schema ${schema}：切片规则 ${chunker}，待处理 ${pending.length} 篇，Embedding ${embedding.model}，并发 ${concurrency}`);
+  console.info(`实验 schema ${schema}：切片版本 ${chunker}，待处理 ${pending.length} 篇，Embedding ${embedding.model}，并发 ${concurrency}`);
 
   const queue = pending.map((row) => row.id);
   const failures: string[] = [];
@@ -145,7 +145,7 @@ try {
     db.select({ total: count() }).from(documentSections),
     db.select({ total: count(), chars: sql<number>`coalesce(sum(length(${documentChunks.content})), 0)::int`, embedded: sql<number>`count(*) FILTER (WHERE ${isNotNull(documentChunks.embedding)})::int` }).from(documentChunks),
   ]);
-  console.info(`完成：文章 ${articles.total} 篇，按规则 ${chunker} 切片并向量化 ${embedded.total} 篇；父块 ${sections.total} 个，切片 ${chunks.total} 个（已向量化 ${chunks.embedded}，平均 ${chunks.total ? Math.round(chunks.chars / chunks.total) : 0} 字）`);
+  console.info(`完成：文章 ${articles.total} 篇，按切片版本 ${chunker} 切片并向量化 ${embedded.total} 篇；父块 ${sections.total} 个，切片 ${chunks.total} 个（已向量化 ${chunks.embedded}，平均 ${chunks.total ? Math.round(chunks.chars / chunks.total) : 0} 字）`);
   if (embedded.total < articles.total) process.exitCode = 1;
 } finally {
   await closeModelAdmissionLimiter();

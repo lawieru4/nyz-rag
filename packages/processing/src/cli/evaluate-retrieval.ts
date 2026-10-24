@@ -186,7 +186,7 @@ async function hybrid() {
 
     console.info(`数据集 ${dataset.name}@${dataset.version}，${split ?? "全部"} ${selected.length} 道题；变体 ${variants.join(", ")}；`
       + `知识库 ${knowledgeBase?.name ?? "（默认参数）"} topK=${settings.topK} 阈值=${settings.similarityThreshold} 上下文 ${contextMode}/${settings.maxContextLength} 字；`
-      + `Embedding ${embedding?.model ?? "-"}，Rerank ${reranker?.model ?? "-"}；索引 ${schema ?? "业务库"}（切片规则 ${snapshot.chunkerVersion ?? "1"}）`);
+      + `Embedding ${embedding?.model ?? "-"}，Rerank ${reranker?.model ?? "-"}；索引 ${schema ?? "业务库"}（切片版本 ${snapshot.chunkerVersion ?? "1"}）`);
 
     async function processQuestion([entry, question]: [RunQuestion, EvaluationQuestion]) {
       if (entry.excluded) return;
