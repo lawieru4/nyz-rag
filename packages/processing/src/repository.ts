@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { ArticleDetail } from "./article/parse.js";
 import { embeddingInput, summaryEmbeddingInput, type StructuredSection } from "./chunking.js";
@@ -17,7 +17,7 @@ import type {
   SaveAdminRoleRequest, SecretSettingStatus, UpdateAdminRoleRequest,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { adminAccounts, adminAuditLogs, adminRoles, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
+import { ACTIVE_TASK_INDEX, adminAccounts, adminAuditLogs, adminRoles, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -93,11 +93,41 @@ export async function getTask(id: string, db: Executor = getDb()): Promise<Crawl
   return row ? toTask(row) : null;
 }
 
-export async function createTask(source: DataSourceRecord, db: Executor = getDb()): Promise<CrawlTaskRecord> {
-  const [row] = await db.insert(crawlTasks)
-    .values({ id: `CR-${Date.now().toString().slice(-8)}`, sourceId: source.id, sourceName: source.name, status: "等待中" })
-    .returning();
-  return toTask(row);
+/** 同一来源已有等待中或运行中的任务时返回 null（由部分唯一索引原子互斥）。 */
+export async function createTask(source: DataSourceRecord, db: Executor = getDb()): Promise<CrawlTaskRecord | null> {
+  try {
+    const [row] = await db.insert(crawlTasks)
+      .values({ id: `CR-${Date.now().toString().slice(-8)}`, sourceId: source.id, sourceName: source.name, status: "等待中" })
+      .returning();
+    return toTask(row);
+  } catch (error) {
+    if (pgErrorCode(error) === "23505" && pgConstraint(error) === ACTIVE_TASK_INDEX) return null;
+    throw error;
+  }
+}
+
+const activeTask = inArray(crawlTasks.status, ["等待中", "运行中"]);
+
+/** Worker 开始执行同步：任务已不是等待中或运行中（例如被对账标为失败）时返回 false，不再执行。 */
+export async function startTask(id: string, articleLimit: number, db: Executor = getDb()): Promise<boolean> {
+  const rows = await db.update(crawlTasks)
+    .set({ status: "运行中", progress: 0, processedCount: 0, failedCount: 0, articleLimit, error: null })
+    .where(and(eq(crawlTasks.id, id), activeTask)).returning({ id: crawlTasks.id });
+  return rows.length > 0;
+}
+
+/** 把仍为等待中或运行中的任务标为失败；已结束的任务不变。 */
+export async function failActiveTask(id: string, error: string, db: Executor = getDb()): Promise<boolean> {
+  const rows = await db.update(crawlTasks).set({ status: "失败", error })
+    .where(and(eq(crawlTasks.id, id), activeTask)).returning({ id: crawlTasks.id });
+  return rows.length > 0;
+}
+
+/** 创建早于 `olderThanMs` 毫秒前、仍为等待中或运行中的任务，供 Worker 启动时与队列对账。 */
+export async function listActiveTaskIds(olderThanMs: number, db: Executor = getDb()): Promise<string[]> {
+  const rows = await db.select({ id: crawlTasks.id }).from(crawlTasks)
+    .where(and(activeTask, lt(crawlTasks.createdAt, sql`now() - make_interval(secs => ${olderThanMs / 1000})`)));
+  return rows.map((row) => row.id);
 }
 
 /** 未传入的字段保持不变；`error: null` 清除错误。 */
@@ -1066,6 +1096,11 @@ export class AdminAccountError extends Error {
 const pgErrorCode = (error: unknown) => {
   const cause = error as { code?: string; cause?: { code?: string } };
   return cause.code ?? cause.cause?.code;
+};
+
+const pgConstraint = (error: unknown) => {
+  const cause = error as { constraint?: string; cause?: { constraint?: string } };
+  return cause.constraint ?? cause.cause?.constraint;
 };
 
 /** 管理员登录校验用的账号字段，含密码哈希，只在 API 内使用。 */

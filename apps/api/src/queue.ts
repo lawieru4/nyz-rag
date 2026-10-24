@@ -4,7 +4,6 @@ import type { DocumentSummary } from "@nyz-rag/types";
 
 export interface DocumentQueue {
   hasDocumentJob(document: Pick<DocumentSummary, "id" | "sourceId">): Promise<boolean>;
-  hasSourceJob(sourceId: string): Promise<boolean>;
   enqueueDocument(name: "reprocess-document" | "embed-document", documentId: string): Promise<void>;
   enqueueSource(sourceId: string, taskId: string): Promise<void>;
   close(): Promise<void>;
@@ -20,10 +19,6 @@ export function documentQueueService(queue: Pick<Queue, "getJob" | "getJobs" | "
       if (await queue.getJob(documentJobId(document.id))) return true;
       const activeJobs = await queue.getJobs(["active"]);
       return activeJobs.some((job) => job.name === "sync-source" && job.data.sourceId === document.sourceId);
-    },
-    async hasSourceJob(sourceId) {
-      const jobs = await queue.getJobs(["active", "waiting", "delayed", "paused"]);
-      return jobs.some((job) => job.name === "sync-source" && job.data.sourceId === sourceId);
     },
     async enqueueDocument(name, documentId) {
       await queue.add(name, { documentId }, jobOptions(documentJobId(documentId)));

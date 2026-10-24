@@ -1,11 +1,11 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { Worker } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  ARTICLE_TOKEN_SETTING, backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, getSource, getSourceSyncState,
-  getModelSelection, getSummaryInput, getTask, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
+  ARTICLE_TOKEN_SETTING, backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, failActiveTask, embeddingInput, getSource, getSourceSyncState,
+  getModelSelection, getSummaryInput, getTask, listActiveTaskIds, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
   readSecretSetting, reindexChunkSearchTerms, reindexDocumentMetadataTerms, requireEmbeddingModel, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, setEmbeddingState, setProcessingState,
-  syncArticles, updateTask, upsertDocument, withDocumentWork, withTransaction, type Database, type ProcessDocumentResult,
+  startTask, syncArticles, updateTask, upsertDocument, withDocumentWork, withTransaction, type Database, type ProcessDocumentResult,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
 
@@ -122,7 +122,11 @@ async function reprocessDocument(documentId: string) {
 async function syncSource(sourceId: string, taskId: string) {
   const [task, source] = await Promise.all([getTask(taskId), getSource(sourceId)]);
   if (!task || !source) throw new Error("source or task not found");
-  await updateTask(taskId, { status: "运行中", progress: 0, processedCount: 0, failedCount: 0, articleLimit: articleSyncLimit, error: null });
+  // 任务已结束（例如启动对账时队列中找不到它而被标为失败）则不再执行，避免与同一来源的新任务并行。
+  if (!await startTask(taskId, articleSyncLimit)) {
+    console.warn(`Task ${taskId} is no longer active; skipped`);
+    return null;
+  }
   try {
     const { count, note } = await syncArticleSource(source, taskId);
     await withTransaction(async (tx) => {
@@ -177,8 +181,27 @@ async function backfillSummaryEmbeddings() {
   if (saved) console.info(`Backfilled ${saved} document summary embeddings`);
 }
 
+/**
+ * 等待中/运行中的任务在队列中没有对应 job（API 写库后入队前退出、Redis 数据丢失等）时，会一直占住来源的同步互斥：
+ * 启动时把它们标为失败。只检查创建超过 1 分钟的任务，避开 API 写库与入队之间的窗口。
+ */
+async function reconcileSourceTasks() {
+  const queue = new Queue(queueName, { connection });
+  try {
+    let failed = 0;
+    for (const taskId of await listActiveTaskIds(60_000)) {
+      if (await queue.getJob(`sync-${taskId}`)) continue; // 与 API queue.ts 的 sourceJobId 一致
+      if (await failActiveTask(taskId, "队列中没有对应的同步任务，已标为失败，请重新同步")) failed += 1;
+    }
+    if (failed) console.warn(`Marked ${failed} orphaned sync tasks as failed`);
+  } finally {
+    await queue.close();
+  }
+}
+
 const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
 await migrate();
+await reconcileSourceTasks();
 void backfillHashes().catch((error: unknown) => console.error("Content hash backfill failed", errorMessage(error, "unknown error")));
 void backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error")));
 void backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error")));
@@ -195,11 +218,15 @@ const worker = new Worker(queueName, async (job) => {
     return duplicateOf ? { status: "duplicate", documentId: job.data.documentId, duplicateOf } : { status: "chunked", documentId: job.data.documentId, chunks };
   }
   const count = await syncSource(job.data.sourceId, job.data.taskId);
-  return { status: "ready", documentsProcessed: count };
+  return count === null ? { status: "skipped" } : { status: "ready", documentsProcessed: count };
 }, { connection, concurrency: 1 });
 
 worker.on("completed", (job) => console.info(`Job ${job.id} completed`));
-worker.on("failed", (job, error) => console.error(`Job ${job?.id} failed`, error.message));
+worker.on("failed", (job, error) => {
+  console.error(`Job ${job?.id} failed`, error.message);
+  // 处理函数内的失败已写入任务；卡住超过重试次数等由 BullMQ 判定的失败不经过处理函数，在这里补记。
+  if (job?.name === "sync-source") void failActiveTask(job.data.taskId, errorMessage(error, "Unknown sync error")).catch(() => console.error(`Failed to update task ${job.data.taskId}`));
+});
 
 const shutdown = async () => { await worker.close(); await connection.quit(); await closeDatabase(); await closeModelAdmissionLimiter(); };
 process.once("SIGINT", () => void shutdown());

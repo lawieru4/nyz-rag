@@ -17,7 +17,7 @@ import { adminAuth, adminHeaders, buildTestApp, memoryAdmins, memoryAuthStore, t
 import { hashPassword } from "../src/passwords.js";
 
 const queue = {
-  hasDocumentJob: async () => false, hasSourceJob: async () => false,
+  hasDocumentJob: async () => false,
   enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
 };
 

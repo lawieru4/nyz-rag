@@ -8,7 +8,7 @@ import { configureUserAuth, requestOwner, userAuthConfig } from "../src/user-aut
 import { memoryAuthStore, memoryMailer, memoryUsers, userAuth, userHeaders } from "./auth-helpers.js";
 
 const queue = {
-  hasDocumentJob: async () => false, hasSourceJob: async () => false,
+  hasDocumentJob: async () => false,
   enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
 };
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");

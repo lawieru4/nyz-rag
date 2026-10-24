@@ -141,6 +141,13 @@
       "when": 1792834156954,
       "tag": "0019_admin_audit_logs",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1792837390059,
+      "tag": "0020_active_crawl_task",
+      "breakpoints": true
     }
   ]
 }

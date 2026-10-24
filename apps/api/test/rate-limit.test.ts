@@ -40,7 +40,7 @@ function memoryLimiter() {
 }
 
 const queue = {
-  hasDocumentJob: async () => false, hasSourceJob: async () => false,
+  hasDocumentJob: async () => false,
   enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
 };
 
