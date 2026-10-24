@@ -1,9 +1,10 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { Queue, Worker } from "bullmq";
+import { DelayedError, Queue, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import {
-  ARTICLE_TOKEN_SETTING, backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, failActiveTask, embeddingInput, getSource, getSourceSyncState,
-  getModelSelection, getSummaryInput, getTask, listActiveTaskIds, listArticleVersions, listDocumentChunks, listMissingSummaryEmbeddings, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
+  ARTICLE_TOKEN_SETTING, backfillContentHashes, closeDatabase, closeModelAdmissionLimiter, createArticleClient, DocumentBusyError, embedChunks, embeddingInput, embeddingRetryDelay, embeddingRetryDelays,
+  failActiveTask, failStaleEmbedding, getSource, getSourceSyncState,
+  getModelSelection, getSummaryInput, getTask, listActiveTaskIds, listArticleVersions, listDocumentChunks, listStaleEmbeddingIds, listMissingSummaryEmbeddings, lockDocument, markSourceSynced, migrate, modelAdmissionConfig, normalizeUrl, processDocument,
   readSecretSetting, reindexChunkSearchTerms, reindexDocumentMetadataTerms, requireEmbeddingModel, saveDocumentEmbeddings, saveSourceSyncState, saveSummaryEmbedding, setEmbeddingState, setProcessingState,
   startTask, syncArticles, updateTask, upsertDocument, withDocumentWork, withTransaction, type Database, type ProcessDocumentResult,
 } from "@nyz-rag/processing";
@@ -17,8 +18,24 @@ const requestTimeoutMs = Math.max(1000, Number.parseInt(process.env.NYZ_ARTICLE_
 const articleSyncLimit = Math.max(1, Math.min(5000, Number.parseInt(process.env.NYZ_ARTICLE_SYNC_LIMIT ?? "200", 10) || 200));
 const articleOverlapPages = Math.max(1, Math.min(20, Number.parseInt(process.env.NYZ_ARTICLE_OVERLAP_PAGES ?? "2", 10) || 2));
 const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message.slice(0, 500) : fallback;
+// 向量化遇到临时错误时由队列稍后重试的等待（毫秒，逗号分隔；空字符串不重试）。
+const embedRetryDelays = embeddingRetryDelays(process.env.NYZ_EMBED_RETRY_DELAYS_MS);
 
-async function embedDocument(documentId: string, db: Database) {
+const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
+const queue = new Queue(queueName, { connection });
+// 与 API queue.ts 的 jobId 一致：API 据 document-<id> 判断文档已有任务。
+const documentJobId = (id: string) => `document-${id}`;
+const sourceJobId = (taskId: string) => `sync-${taskId}`;
+
+/** 向量化遇到临时错误：文档已记为排队中，由调用方安排第 `retry` 次重试。 */
+class EmbeddingRetry extends Error {
+  constructor(readonly documentId: string, readonly retry: number, readonly delayMs: number, message: string) { super(message); }
+}
+
+const waitText = (ms: number) => ms >= 60_000 ? `${Math.round(ms / 60_000)} 分钟` : `${Math.ceil(ms / 1000)} 秒`;
+
+/** @param retried 此前已自动重试的次数。 */
+async function embedDocument(documentId: string, db: Database, retried = 0) {
   try {
     // 模型调用放在事务外；回写时用 processing_version 确认切片没有被重新生成。
     const { version, chunks, summary } = await db.transaction(async (tx) => {
@@ -41,17 +58,56 @@ async function embedDocument(documentId: string, db: Database) {
       await saveDocumentEmbeddings(tx, documentId, chunks, vectors, embedding, summaryVector);
     });
   } catch (error) {
-    await setEmbeddingState(documentId, "failed", errorMessage(error, "Embedding failed"), db);
-    throw error;
+    const message = errorMessage(error, "Embedding failed");
+    const delayMs = embeddingRetryDelay(error, retried, embedRetryDelays);
+    if (delayMs === null) {
+      await setEmbeddingState(documentId, "failed", message, db);
+      throw error;
+    }
+    await setEmbeddingState(documentId, "queued", `第 ${retried + 1} 次向量化失败，${waitText(delayMs)}后自动重试：${message}`, db);
+    throw new EmbeddingRetry(documentId, retried + 1, delayMs, message);
   }
 }
 
-/** 切片后自动向量化：本文档（重复文档除外）及接替为主文档的文档。 */
-async function autoEmbedDocuments({ embed }: ProcessDocumentResult, db: Database) {
+/** 安排其他文档的延迟重试；文档已有任务（同 jobId 入队被忽略）时由那个任务处理。 */
+async function enqueueEmbeddingRetry({ documentId, retry, delayMs }: EmbeddingRetry) {
+  try {
+    await queue.add("embed-document", { documentId, embedRetry: retry }, { jobId: documentJobId(documentId), delay: delayMs, removeOnComplete: true, removeOnFail: true });
+  } catch {
+    console.error(`Failed to schedule embedding retry for document ${documentId}`);
+    await setEmbeddingState(documentId, "failed", "自动重试入队失败，请手动重新向量化").catch(() => undefined);
+  }
+}
+
+/**
+ * 当前任务的 jobId 就是 document-<本文档>，同 ID 入队会被忽略：把当前任务改为只向量化并延后执行，
+ * ID 不变，API 在等待期间仍能据此判断文档已有任务。须在释放文档锁之后调用。
+ */
+async function delayForEmbeddingRetry(job: Job, token: string | undefined, { documentId, retry, delayMs }: EmbeddingRetry): Promise<never> {
+  await job.updateData({ documentId, embedRetry: retry });
+  await job.moveToDelayed(Date.now() + delayMs, token);
+  throw new DelayedError();
+}
+
+/**
+ * 切片后自动向量化：本文档（重复文档除外）及接替为主文档的文档。失败不影响已保存的内容；
+ * 临时错误安排延迟重试，其中 `ownDocumentId`（当前任务的文档）的重试返回给调用方处理。
+ */
+async function autoEmbedDocuments({ embed }: ProcessDocumentResult, db: Database, ownDocumentId?: string): Promise<EmbeddingRetry | undefined> {
   if (!embed.length) return;
   if (!await getModelSelection("embedding", db)) return;
-  // An embedding failure remains retryable without discarding successfully synced content.
-  for (const documentId of embed) await embedDocument(documentId, db).catch(() => console.error(`Embedding failed for document ${documentId}`));
+  let own: EmbeddingRetry | undefined;
+  for (const documentId of embed) {
+    try {
+      await embedDocument(documentId, db);
+    } catch (error) {
+      console.error(`Embedding failed for document ${documentId}`);
+      if (!(error instanceof EmbeddingRetry)) continue;
+      if (documentId === ownDocumentId) own = error;
+      else await enqueueEmbeddingRetry(error);
+    }
+  }
+  return own;
 }
 
 const duplicateNote = (count: number) => count ? `${count} 篇与已有文档内容相同，标记为重复，未切片和向量化` : "";
@@ -110,8 +166,7 @@ async function reprocessDocument(documentId: string) {
         for (const target of result.embed) await lock(target);
         return result;
       });
-      await autoEmbedDocuments(result, db);
-      return result;
+      return { result, retry: await autoEmbedDocuments(result, db, documentId) };
     } catch (error) {
       if (!(error instanceof DocumentBusyError)) await setProcessingState(documentId, "failed", errorMessage(error, "Document processing failed"), db);
       throw error;
@@ -182,43 +237,52 @@ async function backfillSummaryEmbeddings() {
 }
 
 /**
- * 等待中/运行中的任务在队列中没有对应 job（API 写库后入队前退出、Redis 数据丢失等）时，会一直占住来源的同步互斥：
- * 启动时把它们标为失败。只检查创建超过 1 分钟的任务，避开 API 写库与入队之间的窗口。
+ * 启动时与队列对账，只检查 1 分钟以前的记录（避开 API 写库与入队之间的窗口）：
+ * - 等待中/运行中的任务没有对应 job（API 写库后入队前退出、Redis 数据丢失等）时会一直占住来源的同步互斥，标为失败；
+ * - 向量排队中/向量化中的文档没有对应 job（同步中途 Worker 退出等）时会一直显示为进行中、不能手动重试，标为失败。
  */
-async function reconcileSourceTasks() {
-  const queue = new Queue(queueName, { connection });
-  try {
-    let failed = 0;
-    for (const taskId of await listActiveTaskIds(60_000)) {
-      if (await queue.getJob(`sync-${taskId}`)) continue; // 与 API queue.ts 的 sourceJobId 一致
-      if (await failActiveTask(taskId, "队列中没有对应的同步任务，已标为失败，请重新同步")) failed += 1;
-    }
-    if (failed) console.warn(`Marked ${failed} orphaned sync tasks as failed`);
-  } finally {
-    await queue.close();
+async function reconcileWithQueue() {
+  let tasks = 0;
+  for (const taskId of await listActiveTaskIds(60_000)) {
+    if (await queue.getJob(sourceJobId(taskId))) continue;
+    if (await failActiveTask(taskId, "队列中没有对应的同步任务，已标为失败，请重新同步")) tasks += 1;
   }
+  let embeddings = 0;
+  for (const documentId of await listStaleEmbeddingIds(60_000)) {
+    if (await queue.getJob(documentJobId(documentId))) continue;
+    if (await failStaleEmbedding(documentId, "向量化已中断（队列中没有对应任务），请重新向量化")) embeddings += 1;
+  }
+  if (tasks || embeddings) console.warn(`Marked ${tasks} orphaned sync tasks and ${embeddings} interrupted embeddings as failed`);
 }
 
-const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
 await migrate();
-await reconcileSourceTasks();
+await reconcileWithQueue();
 void backfillHashes().catch((error: unknown) => console.error("Content hash backfill failed", errorMessage(error, "unknown error")));
 void backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error")));
 void backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error")));
-const worker = new Worker(queueName, async (job) => {
-  if (job.name === "embed-document") {
-    await withDocumentWork(async (db, lock) => {
-      await lock(job.data.documentId);
-      await embedDocument(job.data.documentId, db);
+const worker = new Worker(queueName, async (job, token) => {
+  if (job.name === "sync-source") {
+    const count = await syncSource(job.data.sourceId, job.data.taskId);
+    return count === null ? { status: "skipped" } : { status: "ready", documentsProcessed: count };
+  }
+  // 文档级任务；embedRetry 为第几次自动重试向量化（包括由重新处理任务延后而来的）。
+  const { documentId, embedRetry } = job.data as { documentId: string; embedRetry?: number };
+  if (job.name === "embed-document" || embedRetry !== undefined) {
+    const retry = await withDocumentWork(async (db, lock) => {
+      await lock(documentId);
+      try {
+        await embedDocument(documentId, db, embedRetry ?? 0);
+      } catch (error) {
+        if (error instanceof EmbeddingRetry) return error;
+        throw error;
+      }
     });
-    return { status: "embedded", documentId: job.data.documentId };
+    if (retry) return delayForEmbeddingRetry(job, token, retry);
+    return { status: "embedded", documentId };
   }
-  if (job.name === "reprocess-document") {
-    const { duplicateOf, chunks } = await reprocessDocument(job.data.documentId);
-    return duplicateOf ? { status: "duplicate", documentId: job.data.documentId, duplicateOf } : { status: "chunked", documentId: job.data.documentId, chunks };
-  }
-  const count = await syncSource(job.data.sourceId, job.data.taskId);
-  return count === null ? { status: "skipped" } : { status: "ready", documentsProcessed: count };
+  const { result: { duplicateOf, chunks }, retry } = await reprocessDocument(documentId);
+  if (retry) return delayForEmbeddingRetry(job, token, retry);
+  return duplicateOf ? { status: "duplicate", documentId, duplicateOf } : { status: "chunked", documentId, chunks };
 }, { connection, concurrency: 1 });
 
 worker.on("completed", (job) => console.info(`Job ${job.id} completed`));
@@ -228,7 +292,7 @@ worker.on("failed", (job, error) => {
   if (job?.name === "sync-source") void failActiveTask(job.data.taskId, errorMessage(error, "Unknown sync error")).catch(() => console.error(`Failed to update task ${job.data.taskId}`));
 });
 
-const shutdown = async () => { await worker.close(); await connection.quit(); await closeDatabase(); await closeModelAdmissionLimiter(); };
+const shutdown = async () => { await worker.close(); await queue.close(); await connection.quit(); await closeDatabase(); await closeModelAdmissionLimiter(); };
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 console.info(`NYZ RAG worker listening on ${queueName} queue`);

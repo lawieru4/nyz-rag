@@ -417,6 +417,22 @@ export async function setEmbeddingState(id: string, status: Exclude<DocumentEmbe
   await db.update(documents).set({ embeddingStatus: status, embeddingError: error, ...resetEmbedding, embeddingUpdatedAt: sql`now()` }).where(eq(documents.id, id));
 }
 
+const embeddingInProgress = inArray(documents.embeddingStatus, ["queued", "processing"]);
+
+/** 向量排队中或向量化中、状态更新早于 `olderThanMs` 毫秒前的文档，供 Worker 启动时与队列对账。 */
+export async function listStaleEmbeddingIds(olderThanMs: number, db: Executor = getDb()): Promise<string[]> {
+  const rows = await db.select({ id: documents.id }).from(documents)
+    .where(and(embeddingInProgress, lt(documents.embeddingUpdatedAt, sql`now() - make_interval(secs => ${olderThanMs / 1000})`)));
+  return rows.map((row) => row.id);
+}
+
+/** 仍为排队中或向量化中时标为失败；状态已变化（任务已开始或完成）则不变。 */
+export async function failStaleEmbedding(id: string, error: string, db: Executor = getDb()): Promise<boolean> {
+  const rows = await db.update(documents).set({ embeddingStatus: "failed", embeddingError: error, embeddingUpdatedAt: sql`now()` })
+    .where(and(eq(documents.id, id), embeddingInProgress)).returning({ id: documents.id });
+  return rows.length > 0;
+}
+
 function validateVectors(vectors: number[][], { provider, model }: ModelTarget): void {
   if (!provider.id.trim() || !model.trim()) throw new Error("Vector provider ID and embedding model are required.");
   for (const vector of vectors) {

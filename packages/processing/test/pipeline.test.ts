@@ -10,7 +10,7 @@ import { closeDatabase, getPool, migrate, withDocumentWork, withTransaction } fr
 import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, saveModelSetting, upsertDocument } from "../src/repository.js";
 import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
-test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 60000 }, async () => {
+test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 90000 }, async () => {
   // 每次运行使用独立 schema（search_path 指向它，pgvector 类型仍从 public 解析），结束后整体删除。
   const baseUrl = process.env.DATABASE_URL ?? "postgresql://nyzrag:nyzrag@localhost:5432/nyzrag";
   const schema = `nyz_test_${randomBytes(6).toString("hex")}`;
@@ -21,7 +21,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
   const previousUrl = process.env.DATABASE_URL;
   process.env.DATABASE_URL = testUrl.toString();
 
-  let mode: "ok" | "failure" | "slow" = "ok";
+  let mode: "ok" | "failure" | "rejected" | "slow" = "ok";
   let requested = 0;
   const chatPrompts: string[] = [];
   const chatRequests: Array<Array<{ role: string; content: string }>> = [];
@@ -94,6 +94,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     const { input } = JSON.parse(body) as { input: string[] };
     requested += 1;
     if (mode === "failure") { response.writeHead(503).end("do-not-leak-provider-body"); return; }
+    if (mode === "rejected") { response.writeHead(400).end("do-not-leak-provider-body"); return; }
     if (mode === "slow") await delay(500);
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ data: input.map((_, index) => ({ index, embedding: [index + 1, 0.5, 0.25] })).reverse() }));
@@ -140,6 +141,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       env: {
         ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), DOCUMENT_QUEUE_NAME: `test-${schema}`,
         NYZ_SECRET_KEY: secretKey, NYZ_ARTICLE_REQUEST_DELAY_MS: "1000", NYZ_MODEL_CREDENTIAL_ENVS: "UNUSED_KEY",
+        // 向量化的临时错误只由队列重试一次，2 秒后执行。
+        NYZ_EMBED_RETRY_DELAYS_MS: "2000",
         ADMIN_USERNAME: "admin", ADMIN_PASSWORD: adminPassword, ADMIN_COOKIE_SECURE: "false",
         // 不发送真实邮件：开发模式下验证码写入 API 日志，由测试从输出中读取。
         SMTP_HOST: "", USER_COOKIE_SECURE: "false",
@@ -192,6 +195,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     const taskStatus = async (id: string) => (await getPool().query("SELECT status, error FROM crawl_tasks WHERE id = $1", [id])).rows[0];
     await getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status, created_at) VALUES ('CR-orphan', $1, 'Test source', '运行中', now() - interval '1 hour')", [source.id]);
     await assert.rejects(getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status) VALUES ('CR-second', $1, 'Test source', '等待中')", [source.id]), /crawl_tasks_active_source_idx/);
+    // 向量化中途 Worker 退出：文档停在向量化中且没有对应 job，启动对账后标为失败，可以手动重试。
+    await getPool().query("UPDATE documents SET embedding_status = 'processing', embedding_updated_at = now() - interval '1 hour' WHERE id = $1", [documentId]);
     const freshSource = await createSource({ name: "Fresh source", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
     await getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status) VALUES ('CR-fresh', $1, 'Fresh source', '等待中')", [freshSource.id]);
     start("apps/api/src/index.ts");
@@ -200,6 +205,8 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await until(async () => (await taskStatus("CR-orphan")).status === "失败");
     assert.match((await taskStatus("CR-orphan")).error, /队列中没有对应的同步任务/);
     assert.equal((await taskStatus("CR-fresh")).status, "等待中");
+    await until(async () => (await embedding())?.status === "failed");
+    assert.match((await embedding())?.error ?? "", /向量化已中断/);
     await getPool().query("DELETE FROM data_sources WHERE id = $1", [freshSource.id]);
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
     assert.equal((await fetch(`${apiBase}/api/admin/documents`)).status, 401);
@@ -279,10 +286,23 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     mode = "failure";
     const requestedBeforeFailure = requested;
     assert.equal((await post("embed")).status, 202);
+    // 临时错误：本次调用内重试两次，仍失败则记为排队中，由同一任务延后再试；等待期间文档仍有任务。
+    await until(async () => /^第 1 次向量化失败，2 秒后自动重试/.test((await embedding())?.error ?? ""));
+    assert.equal((await embedding())?.status, "queued");
+    assert.equal(requested - requestedBeforeFailure, 3, "transient provider failures are retried twice within one attempt");
+    assert.equal((await post("embed")).status, 409, "the delayed retry keeps the document job ID");
     await waitEmbedding("failed");
-    assert.equal(requested - requestedBeforeFailure, 3, "transient provider failures are retried twice before failing");
+    assert.equal(requested - requestedBeforeFailure, 6, "the queue retries once more, then gives up");
     assert.doesNotMatch((await embedding())?.error ?? "", /do-not-leak-provider-body|integration-test-key/);
     assert.equal((await embeddedChunks()).length, 2, "failed embedding preserves previous vectors");
+
+    // 4xx 等确定性错误不重试。
+    mode = "rejected";
+    const requestedBeforeRejection = requested;
+    assert.equal((await post("embed")).status, 202);
+    await waitEmbedding("failed");
+    assert.match((await embedding())?.error ?? "", /^The embedding request failed with HTTP 400/);
+    assert.equal(requested - requestedBeforeRejection, 1, "client errors are not retried");
 
     mode = "slow";
     assert.equal((await post("embed")).status, 202);
@@ -306,6 +326,17 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     rows = await embeddedChunks();
     assert.equal(rows.length, 1, "reprocessing removes obsolete chunk vectors");
     assert.equal((await getPool().query("SELECT summary_embedding FROM documents WHERE id = $1", [documentId])).rows[0].summary_embedding, null, "articles without a summary have no summary vector");
+
+    // 重新处理后的向量化遇到临时错误：同一任务（jobId 不变）延后只做向量化，不再重新切片。
+    mode = "failure";
+    assert.equal((await post("reprocess")).status, 202);
+    await until(async () => /^第 1 次向量化失败/.test((await embedding())?.error ?? ""));
+    const versionBeforeRetry = (await getPool().query("SELECT processing_version FROM documents WHERE id = $1", [documentId])).rows[0].processing_version;
+    assert.equal((await post("reprocess")).status, 409, "the delayed retry keeps the document job ID");
+    mode = "ok";
+    await waitEmbedding("ready");
+    assert.equal((await getPool().query("SELECT processing_version FROM documents WHERE id = $1", [documentId])).rows[0].processing_version, versionBeforeRetry, "the retry only embeds");
+    assert.equal((await embeddedChunks()).length, 1);
 
     const chat = await (await fetch(`${apiBase}/api/chat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "vector test" }) })).json();
     assert.equal(chat.answerMode, "generated", output);
@@ -516,6 +547,14 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     synced = await articleDocuments();
     assert.equal(synced[1].title, "文章二（更新）");
     assert.deepEqual(articleRequests.filter((path) => path.endsWith("/articleDetail")).length, 1, "only the changed article is fetched again");
+    // 同步中的向量化遇到临时错误：同步照常完成，文档由延迟的 embed-document 任务重试，不需要再次同步。
+    articles.set("a2", article("a2", "文章二（第三版）", 300));
+    mode = "failure";
+    const failingSync = syncArticles();
+    await until(async () => /^第 1 次向量化失败/.test((await getDocumentSummary(synced[1].id))?.embedding?.error ?? ""));
+    mode = "ok";
+    await failingSync;
+    await until(async () => (await getDocumentSummary(synced[1].id))?.embedding?.status === "ready");
     // 只接受文章接口来源。
     assert.equal((await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Site", url: "https://example.test", kind: "网页站点", frequency: "" }) })).status, 400);
     // 正文相同的文章：后处理的一篇标记为重复，不切片、不向量化；删除主文档后由重复文档接替。
