@@ -14,6 +14,7 @@ import { toast } from "@nyz-rag/ui/lib/toast";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import { validateAdminIdentity, validateAdminPassword } from "../admin-validation";
 import { client, errorMessage } from "../workspace";
 
 const admins = ref<AdminAccount[]>([]);
@@ -42,18 +43,8 @@ function openCreate() {
   dialogOpen.value = true;
 }
 
-function validateForm(): string {
-  if (!form.value.email.trim()) return "请输入邮箱";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.value.email.trim())) return "邮箱格式不正确";
-  if (!form.value.nickname.trim()) return "请输入昵称";
-  if (!form.value.password) return "请输入密码";
-  if (form.value.password.length < 8) return "密码至少 8 个字符";
-  if (form.value.password.length > 1024) return "密码不能超过 1024 个字符";
-  return "";
-}
-
 async function createAdmin() {
-  const err = validateForm();
+  const err = validateAdminIdentity(form.value) || validateAdminPassword(form.value.password, "密码");
   if (err) { formError.value = err; return; }
   formError.value = "";
   formBusy.value = true;

@@ -1,28 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
-import { Check, Clock, Database, FileText, Info, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
-import type { SecretSettingStatus } from "@nyz-rag/types";
+import { Check, Clock, Database, FileText, Info, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
 import { Button } from "@nyz-rag/ui/components/button";
-import { Badge } from "@nyz-rag/ui/components/badge";
 import { Card } from "@nyz-rag/ui/components/card";
-import { confirm } from "@nyz-rag/ui/confirm";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
-import { Input } from "@nyz-rag/ui/components/input";
-import { Label } from "@nyz-rag/ui/components/label";
 import { Progress } from "@nyz-rag/ui/components/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@nyz-rag/ui/components/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@nyz-rag/ui/components/table";
 import { toast } from "@nyz-rag/ui/lib/toast";
+import ArticleTokenSettings from "../components/ArticleTokenSettings.vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
+import SourceCreateDialog from "../components/SourceCreateDialog.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { client, errorMessage, loadKnowledge, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
 
 defineProps<{ title: string }>();
 
-const emptyForm = () => ({ name: "", url: "", frequency: "每天" });
 const dialogOpen = ref(false);
-const form = ref(emptyForm());
 
 // 进入页面时重新加载，避免显示登录时缓存的旧列表，之后由服务端推送同步进度；每分钟刷新一次相对时间。
 const now = ref(Date.now());
@@ -94,69 +87,6 @@ function taskProgress(task: Task) {
 // 已有排队或运行中任务的数据源不能再次同步（服务端同样会拒绝）。
 const syncingSources = computed(() => new Set(tasks.value.filter((task) => task.status === "等待中" || task.status === "运行中").map((task) => task.sourceId)));
 
-// nyzdata 接口 token：全局一个，只能设置或清除，后台不显示已保存的值。
-const tokenStatus = ref<SecretSettingStatus | null>(null);
-const tokenDialogOpen = ref(false);
-const tokenValue = ref("");
-const tokenPath = "/api/admin/settings/article-token";
-
-async function loadTokenStatus() {
-  try {
-    tokenStatus.value = await client.request<SecretSettingStatus>(tokenPath);
-  } catch {
-    tokenStatus.value = null;
-  }
-}
-onMounted(loadTokenStatus);
-
-async function saveToken() {
-  try {
-    tokenStatus.value = await client.request<SecretSettingStatus>(tokenPath, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: tokenValue.value.trim() }) });
-    tokenValue.value = "";
-    tokenDialogOpen.value = false;
-    toast.success("接口 Token 已保存，下次同步生效");
-  } catch (err) {
-    toast.error(errorMessage(err, "接口 Token 保存失败"));
-  }
-}
-
-async function clearToken() {
-  if (!await confirm({ title: "清除接口 Token", description: "清除后数据源将无法同步，直到重新填写。确定清除？", confirmText: "清除", destructive: true })) return;
-  try {
-    await client.request(tokenPath, { method: "DELETE" });
-    await loadTokenStatus();
-    toast.success("接口 Token 已清除");
-  } catch {
-    toast.error("接口 Token 清除失败");
-  }
-}
-
-// 取消时保留已填写的内容，添加成功后才清空。
-function openDialog() {
-  dialogOpen.value = true;
-}
-
-async function addSource() {
-  const name = form.value.name.trim();
-  const url = form.value.url.trim();
-  try {
-    const parsed = new URL(url);
-    if (!name || !["http:", "https:"].includes(parsed.protocol)) throw new Error();
-  } catch {
-    toast.error("请填写名称和有效的 http(s) 地址");
-    return;
-  }
-  try {
-    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url, kind: "文章 API" }) });
-    await loadKnowledge();
-    form.value = emptyForm();
-    dialogOpen.value = false;
-    toast.success("数据源已添加");
-  } catch {
-    toast.error("数据源添加失败");
-  }
-}
-
 async function toggleSource(source: Source) {
   const status = source.status === "运行中" ? "已暂停" : "运行中";
   try {
@@ -181,7 +111,7 @@ async function startCrawl(source: Source) {
 
 <template>
   <PageHeading eyebrow="KNOWLEDGE OPERATIONS" :title="title" subtitle="管理内容来源与自动同步任务">
-    <Button @click="openDialog"><Plus /> 添加数据源</Button>
+    <Button @click="dialogOpen = true"><Plus /> 添加数据源</Button>
   </PageHeading>
 
   <Card class="mb-8 grid grid-cols-2 gap-0 py-0 lg:grid-cols-4" aria-label="数据源概览">
@@ -193,24 +123,7 @@ async function startCrawl(source: Source) {
     </article>
   </Card>
 
-  <Card class="mb-7 flex-row flex-wrap items-center gap-3 px-5 py-4">
-    <KeyRound class="size-4 flex-none text-link" aria-hidden="true" />
-    <div class="grid min-w-0 flex-1 gap-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <h2 class="text-sm font-semibold">nyzdata 接口 Token</h2>
-        <Badge v-if="tokenStatus" :variant="tokenStatus.configured ? 'success' : 'muted'">{{ tokenStatus.configured ? '已配置' : '未配置' }}</Badge>
-      </div>
-      <p class="text-xs text-muted-foreground">
-        <template v-if="tokenStatus && !tokenStatus.encryptionReady">服务端未配置 NYZ_SECRET_KEY（至少 32 个字符），无法保存或使用 Token。</template>
-        <template v-else-if="tokenStatus?.configured">所有文章来源共用，更新于 {{ new Date(tokenStatus.updatedAt!).toLocaleString() }}；修改后下次同步生效。</template>
-        <template v-else>所有文章来源共用；未配置时同步会失败。</template>
-      </p>
-    </div>
-    <div class="flex gap-1.5">
-      <Button variant="outline" size="sm" :disabled="tokenStatus?.encryptionReady === false" @click="tokenDialogOpen = true">{{ tokenStatus?.configured ? '更换' : '设置' }}</Button>
-      <Button v-if="tokenStatus?.configured" variant="outline" size="sm" class="text-destructive hover:text-destructive" @click="clearToken">清除</Button>
-    </div>
-  </Card>
+  <ArticleTokenSettings />
 
   <section class="mb-7">
     <div class="mb-3"><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置 nyzdata 文章接口，并管理同步计划</p></div>
@@ -244,7 +157,7 @@ async function startCrawl(source: Source) {
           </TableRow>
         </TableBody>
       </Table>
-      <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button variant="link" size="sm" class="text-link" @click="openDialog">添加第一个来源</Button></EmptyState>
+      <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button variant="link" size="sm" class="text-link" @click="dialogOpen = true">添加第一个来源</Button></EmptyState>
     </Card>
   </section>
 
@@ -268,42 +181,5 @@ async function startCrawl(source: Source) {
   </section>
   <footer class="flex items-center gap-2 px-0.5 py-3 text-[11px] text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，单次同步有篇数上限，首次全量同步需多次执行；接口总数取自最近一次同步，无正文（如 VIP）的文章会计入失败。</footer>
 
-  <Dialog v-model:open="tokenDialogOpen">
-    <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
-      <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">ARTICLE API TOKEN</p>
-        <DialogTitle>{{ tokenStatus?.configured ? '更换接口 Token' : '设置接口 Token' }}</DialogTitle>
-      </DialogHeader>
-      <form class="grid gap-4" @submit.prevent="saveToken">
-        <div class="grid gap-2"><Label for="article-token">Token</Label><Input id="article-token" v-model="tokenValue" type="password" autocomplete="new-password" required maxlength="4096" pattern="\S+" placeholder="nyzdata 文章接口 token" /></div>
-        <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">Token 加密保存在数据库中，保存后不再显示；Worker 在每次同步时读取，无需重启。</p>
-        <DialogFooter>
-          <Button type="button" variant="outline" @click="tokenDialogOpen = false">取消</Button>
-          <Button type="submit">保存</Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
-  </Dialog>
-
-  <Dialog v-model:open="dialogOpen">
-    <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
-      <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">NEW CONNECTION</p>
-        <DialogTitle>添加数据源</DialogTitle>
-      </DialogHeader>
-      <form class="grid gap-4" @submit.prevent="addSource">
-        <div class="grid gap-2"><Label for="source-name">数据源名称</Label><Input id="source-name" v-model="form.name" autofocus placeholder="例如：NYZ 储能文章" required /></div>
-        <div class="grid gap-2"><Label for="source-url">来源地址</Label><Input id="source-url" v-model="form.url" type="url" placeholder="https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=…" required /></div>
-        <div class="grid gap-2">
-          <Label for="source-frequency">同步频率</Label>
-          <Select v-model="form.frequency"><SelectTrigger id="source-frequency" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="frequency in ['每小时', '每 6 小时', '每天', '手动']" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent></Select>
-        </div>
-        <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权后再启动。来源地址填写 nyzdata 文章列表接口（不含 token），token 在本页「nyzdata 接口 Token」中配置。</p>
-        <DialogFooter>
-          <Button type="button" variant="outline" @click="dialogOpen = false">取消</Button>
-          <Button type="submit">添加来源</Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
-  </Dialog>
+  <SourceCreateDialog v-model:open="dialogOpen" :refresh-sources="loadKnowledge" />
 </template>

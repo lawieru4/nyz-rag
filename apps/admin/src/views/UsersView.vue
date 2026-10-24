@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
 import { Search } from "@lucide/vue";
 import type { AdminUserListResponse, AdminUserRecord } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -12,37 +11,17 @@ import EmptyState from "../components/EmptyState.vue";
 import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import { usePaginatedList } from "../composables/usePaginatedList";
 import { client, errorMessage, pageSize } from "../workspace";
 
-const users = ref<AdminUserRecord[]>([]);
-const total = ref(0);
-const query = ref("");
-const page = ref(1);
-const loading = ref(false);
-let searchTimer: ReturnType<typeof setTimeout> | undefined;
-
-async function loadUsers() {
-  loading.value = true;
-  const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize) });
-  if (query.value.trim()) params.set("query", query.value.trim());
-  try {
-    const data = await client.request<AdminUserListResponse>(`/api/admin/users?${params}`);
-    users.value = data.users;
-    total.value = data.total;
-  } catch {
-    toast.error("用户列表加载失败，请检查 API 服务");
-  } finally {
-    loading.value = false;
-  }
-}
-onMounted(loadUsers);
-onUnmounted(() => clearTimeout(searchTimer));
-
-function search() {
-  page.value = 1;
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void loadUsers(), 250);
-}
+const { items: users, total, query, page, loading, load: loadUsers, search } = usePaginatedList<AdminUserRecord>({
+  pageSize,
+  async fetch(params, signal) {
+    const data = await client.request<AdminUserListResponse>(`/api/admin/users?${params}`, { signal });
+    return { items: data.users, total: data.total };
+  },
+  onError: () => toast.error("用户列表加载失败，请检查 API 服务"),
+});
 
 async function toggleUser(user: AdminUserRecord) {
   if (!user.disabled && !await confirm({ title: "停用账号", description: `确定停用账号“${user.email}”？该账号将立即退出登录且不能再登录，会话与问答记录保留。`, confirmText: "停用", destructive: true })) return;

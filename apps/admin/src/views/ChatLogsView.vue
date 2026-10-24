@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { ref } from "vue";
 import { ArrowUpRight, Search } from "@lucide/vue";
+import type { ChatLogListResponse, ChatLogRecord } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { Input } from "@nyz-rag/ui/components/input";
@@ -11,47 +12,22 @@ import FilterSelect from "../components/FilterSelect.vue";
 import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import { usePaginatedList } from "../composables/usePaginatedList";
 import { client, pageSize } from "../workspace";
 import ChatLogSheet from "./ChatLogSheet.vue";
-import { chatLogOwner, ratingLabel, type ChatLog } from "./chat-logs";
+import { chatLogOwner, ratingLabel } from "./chat-logs";
 
-const logs = ref<ChatLog[]>([]);
-const total = ref(0);
-const query = ref("");
 const rating = ref("");
-const page = ref(1);
-const loading = ref(false);
-const selected = ref<ChatLog | null>(null);
-let searchTimer: ReturnType<typeof setTimeout> | undefined;
-
-async function loadChatLogs() {
-  loading.value = true;
-  const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize) });
-  if (query.value.trim()) params.set("query", query.value.trim());
-  if (rating.value) params.set("rating", rating.value);
-  try {
-    const data = await client.request<{ logs: ChatLog[]; total: number }>(`/api/admin/chat-logs?${params}`);
-    logs.value = data.logs;
-    total.value = data.total;
-  } catch {
-    toast.error("问答记录加载失败，请检查 API 服务");
-  } finally {
-    loading.value = false;
-  }
-}
-onMounted(loadChatLogs);
-onUnmounted(() => clearTimeout(searchTimer));
-
-function search() {
-  page.value = 1;
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void loadChatLogs(), 250);
-}
-
-function filter() {
-  page.value = 1;
-  void loadChatLogs();
-}
+const selected = ref<ChatLogRecord | null>(null);
+const { items: logs, total, query, page, loading, load: loadChatLogs, search, filter } = usePaginatedList<ChatLogRecord>({
+  pageSize,
+  async fetch(params, signal) {
+    if (rating.value) params.set("rating", rating.value);
+    const data = await client.request<ChatLogListResponse>(`/api/admin/chat-logs?${params}`, { signal });
+    return { items: data.logs, total: data.total };
+  },
+  onError: () => toast.error("问答记录加载失败，请检查 API 服务"),
+});
 </script>
 
 <template>

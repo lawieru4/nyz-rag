@@ -9,6 +9,7 @@ import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
 import { toast } from "@nyz-rag/ui/lib/toast";
 import PageHeading from "../components/PageHeading.vue";
+import { validateAdminIdentity, validateAdminPassword } from "../admin-validation";
 import { client, errorMessage } from "../workspace";
 
 const props = defineProps<{ session: AdminSession }>();
@@ -26,9 +27,8 @@ const profileForm = ref<UpdateAdminProfileRequest>({
 });
 
 async function saveProfile() {
-  if (!profileForm.value.email.trim()) { profileError.value = "请输入邮箱"; return; }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profileForm.value.email.trim())) { profileError.value = "邮箱格式不正确"; return; }
-  if (!profileForm.value.nickname.trim()) { profileError.value = "请输入昵称"; return; }
+  const err = validateAdminIdentity(profileForm.value);
+  if (err) { profileError.value = err; return; }
   profileError.value = "";
   profileBusy.value = true;
   try {
@@ -57,9 +57,8 @@ const passwordForm = ref<ChangeAdminPasswordRequest & { confirmPassword: string 
 
 async function changePassword() {
   if (!passwordForm.value.currentPassword) { passwordError.value = "请输入当前密码"; return; }
-  if (!passwordForm.value.newPassword) { passwordError.value = "请输入新密码"; return; }
-  if (passwordForm.value.newPassword.length < 8) { passwordError.value = "新密码至少 8 个字符"; return; }
-  if (passwordForm.value.newPassword.length > 1024) { passwordError.value = "新密码不能超过 1024 个字符"; return; }
+  const err = validateAdminPassword(passwordForm.value.newPassword, "新密码");
+  if (err) { passwordError.value = err; return; }
   if (passwordForm.value.newPassword !== passwordForm.value.confirmPassword) { passwordError.value = "两次输入的新密码不一致"; return; }
   passwordError.value = "";
   passwordBusy.value = true;

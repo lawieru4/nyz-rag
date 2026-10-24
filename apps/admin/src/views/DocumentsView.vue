@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onScopeDispose, ref } from "vue";
 import { ArrowUpRight, RefreshCw, Search, Trash2 } from "@lucide/vue";
-import type { DocumentRecord, DocumentSummary } from "@nyz-rag/types";
+import type { DocumentListResponse, DocumentRecord, DocumentSummary } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { confirm } from "@nyz-rag/ui/confirm";
@@ -13,68 +13,66 @@ import FilterSelect from "../components/FilterSelect.vue";
 import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
+import { usePaginatedList } from "../composables/usePaginatedList";
 import { client, errorMessage, loadKnowledge, pageSize, sourceName, sources } from "../workspace";
 import DocumentDetailSheet from "./DocumentDetailSheet.vue";
 import { documentBusy, documentStatuses, embeddingStatuses, processingLabel } from "./documents";
 
-const documents = ref<DocumentSummary[]>([]);
-const total = ref(0);
-const query = ref("");
 const sourceId = ref("");
 const status = ref("");
-const page = ref(1);
-const loading = ref(false);
 const selected = ref<DocumentRecord | null>(null);
-let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let detailController: AbortController | undefined;
+let disposed = false;
 
-async function loadDocuments() {
-  loading.value = true;
-  const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize) });
-  if (query.value.trim()) params.set("query", query.value.trim());
-  if (sourceId.value) params.set("sourceId", sourceId.value);
-  if (status.value) params.set("status", status.value);
-  try {
-    const data = await client.request<{ documents: DocumentSummary[]; total: number }>(`/api/admin/documents?${params}`);
-    documents.value = data.documents;
-    total.value = data.total;
-    if (selected.value) {
-      const updated = documents.value.find((document) => document.id === selected.value?.id);
+const { items: documents, total, query, page, loading, load: loadDocuments, search, filter } = usePaginatedList<DocumentSummary>({
+  pageSize,
+  async fetch(params, signal) {
+    if (sourceId.value) params.set("sourceId", sourceId.value);
+    if (status.value) params.set("status", status.value);
+    const data = await client.request<DocumentListResponse>(`/api/admin/documents?${params}`, { signal });
+    return { items: data.documents, total: data.total };
+  },
+  onLoaded(items) {
+    if (selected.value && !detailController) {
+      const updated = items.find((document) => document.id === selected.value?.id);
       // 列表只含摘要字段：正文变化时重新拉取详情，否则只合并状态。
       if (updated && updated.updatedAt !== selected.value.updatedAt) void openDocument(updated.id);
       else if (updated) selected.value = { ...selected.value, ...updated };
     }
-  } catch {
-    toast.error("文档列表加载失败，请检查 API 服务");
-  } finally {
-    loading.value = false;
-  }
-}
+  },
+  onError: () => toast.error("文档列表加载失败，请检查 API 服务"),
+});
 
 // 文档处理在 Worker 中异步进行，停留在本页时定时刷新状态。
 onMounted(() => {
-  void loadDocuments();
   refreshTimer = setInterval(() => { if (!loading.value) void loadDocuments(); }, 3000);
 });
-onUnmounted(() => { clearInterval(refreshTimer); clearTimeout(searchTimer); });
-
-function search() {
-  page.value = 1;
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void loadDocuments(), 250);
-}
-
-function filter() {
-  page.value = 1;
-  void loadDocuments();
-}
+onScopeDispose(() => {
+  disposed = true;
+  clearInterval(refreshTimer);
+  closeDocument();
+});
 
 async function openDocument(id: string) {
+  if (disposed) return;
+  detailController?.abort();
+  const request = new AbortController();
+  detailController = request;
   try {
-    selected.value = await client.request<DocumentRecord>(`/api/admin/documents/${id}`);
+    const document = await client.request<DocumentRecord>(`/api/admin/documents/${id}`, { signal: request.signal });
+    if (detailController === request && !request.signal.aborted) selected.value = document;
   } catch {
-    toast.error("文档详情加载失败");
+    if (detailController === request && !request.signal.aborted) toast.error("文档详情加载失败");
+  } finally {
+    if (detailController === request) detailController = undefined;
   }
+}
+
+function closeDocument() {
+  detailController?.abort();
+  detailController = undefined;
+  selected.value = null;
 }
 
 async function reprocessDocument(document: DocumentSummary) {
@@ -102,7 +100,7 @@ async function deleteDocument(document: DocumentSummary) {
   try {
     await client.request(`/api/admin/documents/${document.id}`, { method: "DELETE" });
     if (documents.value.length === 1 && page.value > 1) page.value -= 1;
-    selected.value = null;
+    closeDocument();
     await Promise.all([loadDocuments(), loadKnowledge()]);
     toast.success("文档已删除");
   } catch {
@@ -150,5 +148,5 @@ async function deleteDocument(document: DocumentSummary) {
     <EmptyState v-else-if="!documents.length">{{ query || sourceId || status ? '没有符合条件的文档' : '知识库中还没有文档' }}</EmptyState>
     <ListPager v-model:page="page" :total="total" unit="篇" :disabled="loading" class="mt-auto" @update:page="loadDocuments" />
   </Card>
-  <DocumentDetailSheet :document="selected" @close="selected = null" @open="openDocument" @embed="embedDocument" @reprocess="reprocessDocument" @delete="deleteDocument" />
+  <DocumentDetailSheet :document="selected" @close="closeDocument" @open="openDocument" @embed="embedDocument" @reprocess="reprocessDocument" @delete="deleteDocument" />
 </template>
