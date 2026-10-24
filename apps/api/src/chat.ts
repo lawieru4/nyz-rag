@@ -12,6 +12,7 @@ import type {
 } from "@nyz-rag/types";
 import { elapsed, MAX_QUESTION_LENGTH, pageParams } from "./common.js";
 import { requestOwner } from "./user-auth.js";
+import { requires } from "./admin-auth.js";
 
 // SSE 心跳间隔，避免检索或等待首 Token 期间被代理（Nginx 默认 60 秒）断开。
 const HEARTBEAT_MS = 15_000;
@@ -123,7 +124,7 @@ async function saveAnswer(result: AnswerResult, input: { question: string; knowl
 }
 
 export const chatRoutes: FastifyPluginAsync = async (app) => {
-  app.get<{ Querystring: { query?: string; rating?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", async (request): Promise<ChatLogListResponse> => {
+  app.get<{ Querystring: { query?: string; rating?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", requires("chat-logs:view"), async (request): Promise<ChatLogListResponse> => {
     const { query = "", rating, page = "1", pageSize = "20" } = request.query;
     return listChatMessages({ query, rating, ...pageParams(page, pageSize) });
   });

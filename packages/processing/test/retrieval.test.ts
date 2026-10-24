@@ -31,6 +31,7 @@ function mockFetch(context: { after(fn: () => void): void }, handler: (url: stri
     globalThis.fetch = oldFetch;
   });
   process.env.RETRIEVAL_TEST_API_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "RETRIEVAL_TEST_API_KEY";
   globalThis.fetch = (async (input, init) => handler(String(input), init)) as typeof fetch;
 }
 

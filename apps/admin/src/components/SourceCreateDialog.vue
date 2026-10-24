@@ -1,20 +1,25 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import type { CreateSourceRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
 import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@nyz-rag/ui/components/select";
 import { toast } from "@nyz-rag/ui/lib/toast";
-import { client } from "../workspace";
+import { client, errorMessage, refreshAfterWrite } from "../workspace";
 
 const props = defineProps<{ refreshSources: () => Promise<void> }>();
 const dialogOpen = defineModel<boolean>("open", { required: true });
+const saving = ref(false);
+// 提交期间不能关闭弹窗，避免旧提交的结果作用到新一轮编辑上。
+const open = computed({ get: () => dialogOpen.value, set: (value) => { if (!saving.value) dialogOpen.value = value; } });
 const emptyForm = () => ({ name: "", url: "", frequency: "每天" });
 // 组件始终挂载，取消时保留已填写的内容，添加并刷新成功后才清空。
 const form = ref(emptyForm());
 
 async function addSource() {
+  if (saving.value) return;
   const name = form.value.name.trim();
   const url = form.value.url.trim();
   try {
@@ -24,20 +29,24 @@ async function addSource() {
     toast.error("请填写名称和有效的 http(s) 地址");
     return;
   }
+  saving.value = true;
   try {
-    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url, kind: "文章 API" }) });
-    await props.refreshSources();
-    form.value = emptyForm();
-    dialogOpen.value = false;
-    toast.success("数据源已添加");
-  } catch {
-    toast.error("数据源添加失败");
+    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url, kind: "文章 API" } satisfies CreateSourceRequest) });
+  } catch (err) {
+    toast.error(errorMessage(err, "数据源添加失败"));
+    return;
+  } finally {
+    saving.value = false;
   }
+  form.value = emptyForm();
+  dialogOpen.value = false;
+  toast.success("数据源已添加");
+  await refreshAfterWrite(props.refreshSources);
 }
 </script>
 
 <template>
-  <Dialog v-model:open="dialogOpen">
+  <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[10px] font-medium tracking-wider text-link">NEW CONNECTION</p>
@@ -52,8 +61,8 @@ async function addSource() {
         </div>
         <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权后再启动。来源地址填写 nyzdata 文章列表接口（不含 token），token 在本页「nyzdata 接口 Token」中配置。</p>
         <DialogFooter>
-          <Button type="button" variant="outline" @click="dialogOpen = false">取消</Button>
-          <Button type="submit">添加来源</Button>
+          <Button type="button" variant="outline" :disabled="saving" @click="open = false">取消</Button>
+          <Button type="submit" :disabled="saving" :aria-busy="saving">{{ saving ? '添加中…' : '添加来源' }}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

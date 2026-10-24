@@ -4,7 +4,12 @@ import test from "node:test";
 import pg from "pg";
 import { readFile } from "node:fs/promises";
 import { closeDatabase, migrate } from "../src/db.js";
-import { createAdminAccount, getAdminCredentials, listAdminAccounts, seedSuperAdmin, setAdminDisabled, updateAdminPassword, updateAdminProfile } from "../src/repository.js";
+import {
+  AdminAccountError, createAdminAccount, createAdminRole, deleteAdminRole, getAdminCredentials, getAdminRole, listAdminAccounts, listAdminAuditLogs, listAdminRoles,
+  recordAdminAudit, seedSuperAdmin,
+  updateAdminAccount, updateAdminPassword, updateAdminProfile, updateAdminRole,
+} from "../src/repository.js";
+import { ADMIN_PERMISSIONS } from "../src/admin-permissions.js";
 
 test("migration timestamps strictly increase so existing databases receive new tables", async () => {
   const journal = JSON.parse(await readFile(new URL("../migrations/meta/_journal.json", import.meta.url), "utf8"));
@@ -38,12 +43,93 @@ test("administrator migration, concurrent bootstrap, uniqueness and session revo
     assert.equal(regular.isSuper, false);
     assert.equal(await createAdminAccount({ email: regular.email, nickname: "Duplicate", passwordHash: "test-hash" }), null);
     assert.equal(await updateAdminProfile(regular.id, { email: retained.email, nickname: "Duplicate" }), null);
-    await setAdminDisabled(regular.id, true);
+    await updateAdminAccount(regular.id, { disabled: true });
     assert.equal((await getAdminCredentials({ id: regular.id }))!.sessionVersion, 1);
-    await setAdminDisabled(regular.id, false);
+    await updateAdminAccount(regular.id, { disabled: false });
     assert.equal((await getAdminCredentials({ id: regular.id }))!.sessionVersion, 1);
-    await assert.rejects(setAdminDisabled(superAdmin.id, true), /super admin/);
+    await assert.rejects(updateAdminAccount(superAdmin.id, { disabled: true }), (error: unknown) => error instanceof AdminAccountError && error.reason === "super-admin-disable");
     assert.equal(Object.hasOwn((await listAdminAccounts())[0]!, "passwordHash"), false);
+
+    // 操作日志：关联当前的操作者邮箱与昵称，按时间倒序，可按结果与关键词（邮箱、路由、资源 ID、IP）筛选。
+    const entry = { method: "POST", requestId: "req-1", ip: "203.0.113.7", resourceId: null, statusCode: 200, result: "success" as const };
+    await recordAdminAudit({ ...entry, adminId: null, route: "/api/admin/auth/login", statusCode: 401, result: "denied" });
+    await recordAdminAudit({ ...entry, adminId: superAdmin.id, route: "/api/admin/roles" });
+    await recordAdminAudit({ ...entry, adminId: regular.id, method: "PATCH", route: "/api/admin/users/:id", resourceId: "user-42", statusCode: 403, result: "denied" });
+    const all = await listAdminAuditLogs({ page: 1, pageSize: 10 });
+    assert.equal(all.total, 3);
+    assert.deepEqual(all.logs.map((log) => [log.route, log.adminEmail]), [
+      ["/api/admin/users/:id", "regular@example.com"], ["/api/admin/roles", "changed@example.com"], ["/api/admin/auth/login", null],
+    ]);
+    assert.equal((await listAdminAuditLogs({ result: "denied", page: 1, pageSize: 10 })).total, 2);
+    assert.deepEqual((await listAdminAuditLogs({ query: "Changed", page: 1, pageSize: 10 })).logs.map((log) => log.route), ["/api/admin/roles"]);
+    assert.deepEqual((await listAdminAuditLogs({ query: "user-42", page: 1, pageSize: 10 })).logs.map((log) => log.adminNickname), ["Regular"]);
+    assert.deepEqual((await listAdminAuditLogs({ page: 2, pageSize: 2 })).logs.map((log) => log.statusCode), [401]);
+  } finally {
+    await closeDatabase();
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
+    await pool.query(`DROP SCHEMA ${schema} CASCADE`);
+    await pool.end();
+  }
+});
+
+test("admin roles: permissions, disable, delete restriction and upgrade backfill", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 30000 }, async () => {
+  const previousUrl = process.env.DATABASE_URL;
+  const baseUrl = previousUrl ?? "postgresql://nyzrag:nyzrag@localhost:5432/nyzrag";
+  const schema = `nyz_role_test_${randomBytes(6).toString("hex")}`;
+  const pool = new pg.Pool({ connectionString: baseUrl });
+  await pool.query(`CREATE SCHEMA ${schema}`);
+  const url = new URL(baseUrl);
+  url.searchParams.set("options", `-c search_path=${schema},public`);
+  process.env.DATABASE_URL = url.toString();
+  const isReason = (reason: string) => (error: unknown) => error instanceof AdminAccountError && error.reason === reason;
+  try {
+    await migrate();
+    // 升级回填：模拟升级前已有的普通管理员（role_id 为空），执行 0018 的数据迁移语句。
+    await seedSuperAdmin({ email: "super@example.com", nickname: "Super", passwordHash: "test-hash" });
+    const legacy = (await createAdminAccount({ email: "legacy@example.com", nickname: "Legacy", passwordHash: "test-hash" }))!;
+    const migration = await readFile(new URL("../migrations/0018_admin_roles.sql", import.meta.url), "utf8");
+    const backfill = migration.split("--> statement-breakpoint").at(-1)!;
+    const client = await pool.connect();
+    try { await client.query(`SET search_path TO ${schema}`); await client.query(backfill); } finally { client.release(); }
+    const migrated = (await getAdminCredentials({ id: legacy.id }))!;
+    assert.equal(migrated.roleName, "普通管理员");
+    assert.ok(migrated.permissions.includes("documents:manage") && !migrated.permissions.includes("sources:manage") && !migrated.permissions.includes("models:manage"));
+    assert.equal((await getAdminCredentials({ email: "super@example.com" }))!.roleId, null);
+
+    // 管理包含查看；未知权限码在读取时被过滤。
+    const role = await createAdminRole({ name: "编辑", description: "", permissions: ["documents:manage", "chat-logs:view"] });
+    assert.deepEqual(role.permissions, ["documents:view", "documents:manage", "chat-logs:view"]);
+    await assert.rejects(createAdminRole({ name: "编辑", description: "", permissions: [] }), isReason("role-name-taken"));
+    await pool.query(`UPDATE ${schema}.admin_roles SET permissions = permissions || '{removed:view}' WHERE id = $1`, [role.id]);
+    assert.deepEqual((await getAdminRole(role.id))!.permissions, role.permissions);
+
+    const editor = (await createAdminAccount({ email: "editor@example.com", nickname: "Editor", passwordHash: "test-hash", roleId: role.id }))!;
+    assert.equal(editor.roleName, "编辑");
+    assert.deepEqual((await getAdminCredentials({ id: editor.id }))!.permissions, role.permissions);
+    await assert.rejects(createAdminAccount({ email: "x@example.com", nickname: "X", passwordHash: "h", roleId: "00000000-0000-4000-8000-000000000000" }), isReason("role-missing"));
+    const superAdmin = (await getAdminCredentials({ email: "super@example.com" }))!;
+    assert.deepEqual(superAdmin.permissions, [...ADMIN_PERMISSIONS]);
+    await assert.rejects(updateAdminAccount(superAdmin.id, { roleId: role.id }), isReason("super-admin-role"));
+
+    // 停用角色即收回权限，但不使会话失效；启用后恢复。
+    await updateAdminRole(role.id, { disabled: true });
+    const disabled = (await getAdminCredentials({ id: editor.id }))!;
+    assert.deepEqual(disabled.permissions, []);
+    assert.equal(disabled.sessionVersion, 0);
+    await updateAdminRole(role.id, { disabled: false, name: "文档编辑", permissions: ["users:view"] });
+    assert.deepEqual((await getAdminCredentials({ id: editor.id }))!.permissions, ["users:view"]);
+    assert.equal(await updateAdminRole("00000000-0000-4000-8000-000000000000", { name: "x" }), null);
+    await assert.rejects(updateAdminRole(role.id, { name: "普通管理员" }), isReason("role-name-taken"));
+
+    // 有管理员使用时不能删除；解除后可删除。
+    assert.equal((await listAdminRoles()).find((item) => item.id === role.id)!.adminCount, 1);
+    await assert.rejects(deleteAdminRole(role.id), isReason("role-in-use"));
+    const unassigned = (await updateAdminAccount(editor.id, { roleId: null }))!;
+    assert.equal(unassigned.roleId, null);
+    assert.equal(unassigned.roleName, null);
+    assert.equal(await deleteAdminRole(role.id), true);
+    assert.equal(await deleteAdminRole(role.id), false);
   } finally {
     await closeDatabase();
     if (previousUrl === undefined) delete process.env.DATABASE_URL;

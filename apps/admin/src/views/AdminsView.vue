@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { LoaderCircle, Plus } from "@lucide/vue";
-import type { AdminAccount, CreateAdminRequest } from "@nyz-rag/types";
+import type { AdminAccount, AdminRole, CreateAdminRequest, UpdateAdminRequest } from "@nyz-rag/types";
 import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
@@ -9,6 +9,7 @@ import { confirm } from "@nyz-rag/ui/confirm";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
 import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@nyz-rag/ui/components/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@nyz-rag/ui/components/table";
 import { toast } from "@nyz-rag/ui/lib/toast";
 import EmptyState from "../components/EmptyState.vue";
@@ -17,18 +18,25 @@ import StatusBadge from "../components/StatusBadge.vue";
 import { validateAdminIdentity, validateAdminPassword } from "../admin-validation";
 import { client, errorMessage } from "../workspace";
 
+// reka-ui 的 SelectItem 不接受空字符串，“未分配角色”用哨兵值表示。
+const NO_ROLE = "__none__";
+
 const admins = ref<AdminAccount[]>([]);
+const roles = ref<AdminRole[]>([]);
 const loading = ref(false);
 const updating = ref(new Set<string>());
 const dialogOpen = ref(false);
 const formBusy = ref(false);
 const formError = ref("");
-const form = ref<CreateAdminRequest>({ email: "", nickname: "", password: "" });
+const form = ref<CreateAdminRequest & { roleId: string }>({ email: "", nickname: "", password: "", roleId: NO_ROLE });
 
 async function loadAdmins() {
   loading.value = true;
   try {
-    admins.value = await client.request<AdminAccount[]>("/api/admin/admins");
+    [admins.value, roles.value] = await Promise.all([
+      client.request<AdminAccount[]>("/api/admin/admins"),
+      client.request<AdminRole[]>("/api/admin/roles"),
+    ]);
   } catch {
     toast.error("管理员列表加载失败，请检查 API 服务");
   } finally {
@@ -37,8 +45,10 @@ async function loadAdmins() {
 }
 onMounted(loadAdmins);
 
+const roleOptionLabel = (role: AdminRole) => role.disabled ? `${role.name}（已停用）` : role.name;
+
 function openCreate() {
-  form.value = { email: "", nickname: "", password: "" };
+  form.value = { email: "", nickname: "", password: "", roleId: roles.value.find((role) => !role.disabled)?.id ?? NO_ROLE };
   formError.value = "";
   dialogOpen.value = true;
 }
@@ -52,16 +62,38 @@ async function createAdmin() {
     const created = await client.request<AdminAccount>("/api/admin/admins", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: form.value.email.trim(), nickname: form.value.nickname.trim(), password: form.value.password }),
+      body: JSON.stringify({
+        email: form.value.email.trim(), nickname: form.value.nickname.trim(), password: form.value.password,
+        roleId: form.value.roleId === NO_ROLE ? null : form.value.roleId,
+      } satisfies CreateAdminRequest),
     });
     admins.value = [...admins.value, created];
-    form.value = { email: "", nickname: "", password: "" };
+    form.value = { email: "", nickname: "", password: "", roleId: NO_ROLE };
     dialogOpen.value = false;
     toast.success(`管理员 ${created.nickname} 已创建`);
   } catch (err) {
     formError.value = errorMessage(err, "创建失败，请检查 API 服务");
   } finally {
     formBusy.value = false;
+  }
+}
+
+async function changeRole(admin: AdminAccount, value: string) {
+  const roleId = value === NO_ROLE ? null : value;
+  if (admin.isSuper || roleId === admin.roleId || updating.value.has(admin.id)) return;
+  updating.value.add(admin.id);
+  try {
+    const updated = await client.request<AdminAccount>(`/api/admin/admins/${admin.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roleId } satisfies UpdateAdminRequest),
+    });
+    admins.value = admins.value.map((a) => a.id === updated.id ? updated : a);
+    toast.success(updated.roleName ? `${updated.nickname} 的角色已改为 ${updated.roleName}` : `已取消 ${updated.nickname} 的角色`);
+  } catch (err) {
+    toast.error(errorMessage(err, "角色更新失败"));
+  } finally {
+    updating.value.delete(admin.id);
   }
 }
 
@@ -80,7 +112,7 @@ async function toggleAdmin(admin: AdminAccount) {
     const updated = await client.request<AdminAccount>(`/api/admin/admins/${admin.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ disabled: willDisable }),
+      body: JSON.stringify({ disabled: willDisable } satisfies UpdateAdminRequest),
     });
     admins.value = admins.value.map((a) => a.id === updated.id ? updated : a);
     toast.success(updated.disabled ? `已停用 ${updated.nickname}` : `已启用 ${updated.nickname}`);
@@ -93,7 +125,7 @@ async function toggleAdmin(admin: AdminAccount) {
 </script>
 
 <template>
-  <PageHeading eyebrow="ADMINISTRATOR ACCOUNTS" title="管理员管理" subtitle="管理后台管理员账号，仅超级管理员可见">
+  <PageHeading eyebrow="ADMINISTRATOR ACCOUNTS" title="管理员管理" subtitle="管理后台管理员账号与角色，仅超级管理员可见；未分配角色的管理员只能修改个人资料">
     <Button @click="openCreate"><Plus /> 添加管理员</Button>
   </PageHeading>
   <Card class="min-h-96 gap-0 overflow-hidden py-0">
@@ -114,7 +146,13 @@ async function toggleAdmin(admin: AdminAccount) {
           <TableCell>{{ admin.email }}</TableCell>
           <TableCell>
             <span v-if="admin.isSuper" class="rounded-sm bg-sidebar-primary/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-sidebar-primary">超级管理员</span>
-            <span v-else class="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">管理员</span>
+            <Select v-else :model-value="admin.roleId ?? NO_ROLE" :disabled="updating.has(admin.id)" @update:model-value="changeRole(admin, String($event))">
+              <SelectTrigger size="sm" class="min-w-32 text-xs" :aria-label="`${admin.nickname} 的角色`"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="NO_ROLE">未分配角色</SelectItem>
+                <SelectItem v-for="role in roles" :key="role.id" :value="role.id">{{ roleOptionLabel(role) }}</SelectItem>
+              </SelectContent>
+            </Select>
           </TableCell>
           <TableCell>
             <StatusBadge :on="!admin.disabled">{{ admin.disabled ? '已停用' : '正常' }}</StatusBadge>
@@ -160,6 +198,16 @@ async function toggleAdmin(admin: AdminAccount) {
         <div class="grid gap-2">
           <Label for="ca-nickname">昵称</Label>
           <Input id="ca-nickname" v-model="form.nickname" type="text" autocomplete="off" required maxlength="100" :disabled="formBusy" placeholder="显示名称" aria-required="true" />
+        </div>
+        <div class="grid gap-2">
+          <Label for="ca-role">角色</Label>
+          <Select v-model="form.roleId" :disabled="formBusy">
+            <SelectTrigger id="ca-role" class="w-full"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="NO_ROLE">未分配角色</SelectItem>
+              <SelectItem v-for="role in roles" :key="role.id" :value="role.id">{{ roleOptionLabel(role) }}</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <div class="grid gap-2">
           <Label for="ca-password">密码</Label>

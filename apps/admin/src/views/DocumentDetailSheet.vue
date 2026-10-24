@@ -6,10 +6,10 @@ import { Button } from "@nyz-rag/ui/components/button";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@nyz-rag/ui/components/sheet";
 import DetailSection from "../components/DetailSection.vue";
 import MetaRow from "../components/MetaRow.vue";
-import { sourceName } from "../workspace";
+import { can, sourceName } from "../workspace";
 import { documentBusy, documentStatuses, embeddingStatuses } from "./documents";
 
-defineProps<{ document: DocumentRecord | null }>();
+defineProps<{ document: DocumentRecord | null; pending: boolean }>();
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "open", id: string): void;
@@ -78,9 +78,11 @@ const emit = defineEmits<{
       </div>
       <SheetFooter class="flex-row flex-wrap justify-end border-t">
         <Button variant="outline" @click="emit('close')">关闭</Button>
-        <Button variant="outline" :disabled="documentBusy(document) || !document.chunkCount" @click="emit('embed', document)">向量化 / 重试</Button>
-        <Button variant="outline" :disabled="documentBusy(document)" @click="emit('reprocess', document)">重新处理</Button>
-        <Button variant="destructive" :disabled="documentBusy(document)" @click="emit('delete', document)">删除文档</Button>
+        <template v-if="can('documents:manage')">
+          <Button variant="outline" :disabled="pending || documentBusy(document) || !document.chunkCount" @click="emit('embed', document)">向量化 / 重试</Button>
+          <Button variant="outline" :disabled="pending || documentBusy(document)" @click="emit('reprocess', document)">重新处理</Button>
+          <Button variant="destructive" :disabled="pending || documentBusy(document)" @click="emit('delete', document)">删除文档</Button>
+        </template>
       </SheetFooter>
     </SheetContent>
   </Sheet>

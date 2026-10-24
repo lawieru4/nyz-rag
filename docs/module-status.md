@@ -134,6 +134,28 @@
   - **重构**：运行记录的读取抽到 `cli/eval-runs.ts`，供 compare 与 adjudicate 共用；`synthetic-questions.ts` 导出 `articleHeader`、`articleBody`。
   - **结果**：`baseline-chunker3` 的 rerank 宽松 Hit@1 为 98.3（严格 95.0），`high` 题全部命中。s0152 是真正的检索失败，s0163 题目过泛。挽回的 14 道题中，9 道是同一研究的另一篇文章，说明语料中有不少正文指纹识别不了的同源文章。详见 evaluation-plan.md 第 8.9 节。
   - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 117 项（105 通过、12 项集成测试默认跳过）全部无失败；业务库 dev 集复判 228 篇次，没有调用失败。
+- 本轮完成（管理端角色权限，2026-10-24）：
+  - **模型**：迁移 `0018_admin_roles` 新增 `admin_roles`（名称唯一、说明、权限码数组、停用时间），`admin_accounts.role_id` 外键 RESTRICT。权限为「模块 × 查看/管理」：数据源、文档、知识库、用户、模型配置各有查看与管理，问答记录只有查看；管理包含查看，读取时过滤未知权限码。超级管理员拥有全部权限、不分配角色；普通管理员一人一个角色，角色停用或未分配时没有模块权限（仍可登录、修改个人资料）。模型配置、文章 token、新建来源可通过「模型配置 · 管理」「数据源 · 管理」授予；管理员与角色管理仅限超级管理员。
+  - **升级**：迁移在存在普通管理员时创建「普通管理员」角色并分配给他们，权限对齐升级前（不含「数据源 · 管理」与「模型配置 · 管理」，原可执行的同步与暂停来源需超级管理员另行勾选）。
+  - **鉴权**：每条 `/api/admin/*` 路由在选项中声明 `adminAccess`（权限码、`super`、`session`、`public`），未声明的启动报错（默认拒绝）；钩子每次请求重新读取账号与角色，修改即生效，无权返回 403 且先于请求体校验。新增接口 `GET/POST /api/admin/roles`、`PATCH/DELETE /api/admin/roles/:id`；`POST /api/admin/admins` 可带 `roleId`，`PATCH /api/admin/admins/:id` 可停用/启用或更换角色；会话增加 `permissions`，账号增加 `roleId`、`roleName`。
+  - **管理端**：新增角色管理页（列表、新建/编辑、权限开关矩阵、停用/启用、删除，使用中的角色不能删除）；管理员页可在创建时选择角色、在列表中直接更换角色。侧栏与路由按权限显示模块，无权限的页面跳到第一个可访问的模块；各页面在没有「管理」权限时隐藏操作按钮。
+  - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 120 项（107 通过、13 项集成测试默认跳过）、API 118 项（116 通过、2 项跳过）、api-client 21 项、admin 17 项、web 18 项全部无失败；`test/admin-access.test.ts` 固定全部管理路由的访问矩阵，并逐项验证无角色、每个单项权限、角色停用与超级管理员的放行结果；启用集成测试后角色仓库（含升级回填语句）与 `pipeline.test.ts` 通过。
+
+- 本轮完成（管理端操作日志，2026-10-24）：
+  - **记录**：鉴权模块的 `onResponse` 钩子统一记录管理端写操作（含登录、退出）和被拒绝（403）的访问，字段为方法、路由模式、操作者、路径中的资源 ID（`id` 或 `capability`）、状态码、结果（success/denied/failed）、请求 ID（`request.id`）与 IP；不记请求体、密钥或上游错误正文，成功的读取不记。全部写入进程日志（`admin audit`）；迁移 `0019_admin_audit_logs` 新增 `admin_audit_logs`，只保存已登录管理员的操作和登录尝试（登录受限流约束），其余匿名请求不入库，写库失败只记日志。
+  - **查看**：新增权限「操作日志 · 查看」（`audit-logs:view`，可通过角色授予，超级管理员默认拥有），接口 `GET /api/admin/audit-logs`（分页，按结果与关键词筛选，关键词匹配操作者邮箱/昵称、路由、资源 ID 与 IP）；管理端新增「操作日志」页，动作显示为中文名称。
+  - **未做**：日志暂无保留期限与清理任务，请求体中的变更内容（如角色改了哪些权限）不记录。
+- 本轮完成（前端请求生命周期，2026-10-24）：
+  - **用户端会话**：`useChatSession` 的历史列表与会话详情各自只采用最近一次请求（AbortController），切换会话、新建、开始生成与退出登录让旧请求失效，避免旧响应覆盖当前会话；只有 404/400（会话不存在或不属于当前身份）才清除本地会话记录，网络错误与 5xx 保留当前会话并提示重试（恢复上次会话时 404 静默）；身份（`/api/auth/session`）确定前不能提问；生成占用在首个 await 前建立；流式 `source` 事件保留摘录等完整字段。
+  - **管理端概览**：数据源/任务概览移到 `knowledge-overview.ts`，只采用最近一次请求的结果；请求发出后收到过 SSE 快照（完整快照）则丢弃请求结果；退出登录后旧请求、旧推送都不再写入；推送的 JSON 格式错误时忽略。
+  - **管理端写操作**：数据源、知识库、模型供应商与业务模型、接口 Token 的表单提交期间禁用并禁止关闭弹窗；数据源启停/同步、文档重处理/向量化/删除、供应商启停/删除、用户启停按 ID 防重复提交（`usePending`）；写入成功后刷新失败只提示刷新失败（`refreshAfterWrite`），不再误报写入失败；模型列表请求在切换供应商（含 A→B→A）与关闭弹窗时失效。
+  - **未做**：会话历史「加载更多」。
+- 本轮完成（契约与验证门禁，2026-10-24）：
+  - **测试归属**：AdminApiClient 的测试从 api-client 移到 admin（`test/adminClient.test.ts`），api-client 的测试不再引用应用代码；api-client 改为可擦除语法、包内导入写 `.ts`，web/admin 的源码与测试可在 Node 中直接引用它（web 的会话错误分类改回 `instanceof ApiError`）。
+  - **测试类型检查**：web、admin 新增 `tsconfig.test.json`（加 devDependency `@types/node`），`vue-tsc -b` 覆盖 `test/*.ts`；两端与 api-client 开启 `erasableSyntaxOnly`。修正 web 测试中缺少 `messageCount` 的会话 fixture。
+  - **请求 DTO**：两端请求体用 `satisfies` 对照 `@nyz-rag/types` 的请求类型（登录、Token、数据源、管理员、角色、个人资料、用户、供应商启停、知识库、反馈、验证码、改密码）。
+  - **门禁**：API 测试断言每条路由声明统一的错误响应（含 403，只输出 `{ error }`）；根目录新增 `pnpm test`（各包测试，失败也继续并汇总）与 `pnpm verify`（构建 + 类型检查 + 测试）。
+  - 验证：`pnpm verify` 通过；processing 120 项（107 通过、13 跳过）、API 120 项（118 通过、2 跳过）、api-client 18 项、web 22 项、admin 29 项全部无失败。未做浏览器验证。
 
 ## 向量化运行配置
 

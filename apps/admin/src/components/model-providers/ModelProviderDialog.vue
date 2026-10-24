@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { LoaderCircle, RefreshCw } from "@lucide/vue";
 import type { ListProviderModelsRequest, ListProviderModelsResponse, ModelProviderRecord, SaveModelProviderRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -13,6 +13,9 @@ import { client, errorMessage } from "../../workspace";
 
 const props = defineProps<{ provider: ModelProviderRecord | null; refresh: () => Promise<void> }>();
 const open = defineModel<boolean>("open", { required: true });
+const saving = ref(false);
+// 提交期间不能关闭弹窗，避免旧提交的结果作用到新一轮编辑上。
+const dialogOpen = computed({ get: () => open.value, set: (value) => { if (!saving.value) open.value = value; } });
 const json = { "content-type": "application/json" };
 
 // Worker/API 在容器中运行时，本机 Ollama 地址需改为 host.docker.internal。
@@ -60,22 +63,27 @@ async function testConnection() {
 }
 
 async function saveProvider() {
+  if (saving.value) return;
   const target = props.provider;
   const { apiKey, clearApiKey, ...rest } = form.value;
   const body: SaveModelProviderRequest = { ...rest, ...(apiKey.trim() ? { apiKey: apiKey.trim() } : clearApiKey ? { clearApiKey: true } : {}) };
+  saving.value = true;
   try {
     await client.request(`/api/admin/model-providers${target ? `/${target.id}` : ""}`, { method: target ? "PATCH" : "POST", headers: json, body: JSON.stringify(body) });
-    await props.refresh();
-    open.value = false;
-    toast.success(target ? "供应商已更新" : "供应商已添加");
   } catch (err) {
     toast.error(errorMessage(err, "供应商保存失败，请检查 API 服务"));
+    return;
+  } finally {
+    saving.value = false;
   }
+  open.value = false;
+  toast.success(target ? "供应商已更新" : "供应商已添加");
+  await props.refresh();
 }
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog v-model:open="dialogOpen">
     <DialogContent class="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[10px] font-medium tracking-wider text-link">MODEL PROVIDER</p>
@@ -105,11 +113,12 @@ async function saveProvider() {
           <div class="mt-2 grid gap-2">
             <Label for="mp-credential" class="text-xs">密钥环境变量</Label>
             <Input id="mp-credential" v-model="form.credentialEnv" pattern="[A-Z][A-Z0-9_]*" placeholder="例如 OPENAI_API_KEY，未保存 API Key 时使用" />
+            <p>只能使用服务端 NYZ_MODEL_CREDENTIAL_ENVS 中列出的变量。</p>
           </div>
         </details>
         <DialogFooter>
-          <Button type="button" variant="outline" @click="open = false">取消</Button>
-          <Button type="submit">保存供应商</Button>
+          <Button type="button" variant="outline" :disabled="saving" @click="dialogOpen = false">取消</Button>
+          <Button type="submit" :disabled="saving" :aria-busy="saving">{{ saving ? '保存中…' : '保存供应商' }}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

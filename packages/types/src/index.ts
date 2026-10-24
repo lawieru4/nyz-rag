@@ -7,6 +7,8 @@ export interface AdminSession {
   username: string;
   expiresAt: string;
   admin: AdminAccount;
+  /** 当前生效的权限：超级管理员为全部；角色停用或未分配角色时为空。 */
+  permissions: AdminPermission[];
 }
 
 export interface AdminAccount {
@@ -15,6 +17,9 @@ export interface AdminAccount {
   nickname: string;
   isSuper: boolean;
   disabled: boolean;
+  /** 超级管理员拥有全部权限，不分配角色。 */
+  roleId: string | null;
+  roleName: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -23,7 +28,67 @@ export interface CreateAdminRequest {
   email: string;
   nickname: string;
   password: string;
+  roleId?: string | null;
 }
+
+/** 停用/启用账号或更换角色，至少提供一项。 */
+export interface UpdateAdminRequest {
+  disabled?: boolean;
+  roleId?: string | null;
+}
+
+/** 管理端权限：模块 × 查看/管理，管理包含查看。问答记录与操作日志只读。 */
+export type AdminPermissionModule = "sources" | "documents" | "knowledge-bases" | "chat-logs" | "users" | "models" | "audit-logs";
+type ViewOnlyModule = "chat-logs" | "audit-logs";
+export type AdminPermission = `${Exclude<AdminPermissionModule, ViewOnlyModule>}:${"view" | "manage"}` | `${ViewOnlyModule}:view`;
+
+/** 管理端操作日志的结果：成功、被拒绝（未登录或无权限）、失败（其他错误）。 */
+export type AdminAuditResult = "success" | "denied" | "failed";
+
+/** 管理端操作日志：写操作与被拒绝的访问各一条，不含请求体与密钥。 */
+export interface AdminAuditLogRecord {
+  id: string;
+  /** 操作者；登录失败时为空。 */
+  adminId: string | null;
+  adminEmail: string | null;
+  adminNickname: string | null;
+  method: string;
+  /** 路由模式，如 /api/admin/roles/:id。 */
+  route: string;
+  /** 路径中的资源 ID（id 或 capability）。 */
+  resourceId: string | null;
+  statusCode: number;
+  result: AdminAuditResult;
+  requestId: string;
+  ip: string;
+  createdAt: string;
+}
+
+export interface AdminAuditLogListResponse {
+  logs: AdminAuditLogRecord[];
+  total: number;
+}
+
+export interface AdminRole {
+  id: string;
+  name: string;
+  description: string;
+  permissions: AdminPermission[];
+  disabled: boolean;
+  /** 使用该角色的管理员数量；有管理员使用时不能删除。 */
+  adminCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveAdminRoleRequest {
+  name: string;
+  description: string;
+  permissions: AdminPermission[];
+}
+
+/** 编辑角色或停用/启用，至少提供一项。 */
+export type UpdateAdminRoleRequest = Partial<SaveAdminRoleRequest> & { disabled?: boolean };
 
 export interface UpdateAdminProfileRequest {
   email: string;

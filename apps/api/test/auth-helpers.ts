@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AdminAccount } from "@nyz-rag/types";
-import type { AdminCredentials } from "@nyz-rag/processing";
+import type { AdminAccount, AdminAuditLogRecord, AdminRole } from "@nyz-rag/types";
+import { ADMIN_PERMISSIONS, AdminAccountError, normalizeAdminPermissions, type AdminCredentials } from "@nyz-rag/processing";
 import type { AdminAuthConfig, AdminRepository } from "../src/admin-auth.js";
 import type { AuthStore } from "../src/auth-store.js";
 import type { MailMessage, Mailer } from "../src/mailer.js";
@@ -40,36 +40,66 @@ export function memoryAuthStore(now = Date.now): AuthStore {
   };
 }
 
-/** 内存管理员账号库，支持登录、资料更新与密码修改测试。 */
-export function memoryAdmins(initial: AdminCredentials[] = []) {
-  const accounts = new Map<string, AdminCredentials>(initial.map((a) => [a.id, { ...a }]));
+/** 内存管理员账号的输入：角色名称与生效权限由角色表推导。 */
+export type MemoryAdminInput = Omit<AdminCredentials, "roleId" | "roleName" | "permissions"> & { roleId?: string | null };
+type MemoryRole = Omit<AdminRole, "adminCount">;
 
-  function toAccount(cred: AdminCredentials): AdminAccount {
-    return { id: cred.id, email: cred.email, nickname: cred.nickname, isSuper: cred.isSuper, disabled: cred.disabled, createdAt: cred.createdAt, updatedAt: cred.updatedAt };
+/** 内存管理员账号与角色库，行为与 processing 的数据库实现一致（角色停用即无权限、使用中的角色不能删除）。 */
+export function memoryAdmins(initial: MemoryAdminInput[] = []) {
+  const accounts = new Map<string, MemoryAdminInput>(initial.map((a) => [a.id, { ...a }]));
+  const roles = new Map<string, MemoryRole>();
+  // 操作日志，按写入顺序；列表与数据库一致按时间倒序返回。
+  const audits: AdminAuditLogRecord[] = [];
+
+  function credentials(account: MemoryAdminInput): AdminCredentials {
+    const role = account.roleId ? roles.get(account.roleId) : undefined;
+    const permissions = account.isSuper ? [...ADMIN_PERMISSIONS] : role && !role.disabled ? normalizeAdminPermissions(role.permissions) : [];
+    return { ...account, roleId: account.roleId ?? null, roleName: role?.name ?? null, permissions };
   }
 
-  const repository: AdminRepository & { _accounts: Map<string, AdminCredentials> } = {
+  function toAccount(account: MemoryAdminInput): AdminAccount {
+    const { passwordHash: _ph, sessionVersion: _sv, permissions: _p, ...rest } = credentials(account);
+    return rest;
+  }
+
+  const toRole = (role: MemoryRole): AdminRole =>
+    ({ ...role, adminCount: [...accounts.values()].filter((a) => a.roleId === role.id).length });
+
+  const assertRoleExists = (roleId: string | null | undefined) => {
+    if (roleId && !roles.has(roleId)) throw new AdminAccountError("role-missing");
+  };
+  const assertNameFree = (name: string, id?: string) => {
+    if ([...roles.values()].some((role) => role.name === name && role.id !== id)) throw new AdminAccountError("role-name-taken");
+  };
+
+  const repository: AdminRepository & { _accounts: Map<string, MemoryAdminInput> } = {
     _accounts: accounts,
     async listAdminAccounts() { return [...accounts.values()].map(toAccount); },
     async createAdminAccount(input) {
       if ([...accounts.values()].some(a => a.email === input.email)) return null;
-      const account: AdminCredentials = { ...input, id: randomUUID(), isSuper: input.isSuper ?? false, disabled: false, sessionVersion: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      assertRoleExists(input.roleId);
+      const account: MemoryAdminInput = { ...input, id: randomUUID(), isSuper: input.isSuper ?? false, roleId: input.isSuper ? null : input.roleId ?? null, disabled: false, sessionVersion: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       accounts.set(account.id, account);
       return toAccount(account);
     },
-    async setAdminDisabled(id, disabled) {
+    async updateAdminAccount(id, input) {
       const account = accounts.get(id);
       if (!account) return null;
-      if (account.isSuper && disabled) throw new Error("super admin cannot be disabled");
-      account.disabled = disabled;
-      if (disabled) account.sessionVersion++;
+      if (account.isSuper && input.disabled) throw new AdminAccountError("super-admin-disable");
+      if (account.isSuper && input.roleId) throw new AdminAccountError("super-admin-role");
+      assertRoleExists(input.roleId);
+      if (input.disabled !== undefined) {
+        if (input.disabled && !account.disabled) account.sessionVersion++;
+        account.disabled = input.disabled;
+      }
+      if (input.roleId !== undefined) account.roleId = input.roleId;
       return toAccount(account);
     },
     async getAdminCredentials(by) {
       const account = "id" in by
         ? accounts.get(by.id)
         : [...accounts.values()].find((a) => a.email === by.email);
-      return account ? { ...account } : null;
+      return account ? credentials(account) : null;
     },
     async updateAdminPassword(id, passwordHash) {
       const account = accounts.get(id);
@@ -88,15 +118,48 @@ export function memoryAdmins(initial: AdminCredentials[] = []) {
       account.email = input.email;
       account.nickname = input.nickname;
       account.updatedAt = new Date().toISOString();
-      return toAccount({ ...account });
+      return toAccount(account);
+    },
+    async listAdminRoles() { return [...roles.values()].map(toRole); },
+    async createAdminRole(input) {
+      assertNameFree(input.name);
+      const now = new Date().toISOString();
+      const role: MemoryRole = { id: randomUUID(), name: input.name, description: input.description, permissions: normalizeAdminPermissions(input.permissions), disabled: false, createdAt: now, updatedAt: now };
+      roles.set(role.id, role);
+      return toRole(role);
+    },
+    async updateAdminRole(id, input) {
+      const role = roles.get(id);
+      if (!role) return null;
+      if (input.name !== undefined) assertNameFree(input.name, id);
+      Object.assign(role, {
+        ...input,
+        ...(input.permissions && { permissions: normalizeAdminPermissions(input.permissions) }),
+        updatedAt: new Date().toISOString(),
+      });
+      return toRole(role);
+    },
+    async deleteAdminRole(id) {
+      if ([...accounts.values()].some((a) => a.roleId === id)) throw new AdminAccountError("role-in-use");
+      return roles.delete(id);
+    },
+    async recordAdminAudit(entry) {
+      const admin = entry.adminId ? accounts.get(entry.adminId) : undefined;
+      audits.push({ id: randomUUID(), ...entry, adminEmail: admin?.email ?? null, adminNickname: admin?.nickname ?? null, createdAt: new Date().toISOString() });
+    },
+    async listAdminAuditLogs({ query, result, page, pageSize }) {
+      const needle = query?.trim().toLocaleLowerCase();
+      const matched = [...audits].reverse().filter((log) => (!result || log.result === result)
+        && (!needle || [log.route, log.resourceId, log.ip, log.adminEmail, log.adminNickname].some((value) => value?.toLocaleLowerCase().includes(needle))));
+      return { logs: matched.slice((page - 1) * pageSize, page * pageSize), total: matched.length };
     },
   };
 
-  return { accounts, repository };
+  return { accounts, roles, audits, repository };
 }
 
 /** 创建一个有密码哈希的测试管理员凭据（同步，测试用固定哈希）。 */
-export function makeAdminCredential(override: Partial<AdminCredentials> = {}): AdminCredentials {
+export function makeAdminCredential(override: Partial<MemoryAdminInput> = {}): MemoryAdminInput {
   const now = new Date().toISOString();
   return {
     id: randomUUID(),

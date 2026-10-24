@@ -3,12 +3,13 @@ import type { ChatStreamEvent } from "@nyz-rag/types";
 /** Error thrown when the server responds with a non-2xx status.
  *  `message` is taken from `data.error` when the body is JSON `{error:string}`,
  *  otherwise falls back to a generic message with the status code. */
+// web/admin 的测试以 Node 的类型擦除直接运行本包源码：只用可擦除的语法（erasableSyntaxOnly），包内导入写 .ts 扩展名。
 export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-  ) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
+    this.status = status;
     this.name = "ApiError";
   }
 }

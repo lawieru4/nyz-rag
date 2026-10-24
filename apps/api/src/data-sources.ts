@@ -1,9 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import { createSource, updateSourceStatus } from "@nyz-rag/processing";
 import type { CreateSourceRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
+import { requires } from "./admin-auth.js";
 
 export const dataSourceRoutes: FastifyPluginAsync = async (app) => {
-  app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", async (request, reply) => {
+  // Worker 会把全局文章 token 发往来源地址，新建来源须有「数据源·管理」权限。
+  app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", requires("sources:manage"), async (request, reply) => {
     const { name, url, kind, frequency } = request.body;
     let parsed: URL;
     try { parsed = new URL(url.trim()); } catch { return reply.code(400).send({ error: "url must be a valid http(s) URL" }); }
@@ -13,7 +15,7 @@ export const dataSourceRoutes: FastifyPluginAsync = async (app) => {
     return createSource({ name: name.trim(), url: url.trim(), kind, frequency: frequency ?? "" });
   });
 
-  app.patch<{ Params: { id: string }; Body: UpdateSourceStatusRequest }>("/api/admin/sources/:id", async (request, reply) => {
+  app.patch<{ Params: { id: string }; Body: UpdateSourceStatusRequest }>("/api/admin/sources/:id", requires("sources:manage"), async (request, reply) => {
     const updated = await updateSourceStatus(request.params.id, request.body.status);
     if (!updated) return reply.code(404).send({ error: "source not found" });
     return updated;

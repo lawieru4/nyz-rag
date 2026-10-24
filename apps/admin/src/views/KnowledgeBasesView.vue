@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Plus } from "@lucide/vue";
 import type { KnowledgeBaseRecord, SaveKnowledgeBaseRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -13,45 +13,50 @@ import { toast } from "@nyz-rag/ui/lib/toast";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import { client } from "../workspace";
+import { can, client, errorMessage, refreshAfterWrite } from "../workspace";
 
 const emptyForm = (): SaveKnowledgeBaseRequest => ({ name: "", description: "", topK: 5, similarityThreshold: 0.35, rerankEnabled: false, maxContextLength: 6000, prompt: "请依据提供的知识库内容回答问题；若资料不足，请明确说明。", model: "默认模型" });
 const knowledgeBases = ref<KnowledgeBaseRecord[]>([]);
 const dialogOpen = ref(false);
 const editingId = ref("");
 const form = ref(emptyForm());
+const saving = ref(false);
+// 提交期间不能关闭或重开弹窗，避免旧提交的结果作用到新一轮编辑上。
+const open = computed({ get: () => dialogOpen.value, set: (value) => { if (!saving.value) dialogOpen.value = value; } });
 
-async function loadKnowledgeBases() {
-  try {
-    knowledgeBases.value = await client.request<KnowledgeBaseRecord[]>("/api/admin/knowledge-bases");
-  } catch {
-    toast.error("知识库列表加载失败，请检查 API 服务");
-  }
+async function fetchKnowledgeBases() {
+  knowledgeBases.value = await client.request<KnowledgeBaseRecord[]>("/api/admin/knowledge-bases");
 }
-onMounted(loadKnowledgeBases);
+onMounted(() => fetchKnowledgeBases().catch(() => { toast.error("知识库列表加载失败，请检查 API 服务"); }));
 
 function edit(item?: KnowledgeBaseRecord) {
+  if (saving.value) return;
   editingId.value = item?.id ?? "";
   form.value = item ? { name: item.name, description: item.description, topK: item.topK, similarityThreshold: item.similarityThreshold, rerankEnabled: item.rerankEnabled, maxContextLength: item.maxContextLength, prompt: item.prompt, model: item.model } : emptyForm();
   dialogOpen.value = true;
 }
 
 async function save() {
+  if (saving.value) return;
   const editing = Boolean(editingId.value);
+  saving.value = true;
   try {
-    await client.request(`/api/admin/knowledge-bases${editing ? `/${editingId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(form.value) });
-    await loadKnowledgeBases();
-    dialogOpen.value = false;
-    toast.success(editing ? "知识库配置已更新" : "知识库已创建");
-  } catch {
-    toast.error("知识库保存失败，请检查配置");
+    await client.request(`/api/admin/knowledge-bases${editing ? `/${editingId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(form.value satisfies SaveKnowledgeBaseRequest) });
+  } catch (err) {
+    toast.error(errorMessage(err, "知识库保存失败，请检查配置"));
+    return;
+  } finally {
+    saving.value = false;
   }
+  dialogOpen.value = false;
+  toast.success(editing ? "知识库配置已更新" : "知识库已创建");
+  await refreshAfterWrite(fetchKnowledgeBases);
 }
 </script>
 
 <template>
   <PageHeading eyebrow="RETRIEVAL CONFIGURATION" title="知识库" subtitle="维护召回策略、上下文和回答指令">
-    <Button @click="edit()"><Plus /> 新建知识库</Button>
+    <Button v-if="can('knowledge-bases:manage')" @click="edit()"><Plus /> 新建知识库</Button>
   </PageHeading>
   <Card class="min-h-72 gap-0 py-0">
     <div class="px-5 py-4"><h2 class="text-sm font-semibold">知识库配置</h2><p class="mt-1 text-xs text-muted-foreground">{{ knowledgeBases.length }} 个知识库</p></div>
@@ -65,12 +70,12 @@ async function save() {
           </div>
         </dl>
       </div>
-      <Button variant="outline" class="flex-none" @click="edit(item)">编辑配置</Button>
+      <Button v-if="can('knowledge-bases:manage')" variant="outline" class="flex-none" @click="edit(item)">编辑配置</Button>
     </article>
-    <EmptyState v-if="!knowledgeBases.length" class="border-t">尚未创建知识库 <Button variant="link" size="sm" class="text-link" @click="edit()">创建第一个知识库</Button></EmptyState>
+    <EmptyState v-if="!knowledgeBases.length" class="border-t">尚未创建知识库 <Button v-if="can('knowledge-bases:manage')" variant="link" size="sm" class="text-link" @click="edit()">创建第一个知识库</Button></EmptyState>
   </Card>
 
-  <Dialog v-model:open="dialogOpen">
+  <Dialog v-model:open="open">
     <DialogContent class="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[10px] font-medium tracking-wider text-link">KNOWLEDGE BASE</p>
@@ -88,8 +93,8 @@ async function save() {
         <Label class="font-normal"><Switch v-model="form.rerankEnabled" />启用重排序</Label>
         <div class="grid gap-2"><Label for="kb-prompt">回答提示词</Label><Textarea id="kb-prompt" v-model="form.prompt" rows="5" maxlength="10000" /></div>
         <DialogFooter>
-          <Button type="button" variant="outline" @click="dialogOpen = false">取消</Button>
-          <Button type="submit">保存配置</Button>
+          <Button type="button" variant="outline" :disabled="saving" @click="open = false">取消</Button>
+          <Button type="submit" :disabled="saving" :aria-busy="saving">{{ saving ? '保存中…' : '保存配置' }}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

@@ -21,6 +21,8 @@
  *    common.ts pageParams already handles parseInt.
  */
 
+import { ADMIN_PERMISSIONS } from "@nyz-rag/processing";
+
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
 const uuidParam = { type: "string", format: "uuid" };
@@ -842,12 +844,16 @@ const adminAccountSchema = {
     nickname: { type: "string" },
     isSuper: { type: "boolean" },
     disabled: { type: "boolean" },
+    roleId: { type: "string", nullable: true },
+    roleName: { type: "string", nullable: true },
     createdAt: { type: "string" },
     updatedAt: { type: "string" },
   },
-  required: ["id", "email", "nickname", "isSuper", "disabled", "createdAt", "updatedAt"],
+  required: ["id", "email", "nickname", "isSuper", "disabled", "roleId", "roleName", "createdAt", "updatedAt"],
   additionalProperties: false,
 } as const;
+
+const adminPermissionsSchema = { type: "array", items: { type: "string", enum: [...ADMIN_PERMISSIONS] }, maxItems: ADMIN_PERMISSIONS.length, uniqueItems: true } as const;
 
 const adminSessionSchema = {
   type: "object",
@@ -855,10 +861,66 @@ const adminSessionSchema = {
     username: { type: "string" },
     expiresAt: { type: "string" },
     admin: adminAccountSchema,
+    permissions: adminPermissionsSchema,
   },
-  required: ["username", "expiresAt", "admin"],
+  required: ["username", "expiresAt", "admin", "permissions"],
   additionalProperties: false,
 } as const;
+
+const adminRoleSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    description: { type: "string" },
+    permissions: adminPermissionsSchema,
+    disabled: { type: "boolean" },
+    adminCount: { type: "number" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+  required: ["id", "name", "description", "permissions", "disabled", "adminCount", "createdAt", "updatedAt"],
+  additionalProperties: false,
+} as const;
+
+const adminAuditLogSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    adminId: { type: "string", nullable: true },
+    adminEmail: { type: "string", nullable: true },
+    adminNickname: { type: "string", nullable: true },
+    method: { type: "string" },
+    route: { type: "string" },
+    resourceId: { type: "string", nullable: true },
+    statusCode: { type: "number" },
+    result: { type: "string", enum: ["success", "denied", "failed"] },
+    requestId: { type: "string" },
+    ip: { type: "string" },
+    createdAt: { type: "string" },
+  },
+  required: ["id", "adminId", "adminEmail", "adminNickname", "method", "route", "resourceId", "statusCode", "result", "requestId", "ip", "createdAt"],
+  additionalProperties: false,
+} as const;
+
+const adminAuditLogsQuerySchema = {
+  type: "object",
+  properties: {
+    query: { type: "string", maxLength: 200 },
+    result: { type: "string", enum: ["success", "denied", "failed"] },
+    page: { type: "string", pattern: "^[1-9][0-9]*$" },
+    pageSize: { type: "string", pattern: "^[1-9][0-9]*$" },
+  },
+  additionalProperties: false,
+} as const;
+
+const adminRoleFields = {
+  name: { type: "string", minLength: 1, maxLength: 50, pattern: "\\S" },
+  description: { type: "string", maxLength: 200 },
+  permissions: adminPermissionsSchema,
+} as const;
+const nullableRoleId = { type: "string", format: "uuid", nullable: true } as const;
+const idParams = { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false } as const;
 
 // ─── User accounts ────────────────────────────────────────────────────────────
 
@@ -950,6 +1012,7 @@ export const routeSchemas: Record<string, RouteSchema> = {
         email: { type: "string", format: "email", maxLength: 254 },
         nickname: { type: "string", minLength: 1, maxLength: 100, pattern: "\\S" },
         password: { type: "string", minLength: 8, maxLength: 1024, pattern: "\\S" },
+        roleId: nullableRoleId,
       },
       required: ["email", "nickname", "password"],
       additionalProperties: false,
@@ -957,9 +1020,36 @@ export const routeSchemas: Record<string, RouteSchema> = {
     response: { "201": adminAccountSchema, ...errorResponses },
   },
   "PATCH /api/admin/admins/:id": {
-    params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
-    body: objectBody({ disabled: { type: "boolean" } }),
+    params: idParams,
+    body: { type: "object", properties: { disabled: { type: "boolean" }, roleId: nullableRoleId }, minProperties: 1, additionalProperties: false },
     response: { "200": adminAccountSchema, ...errorResponses },
+  },
+
+  // ── Admin: roles (super-only) ───────────────────────────────────────────────
+  "GET /api/admin/roles": {
+    response: { "200": { type: "array", items: adminRoleSchema }, ...errorResponses },
+  },
+  "POST /api/admin/roles": {
+    body: objectBody(adminRoleFields),
+    response: { "201": adminRoleSchema, ...errorResponses },
+  },
+  "PATCH /api/admin/roles/:id": {
+    params: idParams,
+    body: { type: "object", properties: { ...adminRoleFields, disabled: { type: "boolean" } }, minProperties: 1, additionalProperties: false },
+    response: { "200": adminRoleSchema, ...errorResponses },
+  },
+  "DELETE /api/admin/roles/:id": { params: idParams, response: noContent },
+  "GET /api/admin/audit-logs": {
+    querystring: adminAuditLogsQuerySchema,
+    response: {
+      "200": {
+        type: "object",
+        properties: { logs: { type: "array", items: adminAuditLogSchema }, total: { type: "number" } },
+        required: ["logs", "total"],
+        additionalProperties: false,
+      },
+      ...errorResponses,
+    },
   },
 
   // ── User accounts ───────────────────────────────────────────────────────────

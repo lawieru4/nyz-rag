@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
 import { Check, Clock, Database, FileText, Info, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
+import type { UpdateSourceStatusRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { Progress } from "@nyz-rag/ui/components/progress";
@@ -11,7 +12,8 @@ import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
 import SourceCreateDialog from "../components/SourceCreateDialog.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import { client, errorMessage, loadKnowledge, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
+import { usePending } from "../composables/usePending";
+import { can, client, errorMessage, loadKnowledge, refreshAfterWrite, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
 
 defineProps<{ title: string }>();
 
@@ -87,31 +89,40 @@ function taskProgress(task: Task) {
 // 已有排队或运行中任务的数据源不能再次同步（服务端同样会拒绝）。
 const syncingSources = computed(() => new Set(tasks.value.filter((task) => task.status === "等待中" || task.status === "运行中").map((task) => task.sourceId)));
 
-async function toggleSource(source: Source) {
-  const status = source.status === "运行中" ? "已暂停" : "运行中";
-  try {
-    await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }) });
+// 同一数据源的启停与同步在完成前不再重复提交。
+const { isPending, run } = usePending();
+
+function toggleSource(source: Source) {
+  return run(source.id, async () => {
+    const status = source.status === "运行中" ? "已暂停" : "运行中";
+    try {
+      await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status } satisfies UpdateSourceStatusRequest) });
+    } catch {
+      toast.error("数据源状态更新失败，请检查 API 服务");
+      return;
+    }
     source.status = status;
     toast.success(status === "运行中" ? "数据源已启用" : "数据源已暂停");
-  } catch {
-    toast.error("数据源状态更新失败，请检查 API 服务");
-  }
+  });
 }
 
-async function startCrawl(source: Source) {
-  try {
-    await client.request(`/api/admin/sources/${source.id}/sync`, { method: "POST" });
-    await loadKnowledge();
+function startCrawl(source: Source) {
+  return run(source.id, async () => {
+    try {
+      await client.request(`/api/admin/sources/${source.id}/sync`, { method: "POST" });
+    } catch (err) {
+      toast.error(`同步任务创建失败：${errorMessage(err, "请检查 API 服务")}`);
+      return;
+    }
     toast.success(`${source.name} 的同步任务已加入处理队列`);
-  } catch (err) {
-    toast.error(`同步任务创建失败：${errorMessage(err, "请检查 API 服务")}`);
-  }
+    await refreshAfterWrite(loadKnowledge);
+  });
 }
 </script>
 
 <template>
   <PageHeading eyebrow="KNOWLEDGE OPERATIONS" :title="title" subtitle="管理内容来源与自动同步任务">
-    <Button @click="dialogOpen = true"><Plus /> 添加数据源</Button>
+    <Button v-if="can('sources:manage')" @click="dialogOpen = true"><Plus /> 添加数据源</Button>
   </PageHeading>
 
   <Card class="mb-8 grid grid-cols-2 gap-0 py-0 lg:grid-cols-4" aria-label="数据源概览">
@@ -149,15 +160,15 @@ async function startCrawl(source: Source) {
             <TableCell><StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge></TableCell>
             <TableCell>{{ source.updated }}</TableCell>
             <TableCell>
-              <div class="flex justify-end gap-0.5">
-                <Button variant="ghost" size="icon-sm" :title="syncingSources.has(source.id) ? '同步进行中' : '立即同步'" aria-label="立即同步" :disabled="syncingSources.has(source.id)" @click="startCrawl(source)"><RefreshCw :class="syncingSources.has(source.id) && 'animate-spin'" /></Button>
-                <Button variant="ghost" size="icon-sm" title="暂停或启用" aria-label="暂停或启用" @click="toggleSource(source)"><Pause v-if="source.status === '运行中'" /><Play v-else /></Button>
+              <div v-if="can('sources:manage')" class="flex justify-end gap-0.5">
+                <Button variant="ghost" size="icon-sm" :title="syncingSources.has(source.id) ? '同步进行中' : '立即同步'" aria-label="立即同步" :disabled="syncingSources.has(source.id) || isPending(source.id)" @click="startCrawl(source)"><RefreshCw :class="syncingSources.has(source.id) && 'animate-spin'" /></Button>
+                <Button variant="ghost" size="icon-sm" title="暂停或启用" aria-label="暂停或启用" :disabled="isPending(source.id)" @click="toggleSource(source)"><Pause v-if="source.status === '运行中'" /><Play v-else /></Button>
               </div>
             </TableCell>
           </TableRow>
         </TableBody>
       </Table>
-      <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button variant="link" size="sm" class="text-link" @click="dialogOpen = true">添加第一个来源</Button></EmptyState>
+      <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button v-if="can('sources:manage')" variant="link" size="sm" class="text-link" @click="dialogOpen = true">添加第一个来源</Button></EmptyState>
     </Card>
   </section>
 

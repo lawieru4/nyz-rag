@@ -51,6 +51,7 @@ function withFetch(
     globalThis.fetch = oldFetch;
   });
   process.env.MODEL_ADMISSION_TEST_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "MODEL_ADMISSION_TEST_KEY";
   if (handler) {
     globalThis.fetch = (async (input, init) => handler(String(input), init)) as typeof fetch;
   }

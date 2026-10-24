@@ -1,12 +1,45 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { AdminLoginRequest, AdminSession, AdminAccount, ChangeAdminPasswordRequest, UpdateAdminProfileRequest } from "@nyz-rag/types";
+import type { AdminLoginRequest, AdminPermission, AdminSession, AdminAccount, ChangeAdminPasswordRequest, UpdateAdminProfileRequest } from "@nyz-rag/types";
 import {
-  getAdminCredentials, updateAdminPassword, updateAdminProfile, createAdminAccount, listAdminAccounts, setAdminDisabled,
-  type AdminCredentials,
+  getAdminCredentials, updateAdminPassword, updateAdminProfile, createAdminAccount, listAdminAccounts, updateAdminAccount,
+  listAdminRoles, createAdminRole, updateAdminRole, deleteAdminRole, recordAdminAudit, listAdminAuditLogs,
+  type AdminAuditInput, type AdminCredentials,
 } from "@nyz-rag/processing";
 import { cookieToken, createAuthStore, digest, type AuthStore } from "./auth-store.js";
 import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
+
+/**
+ * 管理路由的访问级别，每条 /api/admin/* 路由必须声明（未声明的在注册时报错）：
+ * public 无需登录（仅登录接口）；session 任何已登录管理员；super 仅超级管理员；
+ * 权限码（或数组，满足其一即可）由角色授予，超级管理员拥有全部权限。
+ */
+export type AdminAccess = "public" | "session" | "super" | AdminPermission | AdminPermission[];
+
+declare module "fastify" {
+  interface FastifyContextConfig {
+    /** 由 configureAdminAuth 的 onRequest 钩子统一检查。 */
+    adminAccess?: AdminAccess;
+  }
+}
+
+/** 路由选项：仅超级管理员可访问（管理员账号与角色）。 */
+export const superAdminOnly = { config: { adminAccess: "super" as AdminAccess } };
+/** 路由选项：任何已登录管理员可访问（当前账号的自助操作）。 */
+export const signedIn = { config: { adminAccess: "session" as AdminAccess } };
+/** 路由选项：需具备其中任一权限。 */
+export const requires = (...permissions: AdminPermission[]) => ({ config: { adminAccess: permissions as AdminAccess } });
+
+function accessAllowed(access: AdminAccess | undefined, admin: AdminCredentials): boolean {
+  if (!access || access === "public") return false;
+  if (access === "session" || admin.isSuper) return true;
+  return access !== "super" && [access].flat().some((permission) => admin.permissions.includes(permission));
+}
+
+const toAdminAccount = (admin: AdminCredentials): AdminAccount => ({
+  id: admin.id, email: admin.email, nickname: admin.nickname, isSuper: admin.isSuper, disabled: admin.disabled,
+  roleId: admin.roleId, roleName: admin.roleName, createdAt: admin.createdAt, updatedAt: admin.updatedAt,
+});
 
 const COOKIE = "nyz_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -28,7 +61,13 @@ export interface AdminRepository {
   updateAdminProfile(id: string, input: { email: string; nickname: string }): Promise<AdminAccount | null>;
   createAdminAccount: typeof createAdminAccount;
   listAdminAccounts: typeof listAdminAccounts;
-  setAdminDisabled: typeof setAdminDisabled;
+  updateAdminAccount: typeof updateAdminAccount;
+  listAdminRoles: typeof listAdminRoles;
+  createAdminRole: typeof createAdminRole;
+  updateAdminRole: typeof updateAdminRole;
+  deleteAdminRole: typeof deleteAdminRole;
+  recordAdminAudit(entry: AdminAuditInput): Promise<void>;
+  listAdminAuditLogs(filter: Parameters<typeof listAdminAuditLogs>[0]): ReturnType<typeof listAdminAuditLogs>;
 }
 
 export const databaseAdmins: AdminRepository = {
@@ -37,7 +76,13 @@ export const databaseAdmins: AdminRepository = {
   updateAdminProfile: (id, input) => updateAdminProfile(id, input),
   createAdminAccount,
   listAdminAccounts,
-  setAdminDisabled,
+  updateAdminAccount,
+  listAdminRoles: () => listAdminRoles(),
+  createAdminRole: (input) => createAdminRole(input),
+  updateAdminRole: (id, input) => updateAdminRole(id, input),
+  deleteAdminRole: (id) => deleteAdminRole(id),
+  recordAdminAudit: (entry) => recordAdminAudit(entry),
+  listAdminAuditLogs: (filter) => listAdminAuditLogs(filter),
 };
 
 export function adminAuthConfig(): AdminAuthConfig {
@@ -97,9 +142,17 @@ export function configureAdminAuth(
 
   app.addHook("onClose", async () => store.close());
 
+  // 默认拒绝：管理路由漏写访问级别时启动失败，而不是对所有已登录管理员开放。
+  app.addHook("onRoute", (route) => {
+    if (route.url.startsWith("/api/admin/") && !route.config?.adminAccess) {
+      throw new Error(`Admin route ${[route.method].flat().join(",")} ${route.url} must declare config.adminAccess`);
+    }
+  });
+
   app.addHook("onRequest", async (request, reply) => {
     const path = request.routeOptions.url ?? "";
     if (!path.startsWith("/api/admin/") || request.method === "OPTIONS") return;
+    const access = request.routeOptions.config.adminAccess;
     reply.header("Cache-Control", "no-store");
     if (request.headers.origin && !config.origins.includes(request.headers.origin)) {
       return reply.code(403).send({ error: "不允许的管理端来源" });
@@ -108,7 +161,8 @@ export function configureAdminAuth(
       return reply.code(403).send({ error: "缺少管理请求校验头" });
     }
     try {
-      if (path === "/api/admin/auth/login" && request.method === "POST") {
+      if (access === "public") {
+        if (path !== "/api/admin/auth/login") return;
         const ipAttempts = await store.increment(`login:ip:${digest(request.ip)}`, LOGIN_WINDOW_SECONDS);
         if (ipAttempts > 10) {
           return reply.header("Retry-After", LOGIN_WINDOW_SECONDS).code(429).send({ error: "登录尝试过于频繁，请稍后重试" });
@@ -132,26 +186,47 @@ export function configureAdminAuth(
       if (!admin || admin.disabled || admin.sessionVersion !== stored.version) {
         return reply.header("Set-Cookie", cookie("", 0)).code(401).send({ error: "请先登录管理员账号" });
       }
-      const session: AdminSession = {
-        username: admin.email,
-        expiresAt: stored.expiresAt,
-        admin: {
-          id: admin.id, email: admin.email, nickname: admin.nickname,
-          isSuper: admin.isSuper, disabled: admin.disabled,
-          createdAt: admin.createdAt, updatedAt: admin.updatedAt,
-        },
-      };
+      const session: AdminSession = { username: admin.email, expiresAt: stored.expiresAt, admin: toAdminAccount(admin), permissions: admin.permissions };
       sessions.set(request, session);
+      // 角色与权限每次请求重新读取，修改角色后立即生效。
+      if (!accessAllowed(access, admin)) {
+        return reply.code(403).send({ error: access === "super" ? "仅超级管理员可执行此操作" : "当前角色没有执行此操作的权限" });
+      }
     } catch {
       return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
     }
+  });
+
+  // 审计：管理端的写操作（含登录、退出）和被拒绝（403）的访问各记一条，只记操作者、动作、资源与结果，
+  // 不记请求体、密钥或上游错误正文。全部写入进程日志；入库的只有已登录管理员的操作与登录尝试（受登录限流约束），
+  // 其余匿名请求不入库，避免被刷库。写库失败只记日志，不影响已发出的响应。
+  app.addHook("onResponse", async (request, reply) => {
+    const route = request.routeOptions.url ?? "";
+    if (!route.startsWith("/api/admin/") || request.method === "OPTIONS") return;
+    const status = reply.statusCode;
+    if (["GET", "HEAD"].includes(request.method) && status !== 403) return;
+    const params = (request.params ?? {}) as { id?: string; capability?: string };
+    const audit: AdminAuditInput = {
+      adminId: sessions.get(request)?.admin.id ?? null,
+      method: request.method,
+      route,
+      resourceId: params.id ?? params.capability ?? null,
+      statusCode: status,
+      result: status < 400 ? "success" : status === 401 || status === 403 ? "denied" : "failed",
+      requestId: request.id,
+      ip: request.ip,
+    };
+    request.log.info({ audit }, "admin audit");
+    if (audit.adminId === null && !(route === "/api/admin/auth/login" && status !== 429)) return;
+    try { await admins.recordAdminAudit(audit); }
+    catch (error) { request.log.error(error, "Failed to record admin audit log"); }
   });
 
   /**
    * 登录：用户名字段同时接受 email 和 ADMIN_USERNAME 别名（向后兼容旧部署）。
    * 旧别名仅映射到初始化邮箱的超级管理员，不能映射到普通管理员。
    */
-  app.post<{ Body: AdminLoginRequest }>("/api/admin/auth/login", async (request, reply) => {
+  app.post<{ Body: AdminLoginRequest }>("/api/admin/auth/login", { config: { adminAccess: "public" } }, async (request, reply) => {
     const { username, password } = request.body;
     let admin: AdminCredentials | null = null;
     try {
@@ -182,21 +257,14 @@ export function configureAdminAuth(
     } catch {
       return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
     }
-    const session: AdminSession = {
-      username: admin.email,
-      expiresAt: stored.expiresAt,
-      admin: {
-        id: admin.id, email: admin.email, nickname: admin.nickname,
-        isSuper: admin.isSuper, disabled: admin.disabled,
-        createdAt: admin.createdAt, updatedAt: admin.updatedAt,
-      },
-    };
+    const session: AdminSession = { username: admin.email, expiresAt: stored.expiresAt, admin: toAdminAccount(admin), permissions: admin.permissions };
+    sessions.set(request, session);
     return reply.header("Set-Cookie", cookie(token, SESSION_SECONDS)).send(session);
   });
 
-  app.get("/api/admin/auth/session", async (request) => sessions.get(request)!);
+  app.get("/api/admin/auth/session", signedIn, async (request) => sessions.get(request)!);
 
-  app.post("/api/admin/auth/logout", async (request, reply) => {
+  app.post("/api/admin/auth/logout", signedIn, async (request, reply) => {
     try {
       const token = sessionToken(request);
       if (token) await store.delete(sessionKey(token));
@@ -208,7 +276,7 @@ export function configureAdminAuth(
 
   // ---- 当前管理员自助操作 ----
 
-  app.patch<{ Body: UpdateAdminProfileRequest }>("/api/admin/auth/profile", async (request, reply) => {
+  app.patch<{ Body: UpdateAdminProfileRequest }>("/api/admin/auth/profile", signedIn, async (request, reply) => {
     const session = sessions.get(request)!;
     const email = request.body.email.trim().toLowerCase();
     const nickname = request.body.nickname.trim();
@@ -224,7 +292,7 @@ export function configureAdminAuth(
     return newSession;
   });
 
-  app.post<{ Body: ChangeAdminPasswordRequest }>("/api/admin/auth/password", async (request, reply) => {
+  app.post<{ Body: ChangeAdminPasswordRequest }>("/api/admin/auth/password", signedIn, async (request, reply) => {
     const session = sessions.get(request)!;
     let current: AdminCredentials | null;
     try { current = await admins.getAdminCredentials({ id: session.admin.id }); }

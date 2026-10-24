@@ -2,7 +2,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
+  AdminAuditResult, ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
 } from "@nyz-rag/types";
 
 // pgvector 列不限维度，以支持不同 Embedding 模型；drizzle 内置 vector 类型要求固定维度，因此自定义。
@@ -220,6 +220,19 @@ export const secretSettings = pgTable("secret_settings", {
   updatedAt: timestamptz().notNull().defaultNow(),
 });
 
+// 管理员角色：权限为 admin-permissions.ts 中的权限码（读取时过滤未知项）；停用后使用该角色的管理员没有任何权限。
+export const adminRoles = pgTable("admin_roles", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  description: text().notNull().default(""),
+  permissions: text().array().notNull().default(sql`'{}'::text[]`),
+  disabledAt: timestamptz(),
+  createdAt: timestamptz().notNull().defaultNow(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("admin_roles_name_idx").on(table.name),
+]);
+
 // 管理员账号：由超级管理员（或 seed）创建；email 存小写形式；isSuper 仅首个 seed 账号为 true。
 export const adminAccounts = pgTable("admin_accounts", {
   id: text().primaryKey(),
@@ -227,6 +240,8 @@ export const adminAccounts = pgTable("admin_accounts", {
   nickname: text().notNull(),
   passwordHash: text().notNull(),
   isSuper: boolean().notNull().default(false),
+  // 普通管理员的角色（一人一个）；超级管理员拥有全部权限，不分配角色。有管理员使用的角色不能删除。
+  roleId: text().references(() => adminRoles.id, { onDelete: "restrict" }),
   // 修改密码或停用时加一，使已签发的会话全部失效。
   sessionVersion: integer().notNull().default(0),
   disabledAt: timestamptz(),
@@ -234,6 +249,25 @@ export const adminAccounts = pgTable("admin_accounts", {
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("admin_accounts_email_idx").on(table.email),
+]);
+
+// 管理端操作日志：由 API 在响应后写入（写操作与被拒绝的访问），只记操作者、动作、资源与结果，不含请求体与密钥。
+// 匿名请求只记登录尝试（受登录限流约束），其余未登录请求只写进程日志，避免被刷库。
+export const adminAuditLogs = pgTable("admin_audit_logs", {
+  id: text().primaryKey(),
+  adminId: text().references(() => adminAccounts.id, { onDelete: "set null" }),
+  method: text().notNull(),
+  route: text().notNull(),
+  resourceId: text(),
+  statusCode: integer().notNull(),
+  result: text().$type<AdminAuditResult>().notNull(),
+  requestId: text().notNull(),
+  ip: text().notNull(),
+  createdAt: timestamptz().notNull().defaultNow(),
+}, (table) => [
+  index("admin_audit_logs_created_at_idx").on(table.createdAt.desc(), table.id),
+  index("admin_audit_logs_admin_id_idx").on(table.adminId, table.createdAt.desc()),
+  check("admin_audit_logs_result_check", sql`${table.result} IN ('success', 'denied', 'failed')`),
 ]);
 
 // 用户端账号：邮箱经验证码验证后才创建，email 存小写形式。

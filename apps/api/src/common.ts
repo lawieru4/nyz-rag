@@ -46,6 +46,7 @@ import type { FastifyError, FastifyInstance, FastifyPluginAsync } from "fastify"
 import { AdmissionError, getStats } from "@nyz-rag/processing";
 import { loadOverview } from "./knowledge-events.js";
 import { routeSchemas } from "./schemas.js";
+import { requires } from "./admin-auth.js";
 
 // ─── Re-exported utilities (preserve existing public API) ─────────────────────
 
@@ -138,5 +139,6 @@ export const commonRoutes: FastifyPluginAsync = async (app) => {
     return { stats: await getStats() };
   });
 
-  app.get("/api/admin/knowledge", loadOverview);
+  // 数据源页与文档筛选都用到来源列表。
+  app.get("/api/admin/knowledge", requires("sources:view", "documents:view"), loadOverview);
 };

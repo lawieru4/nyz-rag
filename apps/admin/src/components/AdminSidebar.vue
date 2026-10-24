@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
-import { RouterLink } from "vue-router";
-import { Database, FileText, Library, LogOut, MessagesSquare, Settings2, Shield, User, Users } from "@lucide/vue";
+import { RouterLink, useRouter } from "vue-router";
+import { Database, FileText, KeyRound, Library, LogOut, MessagesSquare, ScrollText, Settings2, Shield, User, Users } from "@lucide/vue";
 import type { AdminSession } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
+import { homePath, routeVisible } from "../router";
 
 const props = defineProps<{ session: AdminSession; activeModule: string; sourceCount: number }>();
 const emit = defineEmits<{
@@ -11,22 +12,27 @@ const emit = defineEmits<{
   (e: "logout"): void;
 }>();
 
-const allModules: Array<{ name: string; icon: Component; superOnly?: boolean }> = [
+const router = useRouter();
+const allModules: Array<{ name: string; icon: Component }> = [
   { name: "数据源", icon: Database },
   { name: "文档管理", icon: FileText },
   { name: "知识库", icon: Library },
   { name: "问答记录", icon: MessagesSquare },
   { name: "用户管理", icon: Users },
   { name: "模型配置", icon: Settings2 },
-  { name: "管理员管理", icon: Shield, superOnly: true },
+  { name: "管理员管理", icon: Shield },
+  { name: "角色管理", icon: KeyRound },
+  { name: "操作日志", icon: ScrollText },
 ];
 const PROFILE_MODULE = "个人资料";
-const modules = computed(() => allModules.filter((m) => !m.superOnly || props.session.admin.isSuper));
+// 可见性由路由的 meta（权限或仅超级管理员）决定，与 App.vue 的路由守卫一致。
+const modules = computed(() => allModules.filter((m) => routeVisible(router.resolve({ name: m.name }).meta, props.session)));
+const roleLabel = computed(() => props.session.admin.isSuper ? "超级管理员" : props.session.admin.roleName ?? "未分配角色");
 </script>
 
 <template>
   <aside class="fixed inset-y-0 left-0 z-10 flex w-58 flex-col bg-sidebar px-3.5 pt-6 pb-3.5 text-sidebar-foreground max-lg:w-48 max-md:w-14 max-md:px-2">
-    <RouterLink class="flex items-center gap-1 px-2 text-sm font-bold text-sidebar-accent-foreground max-md:px-1" to="/sources" aria-label="能知管理后台">
+    <RouterLink class="flex items-center gap-1 px-2 text-sm font-bold text-sidebar-accent-foreground max-md:px-1" :to="homePath(session)" aria-label="能知管理后台">
       <img src="/logo_t.png" alt="能知" class="h-10 w-30 flex-none object-contain max-lg:w-24 max-md:hidden" />
       <img src="/favicon_t.png" alt="" class="hidden size-7 flex-none object-contain max-md:block" />
       <span class="font-mono text-[9px] font-medium text-sidebar-foreground/70 max-md:hidden">管理后台</span>
@@ -58,7 +64,7 @@ const modules = computed(() => allModules.filter((m) => !m.superOnly || props.se
         <span class="grid size-7.5 flex-none place-items-center rounded-full bg-[#53634f] font-mono text-[11px] text-[#e5edda]"><User class="size-3.5" /></span>
         <span class="grid min-w-0 gap-0.5 text-[11px] max-md:hidden">
           <b class="truncate text-sidebar-accent-foreground">{{ session.admin.nickname }}</b>
-          <small class="text-[10px] text-sidebar-foreground/70">{{ session.admin.isSuper ? '超级管理员' : '管理员' }}</small>
+          <small class="text-[10px] text-sidebar-foreground/70">{{ roleLabel }}</small>
         </span>
       </RouterLink>
       <Button variant="ghost" size="icon-sm" class="ml-auto flex-none text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:ml-0" title="退出登录" aria-label="退出登录" @click="emit('logout')"><LogOut /></Button>

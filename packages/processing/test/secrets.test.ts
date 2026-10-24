@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { listProviderModels } from "../src/models.js";
-import { hasProviderCredential, providerCredential, usableModel, type ModelProviderConfig } from "../src/provider.js";
+import { hasProviderCredential, providerCredential, providerOrigin, usableModel, type ModelProviderConfig } from "../src/provider.js";
 import { decryptSecret, encryptSecret, providerSecretContext, SecretKeyError, secretKeyConfigured } from "../src/secrets.js";
 import { embedChunks } from "../src/embedding.js";
 import { noopLimiter } from "./admission-helpers.js";
@@ -49,7 +49,7 @@ test("secrets round-trip, are bound to their context and need the same master ke
 });
 
 test("provider credentials prefer the saved key, fall back to the environment and allow no key", (context) => {
-  withEnv(context, { NYZ_SECRET_KEY: KEY, SECRETS_TEST_KEY: "env-secret", SECRETS_TEST_MISSING: undefined });
+  withEnv(context, { NYZ_SECRET_KEY: KEY, SECRETS_TEST_KEY: "env-secret", SECRETS_TEST_MISSING: undefined, NYZ_MODEL_CREDENTIAL_ENVS: "SECRETS_TEST_KEY, SECRETS_TEST_MISSING" });
   const saved = provider({ apiKeyCiphertext: encryptSecret("saved-secret", providerSecretContext("provider-1")), credentialEnv: "SECRETS_TEST_KEY" });
   assert.equal(providerCredential(saved, "chat"), "saved-secret");
   assert.equal(providerCredential(provider({ credentialEnv: "SECRETS_TEST_KEY" }), "chat"), "env-secret");
@@ -61,8 +61,26 @@ test("provider credentials prefer the saved key, fall back to the environment an
   assert.equal(hasProviderCredential({ ...saved, id: "provider-2" }), false);
 });
 
+test("credentialEnv can only read allow-listed environment variables", (context) => {
+  withEnv(context, { NYZ_SECRET_KEY: KEY, SECRETS_TEST_KEY: "env-secret", NYZ_MODEL_CREDENTIAL_ENVS: undefined });
+  // 默认名单为空：任何环境变量都不会被当作密钥，也不会退回为不带认证头的调用。
+  assert.throws(() => providerCredential(provider({ credentialEnv: "SECRETS_TEST_KEY" }), "chat"), (error: Error) => /not allowed/.test(error.message) && !error.message.includes("env-secret"));
+  assert.throws(() => providerCredential(provider({ credentialEnv: "NYZ_SECRET_KEY" }), "chat"), /not allowed/);
+  assert.equal(hasProviderCredential(provider({ credentialEnv: "SECRETS_TEST_KEY" })), false);
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "OTHER_KEY,SECRETS_TEST_KEY";
+  assert.equal(providerCredential(provider({ credentialEnv: "SECRETS_TEST_KEY" }), "chat"), "env-secret");
+  assert.throws(() => providerCredential(provider({ credentialEnv: "NYZ_SECRET_KEY" }), "chat"), /not allowed/);
+});
+
+test("provider origins resolve the default OpenAI address and ignore the path", () => {
+  assert.equal(providerOrigin({ name: "OpenAI", provider: "openai", baseUrl: "" }), "https://api.openai.com");
+  assert.equal(providerOrigin({ name: "x", provider: "x", baseUrl: "https://models.example/v1/" }), "https://models.example");
+  assert.notEqual(providerOrigin({ name: "x", provider: "x", baseUrl: "https://models.example:8443/v1" }), "https://models.example");
+  assert.equal(providerOrigin({ name: "x", provider: "x", baseUrl: "" }), null);
+});
+
 test("a configured model is usable only when its provider credential is available", (context) => {
-  withEnv(context, { SECRETS_TEST_MISSING: undefined });
+  withEnv(context, { SECRETS_TEST_MISSING: undefined, NYZ_MODEL_CREDENTIAL_ENVS: "SECRETS_TEST_MISSING" });
   const local = { provider: provider(), model: "embed" };
   assert.equal(usableModel(local), local, "local models need no credential");
   assert.equal(usableModel(null), null);
