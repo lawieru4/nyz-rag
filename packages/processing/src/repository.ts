@@ -10,14 +10,14 @@ import type { ChunkHit, SectionContext } from "./rag.js";
 import { decryptSecret, encryptSecret, providerSecretContext, secretKeyConfigured } from "./secrets.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
-  AdminAccount, AdminPermission, AdminRole, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
+  AdminAccount, AdminAuditLogListResponse, AdminAuditLogRecord, AdminAuditResult, AdminPermission, AdminRole, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelCapability, ModelProviderRecord, ModelSettingRecord, ModelSettingsResponse, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest, SaveModelSettingRequest,
   SaveAdminRoleRequest, SecretSettingStatus, UpdateAdminRoleRequest,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { adminAccounts, adminRoles, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
+import { adminAccounts, adminAuditLogs, adminRoles, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -1268,4 +1268,36 @@ export async function deleteAdminRole(id: string, db: Executor = getDb()): Promi
     if (["23001", "23503"].includes(pgErrorCode(error) ?? "")) throw new AdminAccountError("role-in-use");
     throw error;
   }
+}
+
+export type AdminAuditInput = Omit<AdminAuditLogRecord, "id" | "adminEmail" | "adminNickname" | "createdAt">;
+
+/** 写入一条管理端操作日志。 */
+export async function recordAdminAudit(entry: AdminAuditInput, db: Executor = getDb()): Promise<void> {
+  await db.insert(adminAuditLogs).values({ id: randomUUID(), ...entry });
+}
+
+/** 操作日志按时间倒序；query 匹配操作者邮箱/昵称、路由、资源 ID 与 IP。 */
+export async function listAdminAuditLogs(
+  filter: { query?: string; result?: string; page: number; pageSize: number },
+  db: Executor = getDb(),
+): Promise<AdminAuditLogListResponse> {
+  const query = filter.query?.trim().toLocaleLowerCase();
+  const where = and(
+    query ? or(
+      contains(sql`${adminAuditLogs.route}`, query),
+      contains(sql`coalesce(${adminAuditLogs.resourceId}, '')`, query),
+      contains(sql`${adminAuditLogs.ip}`, query),
+      contains(sql`coalesce(${adminAccounts.email}, '') || ' ' || coalesce(${adminAccounts.nickname}, '')`, query),
+    ) : undefined,
+    filter.result ? eq(adminAuditLogs.result, filter.result as AdminAuditResult) : undefined,
+  );
+  const { limit, offset } = paging(filter.page, filter.pageSize);
+  const [rows, [{ total }]] = await Promise.all([
+    db.select({ ...getTableColumns(adminAuditLogs), adminEmail: adminAccounts.email, adminNickname: adminAccounts.nickname })
+      .from(adminAuditLogs).leftJoin(adminAccounts, eq(adminAuditLogs.adminId, adminAccounts.id))
+      .where(where).orderBy(desc(adminAuditLogs.createdAt), desc(adminAuditLogs.id)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(adminAuditLogs).leftJoin(adminAccounts, eq(adminAuditLogs.adminId, adminAccounts.id)).where(where),
+  ]);
+  return { logs: rows.map((row) => ({ ...row, createdAt: iso(row.createdAt)! })), total };
 }

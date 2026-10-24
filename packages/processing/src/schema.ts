@@ -2,7 +2,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
-  ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
+  AdminAuditResult, ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
 } from "@nyz-rag/types";
 
 // pgvector 列不限维度，以支持不同 Embedding 模型；drizzle 内置 vector 类型要求固定维度，因此自定义。
@@ -249,6 +249,25 @@ export const adminAccounts = pgTable("admin_accounts", {
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("admin_accounts_email_idx").on(table.email),
+]);
+
+// 管理端操作日志：由 API 在响应后写入（写操作与被拒绝的访问），只记操作者、动作、资源与结果，不含请求体与密钥。
+// 匿名请求只记登录尝试（受登录限流约束），其余未登录请求只写进程日志，避免被刷库。
+export const adminAuditLogs = pgTable("admin_audit_logs", {
+  id: text().primaryKey(),
+  adminId: text().references(() => adminAccounts.id, { onDelete: "set null" }),
+  method: text().notNull(),
+  route: text().notNull(),
+  resourceId: text(),
+  statusCode: integer().notNull(),
+  result: text().$type<AdminAuditResult>().notNull(),
+  requestId: text().notNull(),
+  ip: text().notNull(),
+  createdAt: timestamptz().notNull().defaultNow(),
+}, (table) => [
+  index("admin_audit_logs_created_at_idx").on(table.createdAt.desc(), table.id),
+  index("admin_audit_logs_admin_id_idx").on(table.adminId, table.createdAt.desc()),
+  check("admin_audit_logs_result_check", sql`${table.result} IN ('success', 'denied', 'failed')`),
 ]);
 
 // 用户端账号：邮箱经验证码验证后才创建，email 存小写形式。

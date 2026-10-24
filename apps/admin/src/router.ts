@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteMeta } from "vue-router";
 import type { AdminPermission, AdminSession } from "@nyz-rag/types";
 import AdminLayout from "./components/AdminLayout.vue";
 import AdminsView from "./views/AdminsView.vue";
+import AuditLogsView from "./views/AuditLogsView.vue";
 import ChatLogsView from "./views/ChatLogsView.vue";
 import DocumentsView from "./views/DocumentsView.vue";
 import KnowledgeBasesView from "./views/KnowledgeBasesView.vue";
@@ -36,6 +37,7 @@ export const router = createRouter({
         { path: "model-providers", name: "模型配置", component: ModelProvidersView, meta: { permission: ["models:view"] } },
         { path: "admins", name: "管理员管理", component: AdminsView, meta: { superOnly: true } },
         { path: "roles", name: "角色管理", component: RolesView, meta: { superOnly: true } },
+        { path: "audit-logs", name: "操作日志", component: AuditLogsView, meta: { permission: ["audit-logs:view"] } },
         { path: "profile", name: "个人资料", component: ProfileView },
       ],
     },

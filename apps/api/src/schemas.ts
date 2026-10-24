@@ -883,6 +883,37 @@ const adminRoleSchema = {
   additionalProperties: false,
 } as const;
 
+const adminAuditLogSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    adminId: { type: "string", nullable: true },
+    adminEmail: { type: "string", nullable: true },
+    adminNickname: { type: "string", nullable: true },
+    method: { type: "string" },
+    route: { type: "string" },
+    resourceId: { type: "string", nullable: true },
+    statusCode: { type: "number" },
+    result: { type: "string", enum: ["success", "denied", "failed"] },
+    requestId: { type: "string" },
+    ip: { type: "string" },
+    createdAt: { type: "string" },
+  },
+  required: ["id", "adminId", "adminEmail", "adminNickname", "method", "route", "resourceId", "statusCode", "result", "requestId", "ip", "createdAt"],
+  additionalProperties: false,
+} as const;
+
+const adminAuditLogsQuerySchema = {
+  type: "object",
+  properties: {
+    query: { type: "string", maxLength: 200 },
+    result: { type: "string", enum: ["success", "denied", "failed"] },
+    page: { type: "string", pattern: "^[1-9][0-9]*$" },
+    pageSize: { type: "string", pattern: "^[1-9][0-9]*$" },
+  },
+  additionalProperties: false,
+} as const;
+
 const adminRoleFields = {
   name: { type: "string", minLength: 1, maxLength: 50, pattern: "\\S" },
   description: { type: "string", maxLength: 200 },
@@ -1008,6 +1039,18 @@ export const routeSchemas: Record<string, RouteSchema> = {
     response: { "200": adminRoleSchema, ...errorResponses },
   },
   "DELETE /api/admin/roles/:id": { params: idParams, response: noContent },
+  "GET /api/admin/audit-logs": {
+    querystring: adminAuditLogsQuerySchema,
+    response: {
+      "200": {
+        type: "object",
+        properties: { logs: { type: "array", items: adminAuditLogSchema }, total: { type: "number" } },
+        required: ["logs", "total"],
+        additionalProperties: false,
+      },
+      ...errorResponses,
+    },
+  },
 
   // ── User accounts ───────────────────────────────────────────────────────────
   "GET /api/auth/session": { response: { "200": userSessionSchema, ...errorResponses } },

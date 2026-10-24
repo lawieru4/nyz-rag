@@ -8,6 +8,7 @@ export const PERMISSION_MODULES = [
   { module: "chat-logs", label: "问答记录", view: "问答记录与召回片段" },
   { module: "users", label: "用户管理", view: "用户账号", manage: "停用与启用用户" },
   { module: "models", label: "模型配置", view: "供应商与业务模型", manage: "修改供应商、API Key 与业务模型" },
+  { module: "audit-logs", label: "操作日志", view: "管理端操作、登录尝试与被拒绝的访问" },
 ] as const satisfies ReadonlyArray<{ module: AdminPermissionModule; label: string; view: string; manage?: string }>;
 
 // 新增 AdminPermissionModule 而漏改上面的清单时，这里类型检查失败。

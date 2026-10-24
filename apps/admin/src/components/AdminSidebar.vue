@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
 import { RouterLink, useRouter } from "vue-router";
-import { Database, FileText, KeyRound, Library, LogOut, MessagesSquare, Settings2, Shield, User, Users } from "@lucide/vue";
+import { Database, FileText, KeyRound, Library, LogOut, MessagesSquare, ScrollText, Settings2, Shield, User, Users } from "@lucide/vue";
 import type { AdminSession } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { homePath, routeVisible } from "../router";
@@ -22,6 +22,7 @@ const allModules: Array<{ name: string; icon: Component }> = [
   { name: "模型配置", icon: Settings2 },
   { name: "管理员管理", icon: Shield },
   { name: "角色管理", icon: KeyRound },
+  { name: "操作日志", icon: ScrollText },
 ];
 const PROFILE_MODULE = "个人资料";
 // 可见性由路由的 meta（权限或仅超级管理员）决定，与 App.vue 的路由守卫一致。

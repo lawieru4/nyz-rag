@@ -10,6 +10,7 @@
  *  - Duplicate email rejected
  *  - Session version invalidation on disable
  *  - Roles: create/edit/disable/delete, assignment to admins, permissions in the session
+ *  - Audit log entries for admin writes and denied access
  */
 
 import assert from "node:assert/strict";
@@ -287,5 +288,59 @@ test("roles: create, edit, disable and delete; assignment drives the admin's per
     assert.equal((await app.inject({ method: "DELETE", url: `/api/admin/roles/${role.id}`, headers })).statusCode, 204);
     assert.equal((await app.inject({ method: "DELETE", url: `/api/admin/roles/${role.id}`, headers })).statusCode, 404);
     assert.deepEqual((await app.inject({ url: "/api/admin/roles", headers })).json(), []);
+  } finally { await app.close(); }
+});
+
+test("audit log records admin writes and denied access without request bodies", async () => {
+  const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
+  const regularAccount = await makeAccount({ id: randomUUID(), email: REGULAR_EMAIL, isSuper: false });
+  const { audits, repository } = memoryAdmins([superAccount, regularAccount]);
+  const lines: string[] = [];
+  const app = buildApp({
+    queue, adminAuth, authStore: memoryAuthStore(), admins: repository,
+    logger: { level: "info", stream: { write: (line: string) => { lines.push(line); } } },
+  });
+  try {
+    const failed = await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: adminHeaders, payload: { username: SUPER_EMAIL, password: "wrong-password-value" } });
+    assert.equal(failed.statusCode, 401);
+    const headers = { ...adminHeaders, cookie: await loginAs(app, SUPER_EMAIL) };
+    const regularCookie = await loginAs(app, REGULAR_EMAIL);
+    const created = await app.inject({ method: "POST", url: "/api/admin/roles", headers, payload: { name: "审计", description: "", permissions: [] } });
+    const roleId = created.json().id as string;
+    await app.inject({ method: "PATCH", url: `/api/admin/roles/${roleId}`, headers, payload: { disabled: true } });
+    await app.inject({ url: "/api/admin/roles", headers });
+    await app.inject({ url: "/api/admin/roles", headers: { cookie: regularCookie } });
+    // 未登录的写请求只写进程日志，不入库（防止匿名刷库）。
+    await app.inject({ method: "POST", url: "/api/admin/roles", headers: adminHeaders, payload: { name: "x", description: "", permissions: [] } });
+
+    const pick = ({ adminId, method, route, resourceId, statusCode, result }: (typeof audits)[number]) => ({ adminId, method, route, resourceId, statusCode, result });
+    assert.deepEqual(audits.map(pick), [
+      { adminId: null, method: "POST", route: "/api/admin/auth/login", resourceId: null, statusCode: 401, result: "denied" },
+      { adminId: superAccount.id, method: "POST", route: "/api/admin/auth/login", resourceId: null, statusCode: 200, result: "success" },
+      { adminId: regularAccount.id, method: "POST", route: "/api/admin/auth/login", resourceId: null, statusCode: 200, result: "success" },
+      { adminId: superAccount.id, method: "POST", route: "/api/admin/roles", resourceId: null, statusCode: 201, result: "success" },
+      { adminId: superAccount.id, method: "PATCH", route: "/api/admin/roles/:id", resourceId: roleId, statusCode: 200, result: "success" },
+      // 成功的读取不记，被拒绝的读取要记。
+      { adminId: regularAccount.id, method: "GET", route: "/api/admin/roles", resourceId: null, statusCode: 403, result: "denied" },
+    ]);
+    assert.ok(audits.every((entry) => entry.requestId && entry.ip));
+    const logged = lines.map((line) => JSON.parse(line)).filter((entry) => entry.audit);
+    assert.equal(logged.length, audits.length + 1);
+    assert.ok(logged.every((entry) => entry.audit.requestId === entry.reqId));
+    assert.doesNotMatch(lines.join("\n"), /wrong-password-value|test-only-password/);
+
+    // 查看需「操作日志 · 查看」权限；按时间倒序，可按结果与关键词筛选。
+    const regularHeaders = { ...adminHeaders, cookie: regularCookie };
+    assert.equal((await app.inject({ url: "/api/admin/audit-logs", headers: regularHeaders })).statusCode, 403);
+    const auditor = await app.inject({ method: "POST", url: "/api/admin/roles", headers, payload: { name: "审计员", description: "", permissions: ["audit-logs:view"] } });
+    await app.inject({ method: "PATCH", url: `/api/admin/admins/${regularAccount.id}`, headers, payload: { roleId: auditor.json().id } });
+    const list = await app.inject({ url: "/api/admin/audit-logs?pageSize=2", headers: regularHeaders });
+    assert.equal(list.statusCode, 200, list.body);
+    assert.equal(list.json().total, audits.length);
+    assert.deepEqual(list.json().logs.map((log: { route: string }) => log.route), ["/api/admin/admins/:id", "/api/admin/roles"]);
+    assert.equal(list.json().logs[0].adminNickname, "super");
+    const denied = (await app.inject({ url: "/api/admin/audit-logs?result=denied&query=regular@", headers: regularHeaders })).json();
+    assert.deepEqual(denied.logs.map((log: { route: string }) => log.route), ["/api/admin/audit-logs", "/api/admin/roles"]);
+    assert.equal((await app.inject({ url: "/api/admin/audit-logs?result=bad", headers: regularHeaders })).statusCode, 400);
   } finally { await app.close(); }
 });

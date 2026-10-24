@@ -60,6 +60,7 @@ const ROUTE_ACCESS: Record<string, AdminAccess> = {
   "PATCH /api/admin/knowledge-bases/:id": "knowledge-bases:manage",
 
   "GET /api/admin/chat-logs": "chat-logs:view",
+  "GET /api/admin/audit-logs": "audit-logs:view",
 
   "GET /api/admin/users": "users:view",
   "PATCH /api/admin/users/:id": "users:manage",

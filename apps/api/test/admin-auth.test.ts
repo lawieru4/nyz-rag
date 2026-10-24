@@ -94,7 +94,7 @@ test("login with email succeeds and session contains AdminAccount; login with wr
     assert.equal(typeof session.admin.createdAt, "string");
     assert.equal(typeof session.admin.updatedAt, "string");
     assert.equal(Object.keys(session).sort().join(","), "admin,expiresAt,permissions,username");
-    assert.equal(session.permissions.length, 11, "super admin has every permission");
+    assert.equal(session.permissions.length, 12, "super admin has every permission");
     assert.equal(session.admin.roleId, null);
   } finally { await app.close(); }
 });

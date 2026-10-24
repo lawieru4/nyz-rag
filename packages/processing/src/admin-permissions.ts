@@ -9,6 +9,7 @@ export const ADMIN_PERMISSIONS = [
   "chat-logs:view",
   "users:view", "users:manage",
   "models:view", "models:manage",
+  "audit-logs:view",
 ] as const satisfies readonly AdminPermission[];
 
 // 新增 AdminPermission 而漏改上面的清单时，这里类型检查失败。

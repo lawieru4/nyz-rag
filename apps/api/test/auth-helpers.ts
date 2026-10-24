@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AdminAccount, AdminRole } from "@nyz-rag/types";
+import type { AdminAccount, AdminAuditLogRecord, AdminRole } from "@nyz-rag/types";
 import { ADMIN_PERMISSIONS, AdminAccountError, normalizeAdminPermissions, type AdminCredentials } from "@nyz-rag/processing";
 import type { AdminAuthConfig, AdminRepository } from "../src/admin-auth.js";
 import type { AuthStore } from "../src/auth-store.js";
@@ -48,6 +48,8 @@ type MemoryRole = Omit<AdminRole, "adminCount">;
 export function memoryAdmins(initial: MemoryAdminInput[] = []) {
   const accounts = new Map<string, MemoryAdminInput>(initial.map((a) => [a.id, { ...a }]));
   const roles = new Map<string, MemoryRole>();
+  // 操作日志，按写入顺序；列表与数据库一致按时间倒序返回。
+  const audits: AdminAuditLogRecord[] = [];
 
   function credentials(account: MemoryAdminInput): AdminCredentials {
     const role = account.roleId ? roles.get(account.roleId) : undefined;
@@ -141,9 +143,19 @@ export function memoryAdmins(initial: MemoryAdminInput[] = []) {
       if ([...accounts.values()].some((a) => a.roleId === id)) throw new AdminAccountError("role-in-use");
       return roles.delete(id);
     },
+    async recordAdminAudit(entry) {
+      const admin = entry.adminId ? accounts.get(entry.adminId) : undefined;
+      audits.push({ id: randomUUID(), ...entry, adminEmail: admin?.email ?? null, adminNickname: admin?.nickname ?? null, createdAt: new Date().toISOString() });
+    },
+    async listAdminAuditLogs({ query, result, page, pageSize }) {
+      const needle = query?.trim().toLocaleLowerCase();
+      const matched = [...audits].reverse().filter((log) => (!result || log.result === result)
+        && (!needle || [log.route, log.resourceId, log.ip, log.adminEmail, log.adminNickname].some((value) => value?.toLocaleLowerCase().includes(needle))));
+      return { logs: matched.slice((page - 1) * pageSize, page * pageSize), total: matched.length };
+    },
   };
 
-  return { accounts, roles, repository };
+  return { accounts, roles, audits, repository };
 }
 
 /** 创建一个有密码哈希的测试管理员凭据（同步，测试用固定哈希）。 */

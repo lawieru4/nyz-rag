@@ -134,6 +134,13 @@
       "when": 1792832710061,
       "tag": "0018_admin_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1792834156954,
+      "tag": "0019_admin_audit_logs",
+      "breakpoints": true
     }
   ]
 }

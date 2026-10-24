@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { createRedisAdmissionLimiter, type AdmissionLimiter } from "@nyz-rag/processing";
 import { adminAccountRoutes } from "./admin-accounts.js";
+import { auditLogRoutes } from "./audit-logs.js";
 import { chatRoutes } from "./chat.js";
 import { commonRoutes, configureCommon } from "./common.js";
 import { crawlTaskRoutes } from "./crawl-tasks.js";
@@ -64,5 +65,6 @@ export function buildApp(options: {
   app.register(settingRoutes);
   app.register(userRoutes);
   app.register(adminAccountRoutes, { admins: options.admins ?? databaseAdmins });
+  app.register(auditLogRoutes, { admins: options.admins ?? databaseAdmins });
   return app;
 }

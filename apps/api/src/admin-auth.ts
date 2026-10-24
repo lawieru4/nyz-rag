@@ -3,8 +3,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AdminLoginRequest, AdminPermission, AdminSession, AdminAccount, ChangeAdminPasswordRequest, UpdateAdminProfileRequest } from "@nyz-rag/types";
 import {
   getAdminCredentials, updateAdminPassword, updateAdminProfile, createAdminAccount, listAdminAccounts, updateAdminAccount,
-  listAdminRoles, createAdminRole, updateAdminRole, deleteAdminRole,
-  type AdminCredentials,
+  listAdminRoles, createAdminRole, updateAdminRole, deleteAdminRole, recordAdminAudit, listAdminAuditLogs,
+  type AdminAuditInput, type AdminCredentials,
 } from "@nyz-rag/processing";
 import { cookieToken, createAuthStore, digest, type AuthStore } from "./auth-store.js";
 import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
@@ -66,6 +66,8 @@ export interface AdminRepository {
   createAdminRole: typeof createAdminRole;
   updateAdminRole: typeof updateAdminRole;
   deleteAdminRole: typeof deleteAdminRole;
+  recordAdminAudit(entry: AdminAuditInput): Promise<void>;
+  listAdminAuditLogs(filter: Parameters<typeof listAdminAuditLogs>[0]): ReturnType<typeof listAdminAuditLogs>;
 }
 
 export const databaseAdmins: AdminRepository = {
@@ -79,6 +81,8 @@ export const databaseAdmins: AdminRepository = {
   createAdminRole: (input) => createAdminRole(input),
   updateAdminRole: (id, input) => updateAdminRole(id, input),
   deleteAdminRole: (id) => deleteAdminRole(id),
+  recordAdminAudit: (entry) => recordAdminAudit(entry),
+  listAdminAuditLogs: (filter) => listAdminAuditLogs(filter),
 };
 
 export function adminAuthConfig(): AdminAuthConfig {
@@ -193,6 +197,31 @@ export function configureAdminAuth(
     }
   });
 
+  // 审计：管理端的写操作（含登录、退出）和被拒绝（403）的访问各记一条，只记操作者、动作、资源与结果，
+  // 不记请求体、密钥或上游错误正文。全部写入进程日志；入库的只有已登录管理员的操作与登录尝试（受登录限流约束），
+  // 其余匿名请求不入库，避免被刷库。写库失败只记日志，不影响已发出的响应。
+  app.addHook("onResponse", async (request, reply) => {
+    const route = request.routeOptions.url ?? "";
+    if (!route.startsWith("/api/admin/") || request.method === "OPTIONS") return;
+    const status = reply.statusCode;
+    if (["GET", "HEAD"].includes(request.method) && status !== 403) return;
+    const params = (request.params ?? {}) as { id?: string; capability?: string };
+    const audit: AdminAuditInput = {
+      adminId: sessions.get(request)?.admin.id ?? null,
+      method: request.method,
+      route,
+      resourceId: params.id ?? params.capability ?? null,
+      statusCode: status,
+      result: status < 400 ? "success" : status === 401 || status === 403 ? "denied" : "failed",
+      requestId: request.id,
+      ip: request.ip,
+    };
+    request.log.info({ audit }, "admin audit");
+    if (audit.adminId === null && !(route === "/api/admin/auth/login" && status !== 429)) return;
+    try { await admins.recordAdminAudit(audit); }
+    catch (error) { request.log.error(error, "Failed to record admin audit log"); }
+  });
+
   /**
    * 登录：用户名字段同时接受 email 和 ADMIN_USERNAME 别名（向后兼容旧部署）。
    * 旧别名仅映射到初始化邮箱的超级管理员，不能映射到普通管理员。
@@ -229,6 +258,7 @@ export function configureAdminAuth(
       return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
     }
     const session: AdminSession = { username: admin.email, expiresAt: stored.expiresAt, admin: toAdminAccount(admin), permissions: admin.permissions };
+    sessions.set(request, session);
     return reply.header("Set-Cookie", cookie(token, SESSION_SECONDS)).send(session);
   });
 

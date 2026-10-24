@@ -5,7 +5,8 @@ import pg from "pg";
 import { readFile } from "node:fs/promises";
 import { closeDatabase, migrate } from "../src/db.js";
 import {
-  AdminAccountError, createAdminAccount, createAdminRole, deleteAdminRole, getAdminCredentials, getAdminRole, listAdminAccounts, listAdminRoles, seedSuperAdmin,
+  AdminAccountError, createAdminAccount, createAdminRole, deleteAdminRole, getAdminCredentials, getAdminRole, listAdminAccounts, listAdminAuditLogs, listAdminRoles,
+  recordAdminAudit, seedSuperAdmin,
   updateAdminAccount, updateAdminPassword, updateAdminProfile, updateAdminRole,
 } from "../src/repository.js";
 import { ADMIN_PERMISSIONS } from "../src/admin-permissions.js";
@@ -48,6 +49,21 @@ test("administrator migration, concurrent bootstrap, uniqueness and session revo
     assert.equal((await getAdminCredentials({ id: regular.id }))!.sessionVersion, 1);
     await assert.rejects(updateAdminAccount(superAdmin.id, { disabled: true }), (error: unknown) => error instanceof AdminAccountError && error.reason === "super-admin-disable");
     assert.equal(Object.hasOwn((await listAdminAccounts())[0]!, "passwordHash"), false);
+
+    // 操作日志：关联当前的操作者邮箱与昵称，按时间倒序，可按结果与关键词（邮箱、路由、资源 ID、IP）筛选。
+    const entry = { method: "POST", requestId: "req-1", ip: "203.0.113.7", resourceId: null, statusCode: 200, result: "success" as const };
+    await recordAdminAudit({ ...entry, adminId: null, route: "/api/admin/auth/login", statusCode: 401, result: "denied" });
+    await recordAdminAudit({ ...entry, adminId: superAdmin.id, route: "/api/admin/roles" });
+    await recordAdminAudit({ ...entry, adminId: regular.id, method: "PATCH", route: "/api/admin/users/:id", resourceId: "user-42", statusCode: 403, result: "denied" });
+    const all = await listAdminAuditLogs({ page: 1, pageSize: 10 });
+    assert.equal(all.total, 3);
+    assert.deepEqual(all.logs.map((log) => [log.route, log.adminEmail]), [
+      ["/api/admin/users/:id", "regular@example.com"], ["/api/admin/roles", "changed@example.com"], ["/api/admin/auth/login", null],
+    ]);
+    assert.equal((await listAdminAuditLogs({ result: "denied", page: 1, pageSize: 10 })).total, 2);
+    assert.deepEqual((await listAdminAuditLogs({ query: "Changed", page: 1, pageSize: 10 })).logs.map((log) => log.route), ["/api/admin/roles"]);
+    assert.deepEqual((await listAdminAuditLogs({ query: "user-42", page: 1, pageSize: 10 })).logs.map((log) => log.adminNickname), ["Regular"]);
+    assert.deepEqual((await listAdminAuditLogs({ page: 2, pageSize: 2 })).logs.map((log) => log.statusCode), [401]);
   } finally {
     await closeDatabase();
     if (previousUrl === undefined) delete process.env.DATABASE_URL;
