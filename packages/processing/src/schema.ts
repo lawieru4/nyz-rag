@@ -220,6 +220,19 @@ export const secretSettings = pgTable("secret_settings", {
   updatedAt: timestamptz().notNull().defaultNow(),
 });
 
+// 管理员角色：权限为 admin-permissions.ts 中的权限码（读取时过滤未知项）；停用后使用该角色的管理员没有任何权限。
+export const adminRoles = pgTable("admin_roles", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  description: text().notNull().default(""),
+  permissions: text().array().notNull().default(sql`'{}'::text[]`),
+  disabledAt: timestamptz(),
+  createdAt: timestamptz().notNull().defaultNow(),
+  updatedAt: timestamptz().notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("admin_roles_name_idx").on(table.name),
+]);
+
 // 管理员账号：由超级管理员（或 seed）创建；email 存小写形式；isSuper 仅首个 seed 账号为 true。
 export const adminAccounts = pgTable("admin_accounts", {
   id: text().primaryKey(),
@@ -227,6 +240,8 @@ export const adminAccounts = pgTable("admin_accounts", {
   nickname: text().notNull(),
   passwordHash: text().notNull(),
   isSuper: boolean().notNull().default(false),
+  // 普通管理员的角色（一人一个）；超级管理员拥有全部权限，不分配角色。有管理员使用的角色不能删除。
+  roleId: text().references(() => adminRoles.id, { onDelete: "restrict" }),
   // 修改密码或停用时加一，使已签发的会话全部失效。
   sessionVersion: integer().notNull().default(0),
   disabledAt: timestamptz(),

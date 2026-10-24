@@ -11,7 +11,7 @@ import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
 import SourceCreateDialog from "../components/SourceCreateDialog.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import { client, errorMessage, loadKnowledge, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
+import { can, client, errorMessage, loadKnowledge, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
 
 defineProps<{ title: string }>();
 
@@ -111,7 +111,7 @@ async function startCrawl(source: Source) {
 
 <template>
   <PageHeading eyebrow="KNOWLEDGE OPERATIONS" :title="title" subtitle="管理内容来源与自动同步任务">
-    <Button @click="dialogOpen = true"><Plus /> 添加数据源</Button>
+    <Button v-if="can('sources:manage')" @click="dialogOpen = true"><Plus /> 添加数据源</Button>
   </PageHeading>
 
   <Card class="mb-8 grid grid-cols-2 gap-0 py-0 lg:grid-cols-4" aria-label="数据源概览">
@@ -149,7 +149,7 @@ async function startCrawl(source: Source) {
             <TableCell><StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge></TableCell>
             <TableCell>{{ source.updated }}</TableCell>
             <TableCell>
-              <div class="flex justify-end gap-0.5">
+              <div v-if="can('sources:manage')" class="flex justify-end gap-0.5">
                 <Button variant="ghost" size="icon-sm" :title="syncingSources.has(source.id) ? '同步进行中' : '立即同步'" aria-label="立即同步" :disabled="syncingSources.has(source.id)" @click="startCrawl(source)"><RefreshCw :class="syncingSources.has(source.id) && 'animate-spin'" /></Button>
                 <Button variant="ghost" size="icon-sm" title="暂停或启用" aria-label="暂停或启用" @click="toggleSource(source)"><Pause v-if="source.status === '运行中'" /><Play v-else /></Button>
               </div>
@@ -157,7 +157,7 @@ async function startCrawl(source: Source) {
           </TableRow>
         </TableBody>
       </Table>
-      <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button variant="link" size="sm" class="text-link" @click="dialogOpen = true">添加第一个来源</Button></EmptyState>
+      <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button v-if="can('sources:manage')" variant="link" size="sm" class="text-link" @click="dialogOpen = true">添加第一个来源</Button></EmptyState>
     </Card>
   </section>
 

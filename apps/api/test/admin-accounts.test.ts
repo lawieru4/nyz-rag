@@ -9,6 +9,7 @@
  *  - Non-super access forbidden
  *  - Duplicate email rejected
  *  - Session version invalidation on disable
+ *  - Roles: create/edit/disable/delete, assignment to admins, permissions in the session
  */
 
 import assert from "node:assert/strict";
@@ -17,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { buildTestApp as buildApp } from "./auth-helpers.js";
 import { adminAuth, adminHeaders, memoryAdmins, memoryAuthStore } from "./auth-helpers.js";
 import { hashPassword } from "../src/passwords.js";
-import type { AdminCredentials } from "@nyz-rag/processing";
+import type { MemoryAdminInput } from "./auth-helpers.js";
 
 const queue = {
   hasDocumentJob: async () => false, hasSourceJob: async () => false,
@@ -40,7 +41,7 @@ test("legacy login alias is restricted to the bootstrap super administrator", as
   } finally { await app.close(); }
 });
 
-async function makeAccount(override: Partial<AdminCredentials> = {}): Promise<AdminCredentials> {
+async function makeAccount(override: Partial<MemoryAdminInput> = {}): Promise<MemoryAdminInput> {
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
@@ -149,7 +150,7 @@ test("PATCH /api/admin/admins/:id can disable and re-enable a regular admin; ses
   const now = new Date().toISOString();
   const regularPw = PASSWORD;
   const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
-  const regularAccount: AdminCredentials = {
+  const regularAccount: MemoryAdminInput = {
     id: randomUUID(), email: REGULAR_EMAIL, nickname: "regular",
     passwordHash: await hashPassword(regularPw),
     isSuper: false, sessionVersion: 0, disabled: false, createdAt: now, updatedAt: now,
@@ -228,5 +229,63 @@ test("regular admin is forbidden from all admin-management routes", async () => 
     assert.equal((await app.inject({ url: "/api/admin/admins", headers: { cookie } })).statusCode, 403);
     assert.equal((await app.inject({ method: "POST", url: "/api/admin/admins", headers: { ...adminHeaders, cookie }, payload: { email: "x@y.com", nickname: "x", password: "password123" } })).statusCode, 403);
     assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/admins/${randomUUID()}`, headers: { ...adminHeaders, cookie }, payload: { disabled: true } })).statusCode, 403);
+  } finally { await app.close(); }
+});
+
+test("roles: create, edit, disable and delete; assignment drives the admin's permissions", async () => {
+  const superAccount = await makeAccount({ id: randomUUID(), email: SUPER_EMAIL, isSuper: true });
+  const regularAccount = await makeAccount({ id: randomUUID(), email: REGULAR_EMAIL, isSuper: false });
+  const { repository } = memoryAdmins([superAccount, regularAccount]);
+  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository });
+  try {
+    const headers = { ...adminHeaders, cookie: await loginAs(app, SUPER_EMAIL) };
+    const regularHeaders = { ...adminHeaders, cookie: await loginAs(app, REGULAR_EMAIL) };
+    const session = async () => (await app.inject({ url: "/api/admin/auth/session", headers: regularHeaders })).json();
+    assert.deepEqual((await session()).permissions, []);
+
+    // 创建：管理包含查看，名称去空白后不可重复，未知权限被拒绝。
+    const created = await app.inject({ method: "POST", url: "/api/admin/roles", headers, payload: { name: " 运营 ", description: "日常运营", permissions: ["documents:manage", "chat-logs:view"] } });
+    assert.equal(created.statusCode, 201, created.body);
+    const role = created.json();
+    assert.equal(role.name, "运营");
+    assert.deepEqual(role.permissions, ["documents:view", "documents:manage", "chat-logs:view"]);
+    assert.equal(role.adminCount, 0);
+    assert.equal((await app.inject({ method: "POST", url: "/api/admin/roles", headers, payload: { name: "运营", description: "", permissions: [] } })).statusCode, 409);
+    assert.equal((await app.inject({ method: "POST", url: "/api/admin/roles", headers, payload: { name: "x", description: "", permissions: ["admins:manage"] } })).statusCode, 400);
+    assert.equal((await app.inject({ method: "POST", url: "/api/admin/roles", headers, payload: { name: "  ", description: "", permissions: [] } })).statusCode, 400);
+
+    // 分配角色：会话立即带上权限；超级管理员不能分配角色，角色必须存在。
+    const assigned = await app.inject({ method: "PATCH", url: `/api/admin/admins/${regularAccount.id}`, headers, payload: { roleId: role.id } });
+    assert.equal(assigned.statusCode, 200, assigned.body);
+    assert.equal(assigned.json().roleName, "运营");
+    assert.deepEqual((await session()).permissions, role.permissions);
+    assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/admins/${superAccount.id}`, headers, payload: { roleId: role.id } })).statusCode, 400);
+    assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/admins/${regularAccount.id}`, headers, payload: { roleId: randomUUID() } })).statusCode, 400);
+    assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/admins/${regularAccount.id}`, headers, payload: {} })).statusCode, 400);
+    const withRole = await app.inject({ method: "POST", url: "/api/admin/admins", headers, payload: { email: "ops@example.com", nickname: "ops", password: "password123", roleId: role.id } });
+    assert.equal(withRole.statusCode, 201, withRole.body);
+    assert.equal(withRole.json().roleId, role.id);
+
+    // 编辑与停用：权限随之变化，会话不失效。
+    const edited = await app.inject({ method: "PATCH", url: `/api/admin/roles/${role.id}`, headers, payload: { permissions: ["users:view"] } });
+    assert.equal(edited.statusCode, 200, edited.body);
+    assert.equal(edited.json().adminCount, 2);
+    assert.deepEqual((await session()).permissions, ["users:view"]);
+    assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/roles/${role.id}`, headers, payload: { disabled: true } })).json().disabled, true);
+    assert.deepEqual((await session()).permissions, []);
+    assert.equal((await app.inject({ url: "/api/admin/users", headers: regularHeaders })).statusCode, 403);
+    assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/roles/${role.id}`, headers, payload: {} })).statusCode, 400);
+    assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/roles/${randomUUID()}`, headers, payload: { disabled: false } })).statusCode, 404);
+
+    // 删除：有管理员使用时 409，解除后 204。
+    const inUse = await app.inject({ method: "DELETE", url: `/api/admin/roles/${role.id}`, headers });
+    assert.equal(inUse.statusCode, 409);
+    assert.match(inUse.json().error, /更换角色/);
+    for (const admin of (await app.inject({ url: "/api/admin/admins", headers })).json()) {
+      if (admin.roleId) assert.equal((await app.inject({ method: "PATCH", url: `/api/admin/admins/${admin.id}`, headers, payload: { roleId: null } })).statusCode, 200);
+    }
+    assert.equal((await app.inject({ method: "DELETE", url: `/api/admin/roles/${role.id}`, headers })).statusCode, 204);
+    assert.equal((await app.inject({ method: "DELETE", url: `/api/admin/roles/${role.id}`, headers })).statusCode, 404);
+    assert.deepEqual((await app.inject({ url: "/api/admin/roles", headers })).json(), []);
   } finally { await app.close(); }
 });

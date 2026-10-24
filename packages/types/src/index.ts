@@ -7,6 +7,8 @@ export interface AdminSession {
   username: string;
   expiresAt: string;
   admin: AdminAccount;
+  /** 当前生效的权限：超级管理员为全部；角色停用或未分配角色时为空。 */
+  permissions: AdminPermission[];
 }
 
 export interface AdminAccount {
@@ -15,6 +17,9 @@ export interface AdminAccount {
   nickname: string;
   isSuper: boolean;
   disabled: boolean;
+  /** 超级管理员拥有全部权限，不分配角色。 */
+  roleId: string | null;
+  roleName: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -23,7 +28,39 @@ export interface CreateAdminRequest {
   email: string;
   nickname: string;
   password: string;
+  roleId?: string | null;
 }
+
+/** 停用/启用账号或更换角色，至少提供一项。 */
+export interface UpdateAdminRequest {
+  disabled?: boolean;
+  roleId?: string | null;
+}
+
+/** 管理端权限：模块 × 查看/管理，管理包含查看。问答记录只读。 */
+export type AdminPermissionModule = "sources" | "documents" | "knowledge-bases" | "chat-logs" | "users" | "models";
+export type AdminPermission = `${Exclude<AdminPermissionModule, "chat-logs">}:${"view" | "manage"}` | "chat-logs:view";
+
+export interface AdminRole {
+  id: string;
+  name: string;
+  description: string;
+  permissions: AdminPermission[];
+  disabled: boolean;
+  /** 使用该角色的管理员数量；有管理员使用时不能删除。 */
+  adminCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveAdminRoleRequest {
+  name: string;
+  description: string;
+  permissions: AdminPermission[];
+}
+
+/** 编辑角色或停用/启用，至少提供一项。 */
+export type UpdateAdminRoleRequest = Partial<SaveAdminRoleRequest> & { disabled?: boolean };
 
 export interface UpdateAdminProfileRequest {
   email: string;

@@ -6,6 +6,7 @@ import {
 import type { DocumentListResponse } from "@nyz-rag/types";
 import { pageParams } from "./common.js";
 import type { DocumentQueue } from "./queue.js";
+import { requires } from "./admin-auth.js";
 
 export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = async (app, { queue }) => {
   app.get<{ Params: { id: string } }>("/api/documents/:id", async (request, reply) => {
@@ -14,18 +15,18 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     return document;
   });
 
-  app.get<{ Querystring: { query?: string; sourceId?: string; status?: string; page?: string; pageSize?: string } }>("/api/admin/documents", async (request): Promise<DocumentListResponse> => {
+  app.get<{ Querystring: { query?: string; sourceId?: string; status?: string; page?: string; pageSize?: string } }>("/api/admin/documents", requires("documents:view"), async (request): Promise<DocumentListResponse> => {
     const { query = "", sourceId, status, page = "1", pageSize = "20" } = request.query;
     return listDocuments({ query, sourceId, status, ...pageParams(page, pageSize) });
   });
 
-  app.get<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/admin/documents/:id", requires("documents:view"), async (request, reply) => {
     const document = await getDocument(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     return document;
   });
 
-  app.post<{ Params: { id: string } }>("/api/admin/documents/:id/reprocess", async (request, reply) => {
+  app.post<{ Params: { id: string } }>("/api/admin/documents/:id/reprocess", requires("documents:manage"), async (request, reply) => {
     const document = await getDocumentSummary(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     if (await queue.hasDocumentJob(document)) return reply.code(409).send({ error: "document already has a processing job" });
@@ -40,7 +41,7 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     return reply.code(202).send({ status: "queued", documentId: document.id });
   });
 
-  app.post<{ Params: { id: string } }>("/api/admin/documents/:id/embed", async (request, reply) => {
+  app.post<{ Params: { id: string } }>("/api/admin/documents/:id/embed", requires("documents:manage"), async (request, reply) => {
     const document = await getDocumentSummary(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     if (await queue.hasDocumentJob(document)) return reply.code(409).send({ error: "document already has a processing job" });
@@ -62,7 +63,7 @@ export const documentRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asyn
     return reply.code(202).send({ status: "queued", documentId: document.id });
   });
 
-  app.delete<{ Params: { id: string } }>("/api/admin/documents/:id", async (request, reply) => {
+  app.delete<{ Params: { id: string } }>("/api/admin/documents/:id", requires("documents:manage"), async (request, reply) => {
     const document = await getDocumentSummary(request.params.id);
     if (!document) return reply.code(404).send({ error: "document not found" });
     if (await queue.hasDocumentJob(document)) return reply.code(409).send({ error: "document already has a processing job" });

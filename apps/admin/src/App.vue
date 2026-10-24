@@ -6,7 +6,8 @@ import { ConfirmDialog } from "@nyz-rag/ui/confirm";
 import { Toaster } from "@nyz-rag/ui/components/sonner";
 import { toast } from "@nyz-rag/ui/lib/toast";
 import AdminLogin from "./AdminLogin.vue";
-import { ApiError, client, errorMessage, loadKnowledge, resetKnowledge } from "./workspace";
+import { homePath, routeVisible } from "./router";
+import { ApiError, can, client, errorMessage, loadKnowledge, permissions, resetKnowledge } from "./workspace";
 
 const session = ref<AdminSession | null>(null);
 const route = useRoute();
@@ -15,16 +16,19 @@ const authChecking = ref(true);
 const loginBusy = ref(false);
 const loginError = ref("");
 
-const isSuper = computed(() => session.value?.admin.isSuper ?? false);
-
-const routeAllowed = computed(() => !route.meta.superOnly || isSuper.value);
+const routeAllowed = computed(() => !session.value || routeVisible(route.meta, session.value));
 watch([session, routeAllowed], () => {
-  if (session.value && !routeAllowed.value) void router.replace("/sources");
+  if (session.value && !routeAllowed.value) void router.replace(homePath(session.value));
 });
+
+function setSession(value: AdminSession | null) {
+  session.value = value;
+  permissions.value = value?.permissions ?? [];
+}
 
 // 退出或会话失效时卸载工作区（各模块的数据与弹窗随之清空），并清空共用的数据源列表。
 function resetWorkspace() {
-  session.value = null;
+  setSession(null);
   void router.replace("/sources");
   resetKnowledge();
 }
@@ -36,9 +40,10 @@ client.onUnauthorized = () => {
 };
 
 function enterWorkspace(value: AdminSession) {
-  session.value = value;
+  setSession(value);
   loginError.value = "";
-  loadKnowledge().catch(() => { toast.error("数据源加载失败，请检查 API 服务"); });
+  // 数据源列表供数据源页与文档筛选使用。
+  if (can("sources:view", "documents:view")) loadKnowledge().catch(() => { toast.error("数据源加载失败，请检查 API 服务"); });
 }
 
 async function restoreSession() {
@@ -80,7 +85,7 @@ async function logout() {
 
 // ProfileView 事件：profile 更新后同步 session；密码修改后强制重新登录
 function handleSessionUpdated(updated: AdminSession) {
-  session.value = updated;
+  setSession(updated);
 }
 
 function handleLogoutRequired() {

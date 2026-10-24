@@ -1,21 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { ArticleDetail } from "./article/parse.js";
 import { embeddingInput, summaryEmbeddingInput, type StructuredSection } from "./chunking.js";
+import { ADMIN_PERMISSIONS, normalizeAdminPermissions } from "./admin-permissions.js";
 import { contentFingerprint } from "./dedup.js";
 import type { ModelProviderConfig, ModelSelection, ModelTarget } from "./provider.js";
 import type { ChunkHit, SectionContext } from "./rag.js";
 import { decryptSecret, encryptSecret, providerSecretContext, secretKeyConfigured } from "./secrets.js";
 import { metadataScore, metadataSearchTerms, searchTerms, termCounts, type SearchableMetadata } from "./search-terms.js";
 import type {
-  AdminAccount, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
+  AdminAccount, AdminPermission, AdminRole, AdminUserListResponse, AdminUserRecord, ArticleMetadata, ArticleSourceSyncState, ChatFeedbackRating, ChatLogListResponse, ChatLogRecord, ChatRetrievedChunk, ChatSessionListResponse, ChatSessionMessage,
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelCapability, ModelProviderRecord, ModelSettingRecord, ModelSettingsResponse, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest, SaveModelSettingRequest,
-  SecretSettingStatus,
+  SaveAdminRoleRequest, SecretSettingStatus, UpdateAdminRoleRequest,
 } from "@nyz-rag/types";
 import { getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
-import { adminAccounts, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
+import { adminAccounts, adminRoles, chatMessages, chatSessions, crawlTasks, dataSources, documentChunks, documents, documentSections, HNSW_DIMENSIONS, knowledgeBases, messageChunks, messageSources, modelProviders, modelSettings, secretSettings, users } from "./schema.js";
 
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : undefined;
 // 可选字段在 JSON 中省略而不是返回 null，与原快照格式保持一致。
@@ -1051,7 +1053,20 @@ export async function rateChatMessage(id: string, rating: ChatFeedbackRating, ow
   return (await db.update(chatMessages).set({ rating }).where(and(eq(chatMessages.id, id), ownedBy(chatMessages, owner))).returning({ id: chatMessages.id })).length > 0;
 }
 
-// ---- 管理员账号 ----
+// ---- 管理员账号与角色 ----
+
+/** 管理员账号与角色操作的业务错误，由 API 转为 4xx。 */
+export class AdminAccountError extends Error {
+  constructor(readonly reason: "super-admin-disable" | "super-admin-role" | "role-missing" | "role-in-use" | "role-name-taken") {
+    super(reason);
+    this.name = "AdminAccountError";
+  }
+}
+
+const pgErrorCode = (error: unknown) => {
+  const cause = error as { code?: string; cause?: { code?: string } };
+  return cause.code ?? cause.cause?.code;
+};
 
 /** 管理员登录校验用的账号字段，含密码哈希，只在 API 内使用。 */
 export interface AdminCredentials {
@@ -1062,6 +1077,10 @@ export interface AdminCredentials {
   passwordHash: string;
   sessionVersion: number;
   disabled: boolean;
+  roleId: string | null;
+  roleName: string | null;
+  /** 当前生效的权限：超级管理员为全部；角色停用或未分配角色时为空。 */
+  permissions: AdminPermission[];
   createdAt: string;
   updatedAt: string;
 }
@@ -1070,37 +1089,54 @@ const adminCredentialColumns = {
   id: adminAccounts.id, email: adminAccounts.email, nickname: adminAccounts.nickname, isSuper: adminAccounts.isSuper,
   passwordHash: adminAccounts.passwordHash, sessionVersion: adminAccounts.sessionVersion,
   disabledAt: adminAccounts.disabledAt, createdAt: adminAccounts.createdAt, updatedAt: adminAccounts.updatedAt,
+  roleId: adminAccounts.roleId, roleName: adminRoles.name, roleDisabledAt: adminRoles.disabledAt, rolePermissions: adminRoles.permissions,
 };
-type AdminCredentialRow = { id: string; email: string; nickname: string; isSuper: boolean; passwordHash: string; sessionVersion: number; disabledAt: Date | null; createdAt: Date; updatedAt: Date };
-const toAdminCredentials = ({ disabledAt, createdAt, updatedAt, ...row }: AdminCredentialRow): AdminCredentials =>
-  ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+const selectAdmins = (db: Executor) => db.select(adminCredentialColumns).from(adminAccounts).leftJoin(adminRoles, eq(adminAccounts.roleId, adminRoles.id));
+type AdminCredentialRow = Awaited<ReturnType<typeof selectAdmins>>[number];
 
-const toAdminAccount = ({ passwordHash: _ph, sessionVersion: _sv, disabledAt, createdAt, updatedAt, ...row }: AdminCredentialRow): AdminAccount =>
-  ({ ...row, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+function toAdminCredentials({ disabledAt, createdAt, updatedAt, roleDisabledAt, rolePermissions, ...row }: AdminCredentialRow): AdminCredentials {
+  const permissions = row.isSuper ? [...ADMIN_PERMISSIONS] : rolePermissions && !roleDisabledAt ? normalizeAdminPermissions(rolePermissions) : [];
+  return { ...row, permissions, disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! };
+}
+
+const toAdminAccount = (row: AdminCredentialRow): AdminAccount => {
+  const { passwordHash: _ph, sessionVersion: _sv, permissions: _p, ...account } = toAdminCredentials(row);
+  return account;
+};
+
+async function getAdminAccount(id: string, db: Executor): Promise<AdminAccount | null> {
+  const [row] = await selectAdmins(db).where(eq(adminAccounts.id, id));
+  return row ? toAdminAccount(row) : null;
+}
 
 /** email 须为小写规范形式。by id 或 by email。 */
 export async function getAdminCredentials(by: { id: string } | { email: string }, db: Executor = getDb()): Promise<AdminCredentials | null> {
-  const [row] = await db.select(adminCredentialColumns).from(adminAccounts)
-    .where("id" in by ? eq(adminAccounts.id, by.id) : eq(adminAccounts.email, by.email));
+  const [row] = await selectAdmins(db).where("id" in by ? eq(adminAccounts.id, by.id) : eq(adminAccounts.email, by.email));
   return row ? toAdminCredentials(row) : null;
 }
 
-/** 列出所有管理员账号（不含密码哈希），按创建时间倒序。 */
+/** 列出所有管理员账号（不含密码哈希），按创建时间排序。 */
 export async function listAdminAccounts(db: Executor = getDb()): Promise<AdminAccount[]> {
-  const rows = await db.select(adminCredentialColumns).from(adminAccounts).orderBy(asc(adminAccounts.createdAt), asc(adminAccounts.id));
+  const rows = await selectAdmins(db).orderBy(asc(adminAccounts.createdAt), asc(adminAccounts.id));
   return rows.map(toAdminAccount);
 }
 
-/** 创建管理员账号；邮箱已存在时返回 null。 */
+/** 创建管理员账号；邮箱已存在时返回 null，角色不存在时抛出 AdminAccountError。 */
 export async function createAdminAccount(
-  input: { email: string; nickname: string; passwordHash: string; isSuper?: boolean },
+  input: { email: string; nickname: string; passwordHash: string; isSuper?: boolean; roleId?: string | null },
   db: Executor = getDb(),
 ): Promise<AdminAccount | null> {
-  const [row] = await db.insert(adminAccounts)
-    .values({ id: randomUUID(), email: input.email, nickname: input.nickname, passwordHash: input.passwordHash, isSuper: input.isSuper ?? false })
-    .onConflictDoNothing({ target: adminAccounts.email })
-    .returning(adminCredentialColumns);
-  return row ? toAdminAccount(row) : null;
+  let row: { id: string } | undefined;
+  try {
+    [row] = await db.insert(adminAccounts)
+      .values({ id: randomUUID(), email: input.email, nickname: input.nickname, passwordHash: input.passwordHash, isSuper: input.isSuper ?? false, roleId: input.isSuper ? null : input.roleId ?? null })
+      .onConflictDoNothing({ target: adminAccounts.email })
+      .returning({ id: adminAccounts.id });
+  } catch (error) {
+    if (pgErrorCode(error) === "23503") throw new AdminAccountError("role-missing");
+    throw error;
+  }
+  return row ? getAdminAccount(row.id, db) : null;
 }
 
 /**
@@ -1141,23 +1177,95 @@ export async function updateAdminProfile(
   try {
     const [row] = await db.update(adminAccounts)
       .set({ email: input.email, nickname: input.nickname, updatedAt: sql`now()` })
-      .where(eq(adminAccounts.id, id)).returning(adminCredentialColumns);
-    return row ? toAdminAccount(row) : null;
+      .where(eq(adminAccounts.id, id)).returning({ id: adminAccounts.id });
+    return row ? getAdminAccount(row.id, db) : null;
   } catch (error) {
-    const cause = error as { code?: string; cause?: { code?: string } };
-    if (cause.code === "23505" || cause.cause?.code === "23505") return null;
+    if (pgErrorCode(error) === "23505") return null;
     throw error;
   }
 }
 
-/** 停用/启用管理员账号；停用时使会话失效。超级管理员禁止停用。账号不存在时返回 null。 */
-export async function setAdminDisabled(id: string, disabled: boolean, db: Executor = getDb()): Promise<AdminAccount | null> {
+/**
+ * 停用/启用管理员账号或更换角色；停用时使会话失效（角色与权限每次请求重新读取，换角色无需失效）。
+ * 超级管理员不能停用、不能分配角色；账号不存在时返回 null。
+ */
+export async function updateAdminAccount(
+  id: string,
+  input: { disabled?: boolean; roleId?: string | null },
+  db: Executor = getDb(),
+): Promise<AdminAccount | null> {
   const [existing] = await db.select({ isSuper: adminAccounts.isSuper }).from(adminAccounts).where(eq(adminAccounts.id, id));
   if (!existing) return null;
-  if (existing.isSuper && disabled) throw new Error("super admin cannot be disabled");
-  const [row] = await db.update(adminAccounts).set(disabled
-    ? { disabledAt: sql`COALESCE(${adminAccounts.disabledAt}, now())`, sessionVersion: sql`${adminAccounts.sessionVersion} + 1`, updatedAt: sql`now()` }
-    : { disabledAt: null, updatedAt: sql`now()` })
-    .where(eq(adminAccounts.id, id)).returning(adminCredentialColumns);
-  return row ? toAdminAccount(row) : null;
+  if (existing.isSuper && input.disabled) throw new AdminAccountError("super-admin-disable");
+  if (existing.isSuper && input.roleId) throw new AdminAccountError("super-admin-role");
+  const changes: PgUpdateSetSource<typeof adminAccounts> = { updatedAt: sql`now()` };
+  if (input.disabled === true) {
+    changes.disabledAt = sql`COALESCE(${adminAccounts.disabledAt}, now())`;
+    changes.sessionVersion = sql`${adminAccounts.sessionVersion} + 1`;
+  } else if (input.disabled === false) {
+    changes.disabledAt = null;
+  }
+  if (input.roleId !== undefined) changes.roleId = input.roleId;
+  try {
+    await db.update(adminAccounts).set(changes).where(eq(adminAccounts.id, id));
+  } catch (error) {
+    if (pgErrorCode(error) === "23503") throw new AdminAccountError("role-missing");
+    throw error;
+  }
+  return getAdminAccount(id, db);
+}
+
+const adminRoleColumns = { ...getTableColumns(adminRoles), adminCount: sql<number>`count(${adminAccounts.id})::int` };
+const selectRoles = (db: Executor) => db.select(adminRoleColumns).from(adminRoles)
+  .leftJoin(adminAccounts, eq(adminAccounts.roleId, adminRoles.id)).groupBy(adminRoles.id);
+type AdminRoleRow = Awaited<ReturnType<typeof selectRoles>>[number];
+const toAdminRole = ({ permissions, disabledAt, createdAt, updatedAt, ...row }: AdminRoleRow): AdminRole =>
+  ({ ...row, permissions: normalizeAdminPermissions(permissions), disabled: disabledAt !== null, createdAt: iso(createdAt)!, updatedAt: iso(updatedAt)! });
+
+export async function listAdminRoles(db: Executor = getDb()): Promise<AdminRole[]> {
+  return (await selectRoles(db).orderBy(asc(adminRoles.createdAt), asc(adminRoles.id))).map(toAdminRole);
+}
+
+export async function getAdminRole(id: string, db: Executor = getDb()): Promise<AdminRole | null> {
+  const [row] = await selectRoles(db).where(eq(adminRoles.id, id));
+  return row ? toAdminRole(row) : null;
+}
+
+/** 创建角色；名称重复时抛出 AdminAccountError。 */
+export async function createAdminRole(input: SaveAdminRoleRequest, db: Executor = getDb()): Promise<AdminRole> {
+  const id = randomUUID();
+  try {
+    await db.insert(adminRoles).values({ id, name: input.name, description: input.description, permissions: normalizeAdminPermissions(input.permissions) });
+  } catch (error) {
+    if (pgErrorCode(error) === "23505") throw new AdminAccountError("role-name-taken");
+    throw error;
+  }
+  return (await getAdminRole(id, db))!;
+}
+
+/** 编辑角色或停用/启用；角色不存在时返回 null，名称重复时抛出 AdminAccountError。 */
+export async function updateAdminRole(id: string, input: UpdateAdminRoleRequest, db: Executor = getDb()): Promise<AdminRole | null> {
+  const changes: PgUpdateSetSource<typeof adminRoles> = { updatedAt: sql`now()` };
+  if (input.name !== undefined) changes.name = input.name;
+  if (input.description !== undefined) changes.description = input.description;
+  if (input.permissions !== undefined) changes.permissions = normalizeAdminPermissions(input.permissions);
+  if (input.disabled !== undefined) changes.disabledAt = input.disabled ? sql`COALESCE(${adminRoles.disabledAt}, now())` : null;
+  try {
+    const updated = await db.update(adminRoles).set(changes).where(eq(adminRoles.id, id)).returning({ id: adminRoles.id });
+    if (!updated.length) return null;
+  } catch (error) {
+    if (pgErrorCode(error) === "23505") throw new AdminAccountError("role-name-taken");
+    throw error;
+  }
+  return getAdminRole(id, db);
+}
+
+/** 删除角色；有管理员使用时抛出 AdminAccountError（外键 RESTRICT），角色不存在时返回 false。 */
+export async function deleteAdminRole(id: string, db: Executor = getDb()): Promise<boolean> {
+  try {
+    return (await db.delete(adminRoles).where(eq(adminRoles.id, id)).returning({ id: adminRoles.id })).length > 0;
+  } catch (error) {
+    if (["23001", "23503"].includes(pgErrorCode(error) ?? "")) throw new AdminAccountError("role-in-use");
+    throw error;
+  }
 }

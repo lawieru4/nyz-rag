@@ -14,7 +14,7 @@ import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { usePaginatedList } from "../composables/usePaginatedList";
-import { client, errorMessage, loadKnowledge, pageSize, sourceName, sources } from "../workspace";
+import { can, client, errorMessage, loadKnowledge, pageSize, sourceName, sources } from "../workspace";
 import DocumentDetailSheet from "./DocumentDetailSheet.vue";
 import { documentBusy, documentStatuses, embeddingStatuses, processingLabel } from "./documents";
 
@@ -135,10 +135,10 @@ async function deleteDocument(document: DocumentSummary) {
           <TableCell>{{ new Date(document.updatedAt).toLocaleString() }}</TableCell>
           <TableCell>
             <div class="flex justify-end gap-0.5">
-              <Button variant="ghost" size="sm" class="h-8 px-2 text-xs" :disabled="documentBusy(document) || !document.chunkCount" title="向量化或重试" @click="embedDocument(document)">向量化</Button>
-              <Button variant="ghost" size="icon-sm" :disabled="documentBusy(document)" title="重新清洗与切片" aria-label="重新清洗与切片" @click="reprocessDocument(document)"><RefreshCw /></Button>
+              <Button v-if="can('documents:manage')" variant="ghost" size="sm" class="h-8 px-2 text-xs" :disabled="documentBusy(document) || !document.chunkCount" title="向量化或重试" @click="embedDocument(document)">向量化</Button>
+              <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" :disabled="documentBusy(document)" title="重新清洗与切片" aria-label="重新清洗与切片" @click="reprocessDocument(document)"><RefreshCw /></Button>
               <Button variant="ghost" size="icon-sm" title="查看详情" aria-label="查看详情" @click="openDocument(document.id)"><ArrowUpRight /></Button>
-              <Button variant="ghost" size="icon-sm" class="hover:text-destructive" :disabled="documentBusy(document)" title="删除文档" aria-label="删除文档" @click="deleteDocument(document)"><Trash2 /></Button>
+              <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" class="hover:text-destructive" :disabled="documentBusy(document)" title="删除文档" aria-label="删除文档" @click="deleteDocument(document)"><Trash2 /></Button>
             </div>
           </TableCell>
         </TableRow>

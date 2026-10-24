@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
 import { toast } from "@nyz-rag/ui/lib/toast";
-import { client, errorMessage } from "../workspace";
+import { can, client, errorMessage } from "../workspace";
 
 // nyzdata 接口 token：全局一个，只能设置或清除，后台不显示已保存的值。
 const tokenStatus = ref<SecretSettingStatus | null>(null);
@@ -64,7 +64,7 @@ async function clearToken() {
         <template v-else>所有文章来源共用；未配置时同步会失败。</template>
       </p>
     </div>
-    <div class="flex gap-1.5">
+    <div v-if="can('sources:manage')" class="flex gap-1.5">
       <Button variant="outline" size="sm" :disabled="tokenStatus?.encryptionReady === false" @click="tokenDialogOpen = true">{{ tokenStatus?.configured ? '更换' : '设置' }}</Button>
       <Button v-if="tokenStatus?.configured" variant="outline" size="sm" class="text-destructive hover:text-destructive" @click="clearToken">清除</Button>
     </div>

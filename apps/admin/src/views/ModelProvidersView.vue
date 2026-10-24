@@ -13,7 +13,7 @@ import StatusBadge from "../components/StatusBadge.vue";
 import ModelProviderDialog from "../components/model-providers/ModelProviderDialog.vue";
 import ModelSettingDialog from "../components/model-providers/ModelSettingDialog.vue";
 import { capabilities, type Capability } from "../components/model-providers/capabilities";
-import { client, errorMessage } from "../workspace";
+import { can, client, errorMessage } from "../workspace";
 
 type ModelProvider = ModelProviderRecord;
 const json = { "content-type": "application/json" };
@@ -98,7 +98,7 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
 
 <template>
   <PageHeading eyebrow="MODEL PROVIDERS" title="模型配置" subtitle="供应商提供连接，业务模型选择各用途使用的模型">
-    <Button @click="editProvider()"><Plus /> 添加供应商</Button>
+    <Button v-if="can('models:manage')" @click="editProvider()"><Plus /> 添加供应商</Button>
   </PageHeading>
 
   <Card class="mb-5 gap-0 py-0">
@@ -117,12 +117,12 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
         </div>
         <p class="mt-1 text-xs text-muted-foreground">{{ capability.description }}</p>
       </div>
-      <div class="flex flex-wrap gap-1.5">
+      <div v-if="can('models:manage')" class="flex flex-wrap gap-1.5">
         <Button variant="outline" :disabled="!enabledProviders.length" @click="editSetting(capability)">{{ settings[capability.id] ? '更换' : '设置' }}</Button>
         <Button v-if="settings[capability.id]" variant="outline" class="text-destructive hover:text-destructive" @click="clearSetting(capability)">清除</Button>
       </div>
     </article>
-    <p v-if="!enabledProviders.length" class="border-t px-5 py-3 text-xs text-muted-foreground">请先在下方添加并启用供应商。</p>
+    <p v-if="!enabledProviders.length && can('models:manage')" class="border-t px-5 py-3 text-xs text-muted-foreground">请先在下方添加并启用供应商。</p>
   </Card>
 
   <Card class="min-h-60 gap-0 py-0">
@@ -139,13 +139,13 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
           <div class="grid min-w-22 gap-1"><dt class="text-[11px] text-muted-foreground">API 密钥</dt><dd class="font-mono text-xs break-words">{{ credentialLabel(provider) }}</dd></div>
         </dl>
       </div>
-      <div class="flex flex-wrap gap-1.5">
+      <div v-if="can('models:manage')" class="flex flex-wrap gap-1.5">
         <Button variant="outline" @click="editProvider(provider)">编辑</Button>
         <Button variant="outline" @click="toggle(provider)">{{ provider.enabled ? '停用' : '启用' }}</Button>
         <Button variant="outline" class="text-destructive hover:text-destructive" :disabled="usedBy(provider).length > 0" :title="usedBy(provider).length ? '正在被业务模型使用，请先更换' : undefined" @click="remove(provider)">删除</Button>
       </div>
     </article>
-    <EmptyState v-if="!providers.length" class="border-t">尚未配置模型供应商 <Button variant="link" size="sm" class="text-link" @click="editProvider()">添加第一个供应商</Button></EmptyState>
+    <EmptyState v-if="!providers.length" class="border-t">尚未配置模型供应商 <Button v-if="can('models:manage')" variant="link" size="sm" class="text-link" @click="editProvider()">添加第一个供应商</Button></EmptyState>
     <p class="border-t px-5 py-4 text-xs leading-relaxed text-muted-foreground">供应商只保存服务地址和 API Key（加密保存，需在 API 与 Worker 环境配置 NYZ_SECRET_KEY）。系统会在 API 地址后追加 /embeddings、/chat/completions、/rerank 或 /models。</p>
   </Card>
 

@@ -1,5 +1,5 @@
 import { ref } from "vue";
-import type { KnowledgeOverview } from "@nyz-rag/types";
+import type { AdminPermission, KnowledgeOverview } from "@nyz-rag/types";
 import { AdminApiClient, ApiError } from "./adminClient";
 
 export { ApiError };
@@ -13,6 +13,14 @@ export type Task = {
 
 export const client = new AdminApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
 export const pageSize = 10;
+
+/**
+ * 当前管理员生效的权限（超级管理员为全部），随会话设置与清空。
+ * 界面据此隐藏无权执行的操作；服务端仍对每个请求单独校验。
+ */
+export const permissions = ref<readonly AdminPermission[]>([]);
+/** 是否具备其中任一权限。 */
+export const can = (...required: AdminPermission[]) => required.some((permission) => permissions.value.includes(permission));
 
 /** 数据源与任务由多个模块共用（文档筛选、来源名称），退出登录时清空。 */
 export const sources = ref<Source[]>([]);

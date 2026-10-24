@@ -13,7 +13,7 @@ import { toast } from "@nyz-rag/ui/lib/toast";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import { client } from "../workspace";
+import { can, client } from "../workspace";
 
 const emptyForm = (): SaveKnowledgeBaseRequest => ({ name: "", description: "", topK: 5, similarityThreshold: 0.35, rerankEnabled: false, maxContextLength: 6000, prompt: "请依据提供的知识库内容回答问题；若资料不足，请明确说明。", model: "默认模型" });
 const knowledgeBases = ref<KnowledgeBaseRecord[]>([]);
@@ -51,7 +51,7 @@ async function save() {
 
 <template>
   <PageHeading eyebrow="RETRIEVAL CONFIGURATION" title="知识库" subtitle="维护召回策略、上下文和回答指令">
-    <Button @click="edit()"><Plus /> 新建知识库</Button>
+    <Button v-if="can('knowledge-bases:manage')" @click="edit()"><Plus /> 新建知识库</Button>
   </PageHeading>
   <Card class="min-h-72 gap-0 py-0">
     <div class="px-5 py-4"><h2 class="text-sm font-semibold">知识库配置</h2><p class="mt-1 text-xs text-muted-foreground">{{ knowledgeBases.length }} 个知识库</p></div>
@@ -65,9 +65,9 @@ async function save() {
           </div>
         </dl>
       </div>
-      <Button variant="outline" class="flex-none" @click="edit(item)">编辑配置</Button>
+      <Button v-if="can('knowledge-bases:manage')" variant="outline" class="flex-none" @click="edit(item)">编辑配置</Button>
     </article>
-    <EmptyState v-if="!knowledgeBases.length" class="border-t">尚未创建知识库 <Button variant="link" size="sm" class="text-link" @click="edit()">创建第一个知识库</Button></EmptyState>
+    <EmptyState v-if="!knowledgeBases.length" class="border-t">尚未创建知识库 <Button v-if="can('knowledge-bases:manage')" variant="link" size="sm" class="text-link" @click="edit()">创建第一个知识库</Button></EmptyState>
   </Card>
 
   <Dialog v-model:open="dialogOpen">

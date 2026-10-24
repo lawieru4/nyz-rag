@@ -4,6 +4,7 @@ import type { ServerResponse } from "node:http";
 import type { FastifyInstance } from "fastify";
 import type { KnowledgeOverview } from "@nyz-rag/types";
 import { getStats, listSources, listTasks } from "@nyz-rag/processing";
+import { requires } from "./admin-auth.js";
 
 export interface OverviewEventsOptions {
   load?: () => Promise<KnowledgeOverview>;
@@ -71,7 +72,7 @@ export function knowledgeEventRoutes(app: FastifyInstance, options: OverviewEven
   const streams = new Set<ServerResponse>();
   app.addHook("preClose", async () => { for (const stream of streams) stream.end(); });
 
-  app.get("/api/admin/knowledge/events", async (_request, reply) => {
+  app.get("/api/admin/knowledge/events", requires("sources:view", "documents:view"), async (_request, reply) => {
     reply.hijack();
     const raw = reply.raw;
     // 已由插件（如 CORS、鉴权钩子）设置在 reply 上的响应头需手动带到原始响应。

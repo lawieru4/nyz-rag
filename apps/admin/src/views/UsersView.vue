@@ -12,7 +12,7 @@ import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { usePaginatedList } from "../composables/usePaginatedList";
-import { client, errorMessage, pageSize } from "../workspace";
+import { can, client, errorMessage, pageSize } from "../workspace";
 
 const { items: users, total, query, page, loading, load: loadUsers, search } = usePaginatedList<AdminUserRecord>({
   pageSize,
@@ -57,7 +57,7 @@ async function toggleUser(user: AdminUserRecord) {
           <TableCell>{{ user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : '—' }}</TableCell>
           <TableCell>
             <div class="flex justify-end">
-              <Button :variant="user.disabled ? 'outline' : 'ghost'" size="sm" :class="!user.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'" @click="toggleUser(user)">{{ user.disabled ? '启用' : '停用' }}</Button>
+              <Button v-if="can('users:manage')" :variant="user.disabled ? 'outline' : 'ghost'" size="sm" :class="!user.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'" @click="toggleUser(user)">{{ user.disabled ? '启用' : '停用' }}</Button>
             </div>
           </TableCell>
         </TableRow>
