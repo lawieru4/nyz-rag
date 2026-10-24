@@ -150,6 +150,12 @@
   - **管理端概览**：数据源/任务概览移到 `knowledge-overview.ts`，只采用最近一次请求的结果；请求发出后收到过 SSE 快照（完整快照）则丢弃请求结果；退出登录后旧请求、旧推送都不再写入；推送的 JSON 格式错误时忽略。
   - **管理端写操作**：数据源、知识库、模型供应商与业务模型、接口 Token 的表单提交期间禁用并禁止关闭弹窗；数据源启停/同步、文档重处理/向量化/删除、供应商启停/删除、用户启停按 ID 防重复提交（`usePending`）；写入成功后刷新失败只提示刷新失败（`refreshAfterWrite`），不再误报写入失败；模型列表请求在切换供应商（含 A→B→A）与关闭弹窗时失效。
   - **未做**：会话历史「加载更多」。
+- 本轮完成（契约与验证门禁，2026-10-24）：
+  - **测试归属**：AdminApiClient 的测试从 api-client 移到 admin（`test/adminClient.test.ts`），api-client 的测试不再引用应用代码；api-client 改为可擦除语法、包内导入写 `.ts`，web/admin 的源码与测试可在 Node 中直接引用它（web 的会话错误分类改回 `instanceof ApiError`）。
+  - **测试类型检查**：web、admin 新增 `tsconfig.test.json`（加 devDependency `@types/node`），`vue-tsc -b` 覆盖 `test/*.ts`；两端与 api-client 开启 `erasableSyntaxOnly`。修正 web 测试中缺少 `messageCount` 的会话 fixture。
+  - **请求 DTO**：两端请求体用 `satisfies` 对照 `@nyz-rag/types` 的请求类型（登录、Token、数据源、管理员、角色、个人资料、用户、供应商启停、知识库、反馈、验证码、改密码）。
+  - **门禁**：API 测试断言每条路由声明统一的错误响应（含 403，只输出 `{ error }`）；根目录新增 `pnpm test`（各包测试，失败也继续并汇总）与 `pnpm verify`（构建 + 类型检查 + 测试）。
+  - 验证：`pnpm verify` 通过；processing 120 项（107 通过、13 跳过）、API 120 项（118 通过、2 跳过）、api-client 18 项、web 22 项、admin 29 项全部无失败。未做浏览器验证。
 
 ## 向量化运行配置
 

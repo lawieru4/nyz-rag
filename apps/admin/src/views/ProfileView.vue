@@ -35,7 +35,7 @@ async function saveProfile() {
     const updated = await client.request<AdminSession>("/api/admin/auth/profile", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: profileForm.value.email.trim(), nickname: profileForm.value.nickname.trim() }),
+      body: JSON.stringify({ email: profileForm.value.email.trim(), nickname: profileForm.value.nickname.trim() } satisfies UpdateAdminProfileRequest),
     });
     emit("session-updated", updated);
     toast.success("个人资料已更新");
@@ -66,7 +66,7 @@ async function changePassword() {
     await client.request("/api/admin/auth/password", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ currentPassword: passwordForm.value.currentPassword, newPassword: passwordForm.value.newPassword }),
+      body: JSON.stringify({ currentPassword: passwordForm.value.currentPassword, newPassword: passwordForm.value.newPassword } satisfies ChangeAdminPasswordRequest),
     });
     toast.success("密码已修改，请重新登录");
     emit("logout-required");

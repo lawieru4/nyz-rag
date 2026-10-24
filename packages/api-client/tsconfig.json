@@ -7,6 +7,8 @@
     "declaration": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
   "include": ["src", "test"]

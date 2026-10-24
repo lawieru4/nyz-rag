@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { KeyRound } from "@lucide/vue";
-import type { SecretSettingStatus } from "@nyz-rag/types";
+import type { SaveSecretSettingRequest, SecretSettingStatus } from "@nyz-rag/types";
 import { Badge } from "@nyz-rag/ui/components/badge";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
@@ -34,7 +34,7 @@ async function saveToken() {
   if (saving.value) return;
   saving.value = true;
   try {
-    tokenStatus.value = await client.request<SecretSettingStatus>(tokenPath, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: tokenValue.value.trim() }) });
+    tokenStatus.value = await client.request<SecretSettingStatus>(tokenPath, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: tokenValue.value.trim() } satisfies SaveSecretSettingRequest) });
     tokenValue.value = "";
     tokenDialogOpen.value = false;
     toast.success("接口 Token 已保存，下次同步生效");

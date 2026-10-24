@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { LoaderCircle, Plus } from "@lucide/vue";
-import type { AdminPermission, AdminRole, SaveAdminRoleRequest } from "@nyz-rag/types";
+import type { AdminPermission, AdminRole, SaveAdminRoleRequest, UpdateAdminRoleRequest } from "@nyz-rag/types";
 import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
 import { Badge } from "@nyz-rag/ui/components/badge";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -87,7 +87,7 @@ async function saveRole() {
     const saved = await client.request<AdminRole>(`/api/admin/roles${editing ? `/${editing}` : ""}`, {
       method: editing ? "PATCH" : "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, description: form.value.description.trim(), permissions: form.value.permissions }),
+      body: JSON.stringify({ name, description: form.value.description.trim(), permissions: form.value.permissions } satisfies SaveAdminRoleRequest),
     });
     roles.value = editing ? roles.value.map((role) => role.id === saved.id ? saved : role) : [...roles.value, saved];
     dialogOpen.value = false;
@@ -116,7 +116,7 @@ async function toggleRole(role: AdminRole) {
     const updated = await client.request<AdminRole>(`/api/admin/roles/${role.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ disabled: willDisable }),
+      body: JSON.stringify({ disabled: willDisable } satisfies UpdateAdminRoleRequest),
     });
     roles.value = roles.value.map((item) => item.id === updated.id ? updated : item);
     toast.success(updated.disabled ? `已停用 ${updated.name}` : `已启用 ${updated.name}`);

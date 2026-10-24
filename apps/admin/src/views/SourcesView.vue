@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
 import { Check, Clock, Database, FileText, Info, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
+import type { UpdateSourceStatusRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { Progress } from "@nyz-rag/ui/components/progress";
@@ -95,7 +96,7 @@ function toggleSource(source: Source) {
   return run(source.id, async () => {
     const status = source.status === "运行中" ? "已暂停" : "运行中";
     try {
-      await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status }) });
+      await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status } satisfies UpdateSourceStatusRequest) });
     } catch {
       toast.error("数据源状态更新失败，请检查 API 服务");
       return;

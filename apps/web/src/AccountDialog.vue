@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
-import type { UserAccount, UserSessionResponse } from "@nyz-rag/types";
+import type { ChangePasswordRequest, EmailCodeRequest, UserAccount, UserSessionResponse } from "@nyz-rag/types";
 import { errorMessage } from "@nyz-rag/api-client";
 import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -64,7 +64,7 @@ async function sendCode() {
   sending.value = true;
   try {
     await client.request(props.mode === "register" ? "/api/auth/register/code" : "/api/auth/password-reset/code", {
-      method: "POST", body: JSON.stringify({ email: email.value.trim() }),
+      method: "POST", body: JSON.stringify({ email: email.value.trim() } satisfies EmailCodeRequest),
     });
     info.value = props.mode === "register" ? "邮件已发送，请查收验证码（10 分钟内有效）。" : "如果该邮箱已注册，验证码将发送到该邮箱（10 分钟内有效）。";
     startCooldown();
@@ -86,7 +86,7 @@ async function submit() {
   busy.value = true;
   try {
     if (props.mode === "password") {
-      await client.request("/api/auth/password", { method: "POST", body: JSON.stringify({ currentPassword: currentPassword.value, password: password.value }) });
+      await client.request("/api/auth/password", { method: "POST", body: JSON.stringify({ currentPassword: currentPassword.value, password: password.value } satisfies ChangePasswordRequest) });
       emit("password-changed");
       return;
     }

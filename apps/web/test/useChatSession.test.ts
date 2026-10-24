@@ -1,20 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { effectScope } from "vue";
-import type { ApiClient, StreamCallbacks } from "@nyz-rag/api-client";
+import { ApiError, type ApiClient, type StreamCallbacks } from "@nyz-rag/api-client";
 import type { ChatSessionMessage, ChatSessionRecord, RetrievalFilters } from "@nyz-rag/types";
 import { useChatSession } from "../src/composables/useChatSession.ts";
 
-const record: ChatSessionRecord = { id: "session-1", title: "History", createdAt: "2026-10-24", updatedAt: "2026-10-24" };
+const record: ChatSessionRecord = { id: "session-1", title: "History", messageCount: 1, createdAt: "2026-10-24", updatedAt: "2026-10-24" };
 const saved: ChatSessionMessage = {
   id: "message-1", question: "Question", answer: "Original answer", answerMode: "generated",
   sources: [{ documentId: "doc-1", title: "Article", url: "https://example.com", excerpts: [{ sectionPath: ["Section"], text: "Evidence" }] }],
   rating: "positive", createdAt: "2026-10-24",
 };
 
-/** 与 ApiError 相同的形状：带 HTTP 状态码的错误。 */
 function apiError(status: number) {
-  return Object.assign(new Error(`HTTP ${status}`), { status });
+  return new ApiError(status, `HTTP ${status}`);
 }
 
 function deferred() {

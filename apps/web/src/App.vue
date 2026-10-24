@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { ArrowUpRight, KeyRound, LogOut, Menu, SlidersHorizontal, Square, SquarePen, X } from "@lucide/vue";
 import type {
-  ChatFeedbackRating, KnowledgeStats,
+  ChatFeedbackRating, ChatFeedbackRequest, KnowledgeStats,
   RetrievalFilters, UserAccount, UserSessionResponse,
 } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -213,7 +213,7 @@ async function sendFeedback(turn: ChatTurnState, rating: ChatFeedbackRating) {
   if (!turn.id || turn.feedbackBusy || turn.rating) return;
   turn.feedbackBusy = true;
   try {
-    await api(`/api/messages/${turn.id}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating }) });
+    await api(`/api/messages/${turn.id}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating } satisfies ChatFeedbackRequest) });
     turn.rating = rating;
   } catch {
     toast.error("评价提交失败，请稍后重试。");

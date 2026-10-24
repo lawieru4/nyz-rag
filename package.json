@@ -6,6 +6,8 @@
     "dev": "pnpm --filter @nyz-rag/processing build && pnpm --parallel --filter @nyz-rag/api --filter @nyz-rag/web --filter @nyz-rag/worker dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm --filter @nyz-rag/processing build && pnpm -r typecheck",
+    "test": "pnpm --filter @nyz-rag/processing build && pnpm -r --if-present --no-bail --workspace-concurrency=1 test",
+    "verify": "pnpm build && pnpm -r typecheck && pnpm -r --if-present --no-bail --workspace-concurrency=1 test",
     "db:migrate": "pnpm --filter @nyz-rag/processing db:migrate",
     "db:reindex-search": "pnpm --filter @nyz-rag/processing db:reindex-search",
     "evaluate:retrieval": "pnpm --filter @nyz-rag/processing evaluate:retrieval",

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Search } from "@lucide/vue";
-import type { AdminUserListResponse, AdminUserRecord } from "@nyz-rag/types";
+import type { AdminUserListResponse, AdminUserRecord, UpdateUserRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { confirm } from "@nyz-rag/ui/confirm";
@@ -31,7 +31,7 @@ async function toggleUser(user: AdminUserRecord) {
   if (!user.disabled && !await confirm({ title: "停用账号", description: `确定停用账号“${user.email}”？该账号将立即退出登录且不能再登录，会话与问答记录保留。`, confirmText: "停用", destructive: true })) return;
   await run(user.id, async () => {
     try {
-      const updated = await client.request<AdminUserRecord>(`/api/admin/users/${user.id}`, { method: "PATCH", body: JSON.stringify({ disabled: !user.disabled }) });
+      const updated = await client.request<AdminUserRecord>(`/api/admin/users/${user.id}`, { method: "PATCH", body: JSON.stringify({ disabled: !user.disabled } satisfies UpdateUserRequest) });
       users.value = users.value.map((item) => item.id === updated.id ? updated : item);
       toast.success(updated.disabled ? `已停用 ${updated.email}` : `已启用 ${updated.email}`);
     } catch (err) {

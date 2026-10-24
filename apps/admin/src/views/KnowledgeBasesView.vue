@@ -41,7 +41,7 @@ async function save() {
   const editing = Boolean(editingId.value);
   saving.value = true;
   try {
-    await client.request(`/api/admin/knowledge-bases${editing ? `/${editingId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(form.value) });
+    await client.request(`/api/admin/knowledge-bases${editing ? `/${editingId.value}` : ""}`, { method: editing ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(form.value satisfies SaveKnowledgeBaseRequest) });
   } catch (err) {
     toast.error(errorMessage(err, "知识库保存失败，请检查配置"));
     return;

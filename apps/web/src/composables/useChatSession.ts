@@ -1,5 +1,5 @@
 import { computed, onScopeDispose, ref } from "vue";
-import type { ApiClient } from "@nyz-rag/api-client";
+import { ApiError, type ApiClient } from "@nyz-rag/api-client";
 import type {
   ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse,
   ChatSessionRecord, ChatSource, ChatStreamRequest, RetrievalFilters,
@@ -23,9 +23,7 @@ const SESSION_KEY = "nyz-rag:session";
 
 /** 会话不存在或不属于当前身份（他人的会话一律 404），本地引用应清除；其余错误（网络、5xx）可重试。 */
 function sessionGone(error: unknown) {
-  // 按 ApiError 的 status 判断（不在运行时引用 api-client，测试直接以 Node 运行源码）。
-  const status = (error as { status?: unknown } | null)?.status;
-  return status === 404 || status === 400;
+  return error instanceof ApiError && (error.status === 404 || error.status === 400);
 }
 
 export function useChatSession(options: {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { LoaderCircle, Plus } from "@lucide/vue";
-import type { AdminAccount, AdminRole, CreateAdminRequest } from "@nyz-rag/types";
+import type { AdminAccount, AdminRole, CreateAdminRequest, UpdateAdminRequest } from "@nyz-rag/types";
 import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
@@ -65,7 +65,7 @@ async function createAdmin() {
       body: JSON.stringify({
         email: form.value.email.trim(), nickname: form.value.nickname.trim(), password: form.value.password,
         roleId: form.value.roleId === NO_ROLE ? null : form.value.roleId,
-      }),
+      } satisfies CreateAdminRequest),
     });
     admins.value = [...admins.value, created];
     form.value = { email: "", nickname: "", password: "", roleId: NO_ROLE };
@@ -86,7 +86,7 @@ async function changeRole(admin: AdminAccount, value: string) {
     const updated = await client.request<AdminAccount>(`/api/admin/admins/${admin.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ roleId }),
+      body: JSON.stringify({ roleId } satisfies UpdateAdminRequest),
     });
     admins.value = admins.value.map((a) => a.id === updated.id ? updated : a);
     toast.success(updated.roleName ? `${updated.nickname} 的角色已改为 ${updated.roleName}` : `已取消 ${updated.nickname} 的角色`);
@@ -112,7 +112,7 @@ async function toggleAdmin(admin: AdminAccount) {
     const updated = await client.request<AdminAccount>(`/api/admin/admins/${admin.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ disabled: willDisable }),
+      body: JSON.stringify({ disabled: willDisable } satisfies UpdateAdminRequest),
     });
     admins.value = admins.value.map((a) => a.id === updated.id ? updated : a);
     toast.success(updated.disabled ? `已停用 ${updated.nickname}` : `已启用 ${updated.nickname}`);

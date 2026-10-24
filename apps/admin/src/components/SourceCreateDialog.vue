@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import type { CreateSourceRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
 import { Input } from "@nyz-rag/ui/components/input";
@@ -30,7 +31,7 @@ async function addSource() {
   }
   saving.value = true;
   try {
-    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url, kind: "文章 API" }) });
+    await client.request("/api/admin/sources", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form.value, name, url, kind: "文章 API" } satisfies CreateSourceRequest) });
   } catch (err) {
     toast.error(errorMessage(err, "数据源添加失败"));
     return;

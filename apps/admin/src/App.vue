@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import type { AdminSession } from "@nyz-rag/types";
+import type { AdminLoginRequest, AdminSession } from "@nyz-rag/types";
 import { ConfirmDialog } from "@nyz-rag/ui/confirm";
 import { Toaster } from "@nyz-rag/ui/components/sonner";
 import { toast } from "@nyz-rag/ui/lib/toast";
@@ -64,7 +64,7 @@ async function login(username: string, password: string) {
   loginBusy.value = true;
   loginError.value = "";
   try {
-    enterWorkspace(await client.request<AdminSession>("/api/admin/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }));
+    enterWorkspace(await client.request<AdminSession>("/api/admin/auth/login", { method: "POST", body: JSON.stringify({ username, password } satisfies AdminLoginRequest) }));
   } catch (err) {
     loginError.value = errorMessage(err, "无法连接 API 服务");
   } finally {

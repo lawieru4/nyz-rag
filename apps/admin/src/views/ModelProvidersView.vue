@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { Plus } from "@lucide/vue";
-import type { ModelProviderRecord, ModelSettingsResponse } from "@nyz-rag/types";
+import type { ModelProviderRecord, ModelSettingsResponse, SaveModelProviderRequest } from "@nyz-rag/types";
 import { Badge } from "@nyz-rag/ui/components/badge";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
@@ -84,7 +84,7 @@ async function toggle(provider: ModelProvider) {
   const { name, provider: kind, baseUrl, credentialEnv } = provider;
   await run(provider.id, async () => {
     try {
-      await client.request(`/api/admin/model-providers/${provider.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ name, provider: kind, baseUrl, credentialEnv, enabled: !provider.enabled }) });
+      await client.request(`/api/admin/model-providers/${provider.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ name, provider: kind, baseUrl, credentialEnv, enabled: !provider.enabled } satisfies SaveModelProviderRequest) });
     } catch (err) {
       toast.error(errorMessage(err, "供应商状态更新失败"));
       return;

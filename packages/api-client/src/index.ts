@@ -1,2 +1,2 @@
-export { ApiClient, ApiError, createApiClient, errorMessage, withSession } from "./client.js";
-export type { StreamCallbacks } from "./client.js";
+export { ApiClient, ApiError, createApiClient, errorMessage, withSession } from "./client.ts";
+export type { StreamCallbacks } from "./client.ts";

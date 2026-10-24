@@ -60,6 +60,15 @@ test("the application registers all domains and rejects bad requests before acce
   assert.equal(closed, true);
 });
 
+test("every route schema declares the shared error responses", () => {
+  // 错误响应（含权限不足的 403）只输出 { error }，不能把其他字段带给客户端。
+  for (const [route, schema] of Object.entries(routeSchemas) as [string, { response?: Record<string, { properties?: object }> }][]) {
+    for (const status of ["400", "401", "403", "404", "409", "429", "500", "503"]) {
+      assert.deepEqual(schema.response?.[status]?.properties, { error: { type: "string" } }, `${route} ${status}`);
+    }
+  }
+});
+
 test("every application route has a schema entry and every schema entry has a route", async () => {
   const queue: DocumentQueue = {
     hasDocumentJob: async () => false, hasSourceJob: async () => false, enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
