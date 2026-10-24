@@ -188,9 +188,19 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.doesNotMatch(JSON.stringify((await getPool().query("SELECT api_key_ciphertext FROM model_providers")).rows), /integration-test-key/, "keys are stored encrypted");
     // 模拟升级前已切片的数据：Worker 启动时应补齐关键词检索词项。
     await getPool().query("UPDATE document_chunks SET search_vector = ''::tsvector WHERE document_id = $1", [documentId]);
+    // 残留的活动任务（队列中没有对应 job）：Worker 启动时把创建超过 1 分钟的标为失败，刚创建的留给 API 入队。
+    const taskStatus = async (id: string) => (await getPool().query("SELECT status, error FROM crawl_tasks WHERE id = $1", [id])).rows[0];
+    await getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status, created_at) VALUES ('CR-orphan', $1, 'Test source', '运行中', now() - interval '1 hour')", [source.id]);
+    await assert.rejects(getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status) VALUES ('CR-second', $1, 'Test source', '等待中')", [source.id]), /crawl_tasks_active_source_idx/);
+    const freshSource = await createSource({ name: "Fresh source", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
+    await getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status) VALUES ('CR-fresh', $1, 'Fresh source', '等待中')", [freshSource.id]);
     start("apps/api/src/index.ts");
     start("apps/worker/src/index.ts");
     start("apps/worker/src/index.ts");
+    await until(async () => (await taskStatus("CR-orphan")).status === "失败");
+    assert.match((await taskStatus("CR-orphan")).error, /队列中没有对应的同步任务/);
+    assert.equal((await taskStatus("CR-fresh")).status, "等待中");
+    await getPool().query("DELETE FROM data_sources WHERE id = $1", [freshSource.id]);
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
     assert.equal((await fetch(`${apiBase}/api/admin/documents`)).status, 401);
     const login = await fetch(`${apiBase}/api/admin/auth/login`, {
@@ -435,6 +445,12 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     const articleDocuments = async () => (await getPool().query(
       "SELECT d.id, d.external_id, d.title, d.content, d.embedding_status, d.metadata, c.context, c.section_path FROM documents d JOIN document_chunks c ON c.document_id = d.id WHERE d.source_id = $1 ORDER BY d.external_id",
       [articleSource.id])).rows;
+    // 同一来源已有活动任务时不能再同步（数据库唯一索引互斥，不扫描队列）。
+    await getPool().query("INSERT INTO crawl_tasks (id, source_id, source_name, status) VALUES ('CR-active', $1, 'Articles', '等待中')", [articleSource.id]);
+    const busy = await fetch(`${apiBase}/api/admin/sources/${articleSource.id}/sync`, { method: "POST" });
+    assert.equal(busy.status, 409);
+    assert.deepEqual(await busy.json(), { error: "source already has a sync job" });
+    await getPool().query("UPDATE crawl_tasks SET status = '失败' WHERE id = 'CR-active'");
     await syncArticles();
     let synced = await articleDocuments();
     assert.deepEqual(synced.map((row) => row.external_id), ["a1", "a2"]);

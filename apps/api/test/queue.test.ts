@@ -20,7 +20,7 @@ test("document jobs share IDs and source jobs retain their task identity", async
   assert.equal(closed, true);
 });
 
-test("duplicate checks cover document jobs and source sync jobs without blocking other sources", async () => {
+test("document duplicate checks cover document jobs and active syncs of the same source", async () => {
   const ids = new Set<string>();
   const jobs: Array<{ name: string; data: { sourceId: string } }> = [];
   const states: unknown[] = [];
@@ -37,9 +37,7 @@ test("duplicate checks cover document jobs and source sync jobs without blocking
   jobs.push({ name: "sync-source", data: { sourceId: "src-1" } });
   assert.equal(await service.hasDocumentJob(document), true);
   assert.equal(await service.hasDocumentJob({ ...document, sourceId: "src-2" }), false);
-  assert.equal(await service.hasSourceJob("src-1"), true);
-  assert.equal(await service.hasSourceJob("src-2"), false);
-  assert.deepEqual(states.at(-1), ["active", "waiting", "delayed", "paused"]);
+  assert.deepEqual(states.at(-1), ["active"]);
 });
 
 test("enqueue failures propagate to the route for persisted state recovery", async () => {

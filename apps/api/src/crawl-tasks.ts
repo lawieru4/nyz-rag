@@ -8,8 +8,9 @@ export const crawlTaskRoutes: FastifyPluginAsync<{ queue: DocumentQueue }> = asy
     const source = await getSource(request.params.id);
     if (!source) return reply.code(404).send({ error: "source not found" });
     if (source.status !== "运行中") return reply.code(409).send({ error: "source is paused" });
-    if (await queue.hasSourceJob(source.id)) return reply.code(409).send({ error: "source already has a sync job" });
+    // 同一来源只能有一个等待中或运行中的任务；没有对应队列任务的残留任务由 Worker 启动时对账标为失败。
     const task = await createTask(source);
+    if (!task) return reply.code(409).send({ error: "source already has a sync job" });
     try {
       await queue.enqueueSource(source.id, task.id);
     } catch (error) {

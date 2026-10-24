@@ -25,7 +25,7 @@ test("the application registers all domains and rejects bad requests before acce
   let closed = false;
   const unexpected = async (): Promise<never> => { throw new Error("unexpected queue access"); };
   const queue: DocumentQueue = {
-    hasDocumentJob: unexpected, hasSourceJob: unexpected, enqueueDocument: unexpected, enqueueSource: unexpected,
+    hasDocumentJob: unexpected, enqueueDocument: unexpected, enqueueSource: unexpected,
     close: async () => { closed = true; },
   };
   const admins = await makeTestAdmins();
@@ -71,7 +71,7 @@ test("every route schema declares the shared error responses", () => {
 
 test("every application route has a schema entry and every schema entry has a route", async () => {
   const queue: DocumentQueue = {
-    hasDocumentJob: async () => false, hasSourceJob: async () => false, enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
+    hasDocumentJob: async () => false, enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
   };
   const app = buildApp({ queue, admins: memoryAdmins().repository });
   const routes = new Set<string>();

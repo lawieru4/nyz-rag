@@ -22,7 +22,7 @@ import { hashPassword } from "../src/passwords.js";
 import type { MemoryAdminInput } from "./auth-helpers.js";
 
 const queue = {
-  hasDocumentJob: async () => false, hasSourceJob: async () => false,
+  hasDocumentJob: async () => false,
   enqueueDocument: async () => {}, enqueueSource: async () => {}, close: async () => {},
 };
 

@@ -36,6 +36,8 @@ export const dataSources = pgTable("data_sources", {
   check("data_sources_status_check", sql`${table.status} IN ('运行中', '已暂停')`),
 ]);
 
+export const ACTIVE_TASK_INDEX = "crawl_tasks_active_source_idx";
+
 export const crawlTasks = pgTable("crawl_tasks", {
   id: text().primaryKey(),
   sourceId: text().notNull().references(() => dataSources.id, { onDelete: "cascade" }),
@@ -50,6 +52,8 @@ export const crawlTasks = pgTable("crawl_tasks", {
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   index("crawl_tasks_created_at_idx").on(table.createdAt.desc()),
+  // 同一来源同时只能有一个等待中或运行中的同步任务（API 创建任务时由它原子互斥）。
+  uniqueIndex(ACTIVE_TASK_INDEX).on(table.sourceId).where(sql`${table.status} IN ('等待中', '运行中')`),
   check("crawl_tasks_status_check", sql`${table.status} IN ('等待中', '运行中', '已完成', '失败')`),
   check("crawl_tasks_progress_check", sql`${table.progress} BETWEEN 0 AND 100`),
 ]);
