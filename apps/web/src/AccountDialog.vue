@@ -109,7 +109,7 @@ async function submit() {
   <Dialog :open="true" @update:open="(open) => { if (!open) emit('close'); }">
     <DialogContent class="max-h-[calc(100vh-2.5rem)] overflow-y-auto sm:max-w-100">
       <DialogHeader>
-        <p class="eyebrow mb-1">NYZ ACCOUNT</p>
+        <p class="eyebrow mb-1">能知账号</p>
         <DialogTitle>{{ titles[mode] }}</DialogTitle>
         <DialogDescription v-if="mode === 'login' || mode === 'register'" class="text-xs leading-relaxed">不登录也可以提问，会话仅保存在当前浏览器；登录后当前浏览器中的会话会归入账号，可在其他设备查看。</DialogDescription>
         <DialogDescription v-else-if="mode === 'forgot'" class="text-xs leading-relaxed">重置密码后，其他设备上的登录将失效。</DialogDescription>
