@@ -67,7 +67,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 - API、Worker 和两个 Vite 应用都读取根目录 `.env`（gitignored，模板为 `.env.example`；默认端口 API 3001、web 5175、admin 5176）。只有 `VITE_` 前缀变量会暴露给浏览器，不要给密钥加此前缀。
 - 本地复用共享的 PostgreSQL 18/pgvector（`localhost:5432`）和 Redis 8（`localhost:6379`），只使用专用 `nyzrag` 数据库/账号；API 与 Worker 必须设置相同的 `DOCUMENT_QUEUE_NAME=nyz-rag-document-processing`。不要改动或停止 booth-ai 等共享服务，禁止对共享 Redis 执行 `FLUSHALL`/`FLUSHDB`。`vector` 扩展需由管理员为非超级用户的应用账号预先创建。
 - 可选独立基础设施：`docker compose --profile standalone up -d postgres redis`，端口 55433/56380。
-- 容器启动器 `docker/start.mjs` 会把连接串中的 loopback 主机改写为 `host.docker.internal`。发布端口只绑定 127.0.0.1。
+- 容器启动器 `docker/start.mjs` 会把连接串中的 loopback 主机改写为 `host.docker.internal`，并设置 `NYZ_LOOPBACK_HOST`，使 `providerUrl` 同样改写模型供应商地址中的本机地址（本机模型/代理在后台填 `127.0.0.1`，容器内外都可用）。发布端口只绑定 127.0.0.1。
 - `.nyz-data/`（gitignored）现在只存放旧版快照和 `scripts/nyz-articles/` 的样本数据，应用运行不再依赖它。`.nyz-data/nyz-articles/raw/` 中 200 篇原始详情可用于回归检查解析器和切片。
 - nyzdata token 与模型 API Key 只在管理端填写（加密入库），不要写入代码、来源地址、日志或提交；`NYZ_SECRET_KEY` 只放在 `.env` 或环境变量里。
 

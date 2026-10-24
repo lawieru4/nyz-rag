@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
 import { embedChunks, requireEmbeddingModel } from "../src/embedding.js";
-import type { ModelTarget } from "../src/provider.js";
+import { providerUrl, type ModelTarget } from "../src/provider.js";
 import { noopLimiter } from "./admission-helpers.js";
 
 function provider(overrides: Partial<ModelProviderRecord> = {}): ModelProviderRecord {
@@ -106,4 +106,21 @@ test("rejects malformed vectors and hides provider response bodies", async (cont
     ],
   }), { status: 200 })) as typeof fetch;
   await assert.rejects(embedChunks(target(), ["input", "input-2"], noopLimiter()), /invalid vector indices/);
+});
+
+test("provider URLs map loopback hosts to NYZ_LOOPBACK_HOST only when it is set (inside Docker)", () => {
+  const endpoint = (baseUrl: string) => ({ name: "Local", provider: "compatible", baseUrl });
+  const previous = process.env.NYZ_LOOPBACK_HOST;
+  try {
+    delete process.env.NYZ_LOOPBACK_HOST;
+    assert.equal(providerUrl(endpoint("http://127.0.0.1:8317/v1/"), "models", "model list"), "http://127.0.0.1:8317/v1/models");
+    process.env.NYZ_LOOPBACK_HOST = "host.docker.internal";
+    for (const host of ["127.0.0.1", "localhost", "[::1]"]) {
+      assert.equal(providerUrl(endpoint(`http://${host}:8317/v1`), "chat/completions", "chat"), "http://host.docker.internal:8317/v1/chat/completions", host);
+    }
+    assert.equal(providerUrl(endpoint("https://api.example/v1"), "embeddings", "embedding"), "https://api.example/v1/embeddings");
+  } finally {
+    if (previous === undefined) delete process.env.NYZ_LOOPBACK_HOST;
+    else process.env.NYZ_LOOPBACK_HOST = previous;
+  }
 });
