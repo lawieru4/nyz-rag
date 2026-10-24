@@ -1,112 +1,45 @@
 # NYZ RAG
 
-NYZ 文章问答系统的 pnpm monorepo 初始骨架，采用 Vue 客户端、Fastify API、BullMQ Worker 和 PostgreSQL/pgvector。
+基于 nyzdata 文章 API 的知识问答系统，采用 pnpm workspace，包含 Vue 3 用户端、独立管理后台、Fastify API 和 BullMQ Worker。文章元数据、原始 JSON、切片与向量统一保存在 PostgreSQL/pgvector，Redis 用于任务队列、认证状态和请求限流。
+
+## 功能概览
+
+| 模块 | 已实现能力 |
+| --- | --- |
+| 用户端 | 匿名问答、邮箱验证码注册与密码找回、登录、多轮会话与历史管理、SSE 流式回答、停止/重新生成/复制、赞踩反馈、引用与文章详情、检索筛选 |
+| 管理后台 | 数据源与同步任务、文档详情/重新处理/向量化/删除、知识库参数、模型配置、问答记录、用户启停、管理员与角色权限、操作日志、个人资料 |
+| 文章处理 | 增量同步、断点续传、失败文章重试、原始 JSON 留存、结构化切片、正文指纹去重、切片与摘要向量化 |
+| 检索问答 | BM25 与元数据加权、切片向量和文章摘要向量三路召回、RRF 融合、可选 Rerank、模型生成与原文摘录降级 |
+| 后台任务 | PostgreSQL 持久化操作、队列投递、运行租约与过期回收、丢失队列任务重新投递、向量化暂时故障退避重试 |
+| 评估工具 | 关键词基线、混合检索消融与运行对比、合成题生成、失败题复判、回答评审、独立实验索引 |
+
+### 当前边界
+
+- 数据源仅支持「文章 API」，不支持网页站点采集或任意文件上传。新增来源默认暂停，需先启用再手动同步；同步频率字段目前只保存和展示，未实现按频率自动调度。
+- 「知识库」目前是召回参数和回答提示词配置，不是独立语料或权限隔离空间。限定来源使用 `filters.sourceId` 等筛选条件。
+- 多轮生成最多使用最近 3 轮历史，每轮历史回答最多 500 字；检索使用当前问题，不执行历史问题改写。
+- 生产默认使用结构化切片规则的修订版 3；父子块切片与章节上下文组装仍用于评估实验，未作为默认问答路径上线。
 
 ## 环境要求
 
-- Node.js 22 或更高版本
-- pnpm 10 或更高版本
-- PostgreSQL 18 + pgvector、Redis 8（本机开发默认复用已有 Docker 实例）
+- Node.js 24，和 Docker 构建镜像保持一致。
+- pnpm 12.11.2，版本固定在根 `package.json` 的 `packageManager`。
+- PostgreSQL 18 + pgvector、Redis 8。
+- 使用容器部署时需要 Docker Compose v2；本地默认复用已有数据库与 Redis，也可启用独立基础设施。
 
-## 本地开发
+## 启动与配置
 
-### Docker 应用分组（推荐）
+以下命令均在仓库根目录执行。先准备数据库和根目录 `.env`，再选择 Docker 或本机进程启动，勿同时运行两套应用。
 
-准备好根 `.env` 和下文的共享数据库后运行：
+### 1. 准备数据库和 Redis
 
-```sh
-docker compose up -d --build --wait
-docker compose ps
-```
+默认开发环境复用共享 Docker 服务：
 
-Docker Desktop 将显示独立的 `nyz-rag` 分组，包含 `api`、`worker`、`web`、`admin`，不会新建 PostgreSQL 或 Redis。用户端为 http://localhost:5175，管理后台为 http://localhost:5176，API 健康检查为 http://localhost:3001/health。
+- PostgreSQL：`localhost:5432`，当前本机容器为 `agent-template-server-postgres-1`。仅使用本项目的 `nyzrag` 数据库与同名账号。
+- Redis：`localhost:6379`，当前本机容器为 `agent-template-server-redis-1`。使用 `DOCUMENT_QUEUE_NAME=nyz-rag-document-processing` 隔离本项目队列。
+- 本项目 Compose 默认不管理共享服务，不修改或停止 `booth-ai` 的数据库和 Redis。禁止对共享 Redis 执行 `FLUSHALL` / `FLUSHDB`；队列名前缀不是资源或权限隔离。
 
-- 应用镜像统一使用仓库根 `Dockerfile` 构建；修改代码后重新运行上述构建启动命令。
-- `.env` 只注入后端运行时，不进入镜像。后端启动器将连接串中的 `localhost` / `127.0.0.1` / `::1` 转为 `host.docker.internal`，通过宿主机端口连接已有服务；非本机地址保持不变。管理端配置的模型供应商地址同样处理（启动器设置 `NYZ_LOOPBACK_HOST`），本机的模型或代理填 `http://127.0.0.1:<端口>/v1` 即可，容器内与宿主机上的命令行都能访问；不要填 `host.docker.internal`，宿主机上它可能解析为局域网 IP，只监听 127.0.0.1 的服务无法访问。
-- 前端使用 Nginx 提供构建产物并将 `/api/` 代理到 API，浏览器不依赖容器 DNS，也不需要在镜像中配置宿主机 API 地址。Docker 构建固定使用同源 API，不使用本机的 `VITE_API_URL`。
-- 元数据与向量都存于 `DATABASE_URL` 指向的 PostgreSQL，容器不挂载数据目录；API 和 Worker 启动时自动执行数据库迁移。不要同时启动本机 Worker 和容器 Worker 消费同一队列。
-- 仅将端口暴露到 `127.0.0.1`。管理后台需在 `.env` 设置 `ADMIN_PASSWORD`（16 位以上随机密码）后才能登录；对外部署时设置实际 HTTPS 来源的 `ADMIN_ORIGINS` 与 `ADMIN_COOKIE_SECURE=true`。
-- `docker compose down` 移除本项目应用容器，不会停止外部共享数据库。
-- API 健康检查仅代表 HTTP 可用，Worker 为长驻队列进程；完整依赖状态仍需通过实际文档任务验证。
-
-#### 常用管理命令
-
-在仓库根目录按需执行：
-
-```sh
-# 修改代码后重新构建并启动
-docker compose up -d --build --wait
-
-# 查看运行状态和日志
-docker compose ps
-docker compose logs -f api worker
-
-# 停止本项目应用，不影响共享数据库
-docker compose stop
-```
-
-日志跟踪期间按 `Ctrl+C` 仅退出日志查看，不会停止容器。应用容器运行时无需再执行 `pnpm dev`。
-
-### 本机进程开发
-
-先停止上述应用容器，避免端口和任务消费者冲突：
-
-```sh
-cp .env.example .env
-pnpm install
-pnpm dev
-```
-
-- 已有 `.env` 时不要覆盖；新建时先按下文准备数据库，并填写实际数据库密码。
-- 客户端：http://localhost:5175
-- 管理后台：http://localhost:5176（另行运行 `pnpm --filter @nyz-rag/admin dev`）
-- API 健康检查：http://localhost:3001/health
-- API 问答入口：单次问答 `POST http://localhost:3001/api/chat`，JSON body 为 `{ "question": "..." }`；会话问答先 `POST /api/chat/sessions` 创建会话，再 `POST /api/chat/sessions/:id/stream` 以 SSE 流式返回（body 为 `{ "question": "..." }` 或 `{ "regenerate": "<messageId>" }`）
-- 文章详情：`GET /api/documents/:id` 仅返回已就绪文档的公开字段；用户端引用可打开 `/#/documents/:id`，保留问答页面状态。
-- 检索范围：搜索、单次问答与 SSE 请求均可附带 `filters`，例如 `{ "publishedFrom": "2026-01-01", "publishedTo": "2026-10-21", "categories": ["科研"], "tags": ["钠电"], "scenarios": ["储能"], "sourceId": "..." }`。日期按 UTC 整日包含首尾；各列表精确匹配、列表内 OR、字段间 AND，空列表不限制。筛选用于当前请求（重新生成亦使用当前筛选），不绑定或持久化到会话。
-
-nyzdata 文章 API 增量同步（数据源只支持文章接口，已移除网页站点采集）、结构化切片、Embedding/pgvector 写入，以及混合检索（关键词 + 向量，可选 Rerank）和模型问答已接通，用户端支持多轮会话、流式输出、停止生成、重新生成与复制回答；模块进度见 [模块清单](docs/module-status.md)。
-
-API、Worker、web 和 admin 均读取根目录 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，不要给数据库密码或模型密钥添加此前缀。先在 `.env` 中设置 `NYZ_SECRET_KEY`（至少 32 个字符，API 与 Worker 相同），后台填写的模型 API Key 与 nyzdata token 用它加密保存；更换后需重新填写。模型在管理后台「模型配置」中分两步配置：先添加供应商——选择服务类型（硅基流动、OpenAI、本地 Ollama 或其他 OpenAI 兼容服务）、填写 API Key（本地模型可不填，也可改填密钥环境变量名），可点「测试连接」；再在「业务模型」中为 Chat、Embedding、Rerank 分别选择供应商和模型（从供应商的模型列表中选或直接输入），三者可以来自不同供应商，例如硅基流动的 `BAAI/bge-m3` 做向量化、DeepSeek 做问答。问答使用 Chat 模型（温度与最大 Token 在 Chat 模型中设置），未配置或调用失败时直接摘录原文片段；配置 Rerank 模型并在知识库中开启重排序后，召回结果会先经过重排序。正在被业务模型使用的供应商不能删除。更换 Embedding 模型后需要重新向量化全部文档。检索参数（召回数量、相似度阈值、最大上下文、回答提示词）取最近创建的知识库，请求也可通过 `knowledgeBaseId` 指定。
-
-接入 nyzdata 文章时，在管理后台添加「文章 API」来源，地址填文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址里不要带 token，token 在数据源页「nyzdata 接口 Token」中设置（加密保存，所有来源共用，修改后下次同步生效）。每次同步按 `updateTime` 只获取新增或变化的文章，单次最多处理 `NYZ_ARTICLE_SYNC_LIMIT` 篇（默认 200），请求间隔与超时由 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS` 设置。首次全量同步超过上限时，再次点击同步即可从上次的位置继续，失败的文章也会在下次同步重试。原始文章 JSON 保存在数据库中，解析规则升级后在文档管理中「重新处理」即可，无需重新请求接口。
-
-元数据与向量都存于 PostgreSQL，表结构用 Drizzle ORM 定义在 `packages/processing/src/schema.ts`。修改后运行 `pnpm db:generate` 生成迁移；API 和 Worker 启动时自动执行迁移，也可手动运行 `pnpm db:migrate`。关键词检索的词项随切片生成；从旧版本升级时，Worker 启动会自动为已有切片补齐，修改词项规则后运行 `pnpm db:reindex-search` 全量重建。迁移 `0011` 删除网页站点来源及其文档（以及没有原始文章 JSON 的文档）；原本是这些文档重复项的文章会标记为处理失败，需在文档管理中「重新处理」。
-
-迁移 `0005` 为 384、512、768、1024、1536、2000 维向量建立 HNSW 部分表达式索引，其他维度继续精确检索（`vector` HNSW 上限为 2000 维）。HNSW 为近似召回，过滤后候选不足时自动精确回退。已有较大语料首次建索引会延长启动并阻塞切片写入，宜在维护窗口先运行 `pnpm db:migrate`；迁移连接不受普通查询的 10 秒超时限制。本轮只验证了索引执行路径和正确性，未作全量速度或召回率承诺。
-
-检索验证使用 `pnpm --filter @nyz-rag/processing test`。要运行数据库与 API/队列集成验证，在 PowerShell 中执行 `$env:NYZ_INTEGRATION_TEST='1'; pnpm --filter @nyz-rag/processing exec tsx --env-file-if-exists=../../.env --test test/*.test.ts`，测试使用临时 schema 和唯一队列，不消费业务队列，也不填充业务数据库。
-
-检索评估命令（仓库根目录执行）：
-
-```sh
-# 本地清洗样本上的词项重叠基线，逐条校验标注证据
-pnpm evaluate:retrieval --mode=offline
-# 已入库文章上的关键词检索基线，只读，不迁移或填充数据库
-pnpm evaluate:retrieval --mode=db
-# 只评估 v2 数据集的 dev 或 test 划分
-pnpm evaluate:retrieval --mode=db --dataset=<JSON绝对路径> --split=dev
-```
-
-默认评估集为 `packages/processing/test/evaluation/retrieval-dataset.json`，包含 50 条文章衍生合成问题，不是真实用户问题，也未经过人工标注复核。离线模式默认读取 `.nyz-data/nyz-articles/clean`（样本未随仓库提交），可用 `--corpus=<清洗目录绝对路径>` 覆盖；数据库模式不依赖本地样本。支持 `--dataset=<JSON绝对路径>` 和 `--k=1,3,5,10`。结果为文章去重后的 Recall@K、MRR、线性增益 nDCG@K；数据库模式按就绪文档实际覆盖范围报告缺失标注数量，有缺失时返回非零退出码，不能将部分语料指标当完整基线。数据库候选为前 `max(20,K)` 个切片，再按文章去重，不代表全库文章级排序。这两种基线均不评估向量、Rerank 或回答质量，混合检索评估仍待补充。
-
-合成评估集生成命令（方案见 `docs/evaluation-plan.md`）：按文章分层抽样，用业务模型中的 Chat 模型生成问题、参考答案与原文证据，经程序校验和「审核」模型审核，未通过时带原因重试，最多 3 次。工作文件在 `.nyz-data/evaluation/<名称>/`，中断后重新运行会从未完成的文章继续。会调用模型并产生费用，数据库只读。
-
-```sh
-# 首次运行冻结语料快照并抽样（默认 400 篇、种子 20261023）；--limit 只处理前 N 篇（试点）
-pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --limit=50 --concurrency=3
-# 全部样本完成后导出 schemaVersion 2 数据集（默认写入 packages/processing/test/evaluation/<名称>.json）
-pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --freeze
-```
-
-### 共享 Docker 服务（默认）
-
-- PostgreSQL：复用 `agent-template-server-postgres-1`，地址 `localhost:5432`，仅使用本项目的 `nyzrag` 数据库和同名账号。
-- Redis：复用 `agent-template-server-redis-1`，地址 `localhost:6379`，通过 `DOCUMENT_QUEUE_NAME=nyz-rag-document-processing` 隔离任务队列。API 与 Worker 必须使用相同队列名。
-- 本仓库默认 `docker compose up` 只启动应用，不管理这些共享容器，也不修改或停止 `booth-ai` 的数据库、Redis。
-- 共享容器仍由其原 Compose 项目管理；停止它们会影响本项目。禁止对共享 Redis 执行 `FLUSHALL` / `FLUSHDB`，队列名隔离不代表资源或权限隔离。
-
-在新的共享实例上首次接入时，由数据库管理员执行以下 SQL（替换密码；账号和数据库只创建一次）：
+在新共享实例上首次接入时，由数据库管理员执行以下 SQL，替换实际密码，账号和数据库只创建一次：
 
 ```sql
 CREATE ROLE nyzrag LOGIN PASSWORD 'replace-with-a-local-password'
@@ -114,26 +47,292 @@ CREATE ROLE nyzrag LOGIN PASSWORD 'replace-with-a-local-password'
 CREATE DATABASE nyzrag OWNER nyzrag;
 ```
 
-再连接 `nyzrag` 数据库，以管理员身份执行 `CREATE EXTENSION IF NOT EXISTS vector;`。应用账号无需超级用户权限，启动时会通过迁移自行建表。将实际连接串填入根 `.env` 的 `DATABASE_URL`；密码中的特殊字符需要 URL 编码。
+再连接 `nyzrag` 数据库，以管理员身份执行：
 
-### 独立 Docker 服务（可选）
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
 
-仅在不使用共享实例时运行 `docker compose --profile standalone up -d postgres redis`，先只启动基础设施。该配置使用 PostgreSQL 18 + pgvector、Redis 8，端口为 `55433` / `56380`，只绑定本机。同步把 `.env` 改为：
+应用账号无需超级用户权限，API 和 Worker 启动时会自动迁移建表。连接串中的特殊密码字符需要 URL 编码。
+
+不使用共享实例时，可选择独立服务。先完成下一节的 `.env` 初始化，再启动基础设施：
+
+```sh
+docker compose --profile standalone up -d --wait postgres redis
+```
+
+同步将 `.env` 改为：
 
 ```dotenv
 DATABASE_URL=postgresql://nyzrag:nyzrag@localhost:55433/nyzrag
 REDIS_URL=redis://localhost:56380
 ```
 
-等待独立数据库和 Redis 健康后，再运行 `docker compose up -d --build --wait` 启动应用，或使用 `pnpm dev` 本机开发。容器启动器同样会将这些本机连接地址转为宿主机地址。
+当前独立配置的初始化账号可在应用首次迁移时自动创建 `vector` 扩展；若改为非超级用户应用账号，则仍需管理员预先创建扩展。固定密码仅用于本地开发，端口只绑定本机。数据卷为 `postgres18_data`（挂载 `/var/lib/postgresql`）和 `redis_data`；不能直接复用旧 PostgreSQL 主版本的数据目录，有旧数据时先备份迁移。
 
-独立环境的固定密码仅用于本地开发。PostgreSQL 18 使用新的 `postgres18_data` 卷和 `/var/lib/postgresql` 挂载路径，不会迁移旧 PostgreSQL 16 卷中的数据；有旧数据时应先备份再迁移，不能直接复用旧主版本的数据目录。
+### 2. 初始化环境变量
 
-## Workspace
+仅在没有 `.env` 时复制模板，已有文件不要覆盖。PowerShell 示例：
 
-- `apps/web`：Vue 3 + Vite 用户端
-- `apps/admin`：Vue 3 + Vite 管理后台，运行 `pnpm --filter @nyz-rag/admin dev`
-- `apps/api`：Fastify HTTP API
-- `apps/worker`：BullMQ 文档处理队列消费者
-- `packages/types`：前后端共享接口类型
-- `packages/processing`：API/Worker 共用的数据库访问（Drizzle）、文章接口与解析、结构化切片、模型接口（Embedding/Chat/Rerank）和混合检索
+```powershell
+Copy-Item .env.example .env
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+将生成值填入 `NYZ_SECRET_KEY`，并填写以下配置。完整变量和默认值见 [`.env.example`](.env.example)。
+
+| 配置 | 用途与注意事项 |
+| --- | --- |
+| `DATABASE_URL`、`REDIS_URL` | 实际 PostgreSQL/Redis 地址；共享服务默认端口为 5432/6379，独立服务为 55433/56380 |
+| `DOCUMENT_QUEUE_NAME` | API 与 Worker 必须一致；模板与 Compose 默认配置为 `nyz-rag-document-processing`，本机开发也应显式设置，不依赖源码回退值 |
+| `NYZ_SECRET_KEY` | API 与 Worker 必须相同，至少 32 字符；用于 AES-256-GCM 加密后台保存的模型密钥和文章 token，变更后需重新填写这些秘密 |
+| `ADMIN_EMAIL`、`ADMIN_USERNAME`、`ADMIN_PASSWORD` | 初始超级管理员邮箱、昵称/兼容登录别名、16-1024 字符密码；仅在数据库没有任何管理员时创建账号 |
+| `API_PORT`、`WEB_PORT`、`ADMIN_PORT` | 模板默认 3001、5175、5176 |
+| `VITE_API_URL` | 本机开发的浏览器 API 地址，默认 `http://localhost:3001`；Docker 构建固定使用同源 `/api/` |
+| `ADMIN_ORIGINS`、`WEB_ORIGINS` | 允许携带 Cookie 的精确前端来源，逗号分隔，不含路径；生产环境填实际 HTTPS 来源 |
+| `ADMIN_COOKIE_SECURE`、`USER_COOKIE_SECURE` | 模板的 `false` 仅供本地 HTTP；HTTPS 部署设为 `true`，前端与 API 使用相同主机以保持 Cookie 行为 |
+| `SMTP_HOST`、`SMTP_PORT`、`SMTP_SECURE`、`SMTP_USER`、`SMTP_PASSWORD`、`MAIL_FROM` | 注册与找回密码邮件；配置 SMTP 时 `MAIL_FROM` 必填，显式设置 `SMTP_SECURE` 时必须为 `true` 或 `false` |
+| `NYZ_MODEL_CREDENTIAL_ENVS` | 允许模型供应商引用的密钥环境变量名白名单，逗号分隔；API 与 Worker 配置一致 |
+| `TRUSTED_PROXIES` | 可信反向代理的明确 IP/CIDR；默认不信任转发头，不可信任 `0.0.0.0/0` 或 `::/0` |
+
+API、Worker 及两个 Vite 应用的本机开发脚本均读取根 `.env`。前端只向浏览器暴露 `VITE_` 前缀变量，数据库密码、模型密钥和主密钥不要使用此前缀。
+
+管理员账号持久化在数据库中，后续修改 `ADMIN_PASSWORD` 不会重置已有账号密码，应在后台「个人资料」修改。普通管理员由超级管理员创建并分配角色；管理员停用或改密会使旧登录失效。
+
+未配置 `SMTP_HOST` 时，非生产 API 将邮件内容写入日志，生产 API 的注册/找回密码发码接口返回 503。**Docker 后端固定运行在生产模式**，因此容器内调试注册也需要 SMTP；已有账号登录与匿名问答不依赖发信。
+
+配置 `SMTP_HOST` 后，必须将模板中的 `SMTP_SECURE=` 改为 `true` / `false`，或删除/注释该变量，保留空值会导致 API 启动失败。仅在变量未定义时，端口 465 自动启用隐式 TLS，其他端口在服务器支持时使用 STARTTLS。
+
+### 3. 启动应用
+
+#### Docker 应用分组（推荐）
+
+```sh
+docker compose up -d --build --wait
+docker compose ps
+```
+
+Docker Desktop 显示独立 `nyz-rag` 分组，默认只启动 `api`、`worker`、`web`、`admin`：
+
+| 入口 | 默认地址 |
+| --- | --- |
+| 用户端 | http://localhost:5175 |
+| 管理后台 | http://localhost:5176 |
+| API 健康检查 | http://localhost:3001/health |
+
+- 根 `Dockerfile` 统一构建应用；修改代码后重新执行构建启动命令。端口只发布到 `127.0.0.1`。
+- `.env` 只注入后端运行时，不进入镜像。启动器将连接串中的 `localhost` / `127.0.0.1` / `::1` 改写为 `host.docker.internal`，非本机地址不变。
+- 管理端配置的本机模型/代理地址同样通过 `NYZ_LOOPBACK_HOST` 处理，填写 `http://127.0.0.1:<端口>/v1` 即可。不要将持久化地址写为 `host.docker.internal`，以免宿主机命令行无法访问仅监听回环地址的服务。
+- 前端 Nginx 提供静态产物，将 `/api/` 同源代理至 `api:3000`，不使用本机 `VITE_API_URL`。应用容器不挂载文章数据目录，持久数据在 PostgreSQL 中。
+- `/health` 只表示 API 的 HTTP 可用，不能证明 Redis、模型或完整处理链路正常；需要通过实际文章任务验证。
+
+常用管理命令：
+
+```sh
+docker compose logs -f api worker
+docker compose stop
+docker compose down
+```
+
+`Ctrl+C` 仅结束日志查看。`stop` 停止本项目应用，`down` 移除应用容器，均不停止外部共享数据库；勿使用 `down -v` 删除仍需保留的独立数据卷。
+
+#### 本机进程开发
+
+先停止容器应用，避免端口冲突，尤其不要让本机与容器 Worker 消费同一队列：
+
+```sh
+docker compose stop api worker web admin
+pnpm install
+pnpm dev
+```
+
+`pnpm dev` 先构建 `packages/processing`，然后启动 API、web 和 Worker，**不包含管理后台**。另开终端运行：
+
+```sh
+pnpm --filter @nyz-rag/admin dev
+```
+
+默认访问地址与 Docker 相同。API 和 Worker 使用 `tsx watch`，两个前端使用 Vite。
+
+## 首次使用
+
+1. 使用 `.env` 初始化的管理员邮箱和密码登录后台；在「模型配置」添加供应商并测试连接。
+2. 为业务模型分别指定 Chat、Embedding，可选 Rerank 和审核模型；不同用途可以来自不同供应商。
+3. 在数据源页设置全局「nyzdata 接口 Token」，新增「文章 API」来源，启用后执行同步。
+4. 在文档管理确认解析、切片和向量化状态；在「知识库」配置召回参数、回答提示词和是否重排序。
+5. 打开用户端提问，核对回答、引用与文章详情；在后台查看问答记录、反馈和操作日志。
+
+### 模型配置
+
+支持硅基流动、OpenAI、本地 Ollama 和其他 OpenAI 兼容服务。供应商可保存加密 API Key，也可引用 `NYZ_MODEL_CREDENTIAL_ENVS` 白名单中的环境变量；本地模型可不填密钥。仅填写 `OPENAI_API_KEY` 不会自动创建业务模型配置。
+
+- Chat：生成回答，可配置温度和最大 Token。
+- Embedding：向量化切片、标题与摘要，以及检索问题。
+- Rerank：配合知识库的重排序开关，对融合召回结果重排。
+- 审核：合成评估题审核、失败题复判和回答质量评审，不是在线问答必需模型。
+
+被业务模型使用的供应商不能删除。**更换 Embedding 供应商或模型后，需要重新向量化文档**；向量检索只比较相同供应商、模型和维度的数据，不会跨向量空间自动兼容。
+
+未配置可用 Chat 模型或普通模型调用失败时，可降级为原文摘录；向量和重排普通故障也有降级路径。限流拒绝或限流服务不可用不属于降级场景，会返回错误且不保存本轮回答。
+
+### 文章同步与处理
+
+来源地址填写文章列表接口，例如 `https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=9302258412`。地址中不要携带 token；后台 token 加密保存，所有来源共用，Worker 每次同步读取，更新后无需重启。
+
+- 依据文章 `updateTime` 增量同步，达到单次上限后再次同步继续；失败文章在后续同步中重试。
+- `NYZ_ARTICLE_SYNC_LIMIT` 默认 200；`NYZ_ARTICLE_OVERLAP_PAGES` 默认 2；请求间隔和超时由 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS` 控制，默认 1000/15000 毫秒。
+- 原始文章保存在 `documents.raw_json`。解析规则升级后执行「重新处理」，无需重新请求文章接口；切片和向量化是独立状态，向量化失败可单独重试。
+- 正文重复文章保留来源和文档记录，但不独立切片、向量化或参与检索；主文档删除后会安排重复文档接替。
+- 向量化暂时故障的重试延迟默认 1、5、15 分钟，可用 `NYZ_EMBED_RETRY_DELAYS_MS` 修改，显式空值关闭重试。运行租约由 `NYZ_OPERATION_LEASE_MS` 控制，默认 60 秒。
+
+## API 与检索
+
+用户端和管理端通过共享的 `@nyz-rag/api-client` 访问接口。直接调用时，问答、会话、反馈和用户认证的写请求需带 `X-NYZ-Client: 1`；连续会话请求必须保留服务端签发的 Cookie。管理端写请求需带 `X-NYZ-Admin: 1`，并通过管理员认证和来源校验。
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /api/chat` | 单次问答，body 为 `{ "question": "...", "knowledgeBaseId": "可选ID", "filters": {} }` |
+| `POST /api/chat/sessions` | 创建会话，body 可含 `title`、`knowledgeBaseId`；会话按账号或浏览器访客归属隔离 |
+| `GET /api/chat/sessions` | 分页列出自己的历史会话 |
+| `GET /api/chat/sessions/:id/messages` | 查看自己的会话消息 |
+| `POST /api/chat/sessions/:id/stream` | SSE 问答，body 为 `{ "question": "..." }` 或 `{ "regenerate": "<最新messageId>" }`，均可加 `filters` |
+| `DELETE /api/chat/sessions/:id` | 删除自己的会话 |
+| `POST /api/messages/:id/feedback` | 评价自己的回答，`rating` 为 `positive` 或 `negative` |
+| `POST /api/search` | 关键词搜索，body 为 `{ "query": "...", "filters": {} }`，按文章去重，最多返回 20 篇；不是混合检索 |
+| `GET /api/documents/:id` | 仅返回就绪文档的公开详情；用户端引用可打开 `/#/documents/:id` |
+
+SSE 事件为 `source`、`token`、`done`、`error`。停止生成或客户端断开会中止模型调用，不保存本轮问答；重新生成只允许替换最新回答。匿名历史依赖浏览器访客 Cookie，登录后会将该浏览器的访客会话和问答归入账号。
+
+问答先进行 BM25/元数据、切片向量、标题与摘要向量三路召回，再通过 RRF 融合和可选重排组装上下文。没有摘要的文章不生成摘要向量。召回切片、分数、模型用量和耗时随问答记录保存。
+
+召回数量、相似度阈值、最大上下文和回答提示词默认取最近创建的知识库；单次问答可传 `knowledgeBaseId`，SSE 则在创建会话时绑定，不通过每轮 stream body 切换。
+
+搜索、单次问答和 SSE 均支持以下筛选：
+
+```json
+{
+  "filters": {
+    "publishedFrom": "2026-01-01",
+    "publishedTo": "2026-10-24",
+    "categories": ["科研"],
+    "tags": ["钠电"],
+    "scenarios": ["储能"],
+    "sourceId": "<数据源ID>"
+  }
+}
+```
+
+日期按 UTC 整日包含首尾；列表精确匹配，列表内 OR、字段间 AND，空列表不限制。筛选仅作用于当前请求，不持久化到会话，重新生成也使用当前传入的筛选。
+
+### 限流与部署安全
+
+- Redis 准入控制始终启用，Redis 故障返回 503，不绕过限制。普通 HTTP 限流返回 429 和 `Retry-After`；已建立 SSE 后的模型准入故障通过 `error` 事件报告。
+- 默认窗口 60 秒；API 每 IP 120 次、已登录用户 60 次；问答每 IP 20 次、每账号/访客 10 次，并发分别为 4、2，全局问答并发 32。
+- 模型按供应商、模型和用途限流，默认每窗口 120 次、并发 8，API 与 Worker 共用额度；配置项为 `MODEL_RATE_LIMIT_MAX` / `MODEL_CONCURRENCY_LIMIT`。
+- 对外发布需配置 HTTPS、实际前端来源、Secure Cookie、SMTP 和可信代理。Nginx 代理场景应设置实际代理地址，否则基于 IP 的限流可能将所有用户视为同一来源。
+- 秘密配置接口只报告是否设置，不回传明文。不要将文章 token 或模型密钥写入 URL、源码、日志或提交。
+
+## 开发与验证
+
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm dev` | 构建 processing 后启动 API、web、Worker |
+| `pnpm --filter @nyz-rag/admin dev` | 独立启动管理后台 |
+| `pnpm build` | 构建所有 workspace 包 |
+| `pnpm typecheck` | 先构建 processing，再检查所有包类型 |
+| `pnpm test` | 先构建 processing，再串行执行各包已定义的测试 |
+| `pnpm verify` | 依次执行全量构建、类型检查和测试 |
+| `pnpm --filter @nyz-rag/processing test` | 文章解析、切片、检索、评估、模型及任务逻辑测试 |
+| `pnpm --filter @nyz-rag/api test` | API 契约、路由 Schema、认证权限与限流测试 |
+| `pnpm --filter @nyz-rag/api-client test` | 共享 HTTP/SSE 客户端测试 |
+| `pnpm db:generate` | 根据 Drizzle Schema 生成迁移 |
+| `pnpm db:migrate` | 手动执行数据库迁移 |
+| `pnpm db:reindex-search` | 重建切片及文档元数据的关键词词项 |
+
+需要数据库、Redis 和 Worker 的集成测试默认跳过。配置好根 `.env` 的连接串后，可在 PowerShell 中启用：
+
+```powershell
+$env:NYZ_INTEGRATION_TEST = '1'
+pnpm --filter @nyz-rag/processing exec tsx --env-file-if-exists=../../.env --test test/*.test.ts
+Remove-Item Env:NYZ_INTEGRATION_TEST
+```
+
+集成测试使用临时 PostgreSQL schema 和唯一队列，不消费业务队列或填充业务表。测试账号需要创建 schema 的权限，数据库需已安装 pgvector。直接运行 API 测试前应先构建 processing，例如执行 `pnpm --filter @nyz-rag/processing build`。
+
+### 数据库维护
+
+表结构定义在 `packages/processing/src/schema.ts`，迁移位于 `packages/processing/migrations`。API 和 Worker 启动自动迁移；修改 Schema 后生成迁移，修改 `search-terms.ts` 规则后全量重建检索词项。Worker 启动会补齐缺失词项和正文指纹，并为与当前 Embedding 供应商/模型一致的旧文档补充缺失的摘要向量，后者会调用模型。
+
+HNSW 部分表达式索引覆盖 384、512、768、1024、1536、2000 维向量，其他维度精确检索；近似召回过滤后候选不足时精确回退。大语料首次建索引可能延长启动并阻塞切片写入，宜在维护窗口先执行 `pnpm db:migrate`。迁移连接不受普通查询的 10 秒超时限制；实际速度与召回率需在目标语料上评估。
+
+升级旧版本前先备份：迁移 `0011` 会删除网页来源、相关文档及没有原始文章 JSON 的文档；原本依赖这些主文档的重复文章会标记处理失败，需重新处理。
+
+## 检索与回答评估
+
+完整方案、指标与验收边界见 [评估方案](docs/evaluation-plan.md)。评估题是文章衍生合成题，不能直接代表真实用户效果；模型审核不能替代人工复核。
+
+### 关键词基线
+
+```sh
+# 本地清洗样本的词项重叠基线
+pnpm evaluate:retrieval --mode=offline
+# 已入库文章的关键词基线，只读，不迁移或填充数据库
+pnpm evaluate:retrieval --mode=db
+# 指定数据集与划分
+pnpm evaluate:retrieval --mode=db --dataset=<JSON路径> --split=dev
+```
+
+默认数据集为 `packages/processing/test/evaluation/retrieval-dataset.json`，包含 50 条未经过人工标注复核的合成问题。离线模式默认读取 `.nyz-data/nyz-articles/clean`（未随仓库提交），可用 `--corpus=<清洗目录>` 覆盖；数据库模式不需要本地样本。支持 `--k=1,3,5,10`，输出文章去重后的 Recall@K、MRR、线性增益 nDCG@K。
+
+数据库模式只取前 `max(20,K)` 个切片再按文章去重，不是全库文章级排序。有缺失标注文章时报告覆盖缺口并返回非零退出码，不能将部分语料指标当完整基线。上述两种模式不评估向量、重排或回答质量。
+
+### 混合检索与回答
+
+```sh
+# 关键词、切片向量、摘要向量、融合与重排消融；默认使用最近创建的知识库参数
+pnpm evaluate:retrieval --mode=hybrid --dataset=<JSON路径> --name=baseline --split=dev --variant=keyword,vector,summary,fused,rerank
+# 对比两次检索运行，运行名取该名称最新记录，也可传记录路径
+pnpm evaluate:compare baseline candidate
+# 用审核模型复判失败题；--dry-run 只统计待判文章
+pnpm evaluate:adjudicate baseline --variant=fused,rerank --dry-run
+# Chat 生成回答并由审核模型评审，不保存业务问答记录
+pnpm evaluate:answer --dataset=<JSON路径> --name=answer-baseline --split=dev --variant=fused --context=topk
+```
+
+非关键词变体要求可用 Embedding，`rerank` 变体额外要求 Rerank；回答评估和实际复判需要审核模型。支持用 `--limit=N` 冒烟验证，但该结果不作为完整基线。混合检索报告 Hit@K、MRR、证据/上下文命中和耗时等，运行记录写入 `.nyz-data/eval-runs/`；回答结果位于 `.nyz-data/eval-answers/`，复判缓存位于 `.nyz-data/eval-adjudications/`。模型相关命令会产生费用，并与线上任务共享模型准入额度。
+
+### 合成数据集与实验索引
+
+```sh
+# 首次冻结语料快照并分层抽样，默认 400 篇、种子 20261023；仅处理前 50 篇试点
+pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --limit=50 --concurrency=3
+# 去掉 --limit 继续全部样本；完成后导出 schemaVersion 2 数据集
+pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --concurrency=3
+pnpm evaluate:generate --name=nyz-rag-synthetic-v1 --freeze
+# 建立父子块实验索引，写入独立 schema 并调用 Embedding，不修改业务 schema
+pnpm evaluate:index --schema=eval_sections --chunker=2 --concurrency=4
+# 使用实验索引和章节上下文进行消融
+pnpm evaluate:retrieval --mode=hybrid --dataset=<JSON路径> --name=sections --schema=eval_sections --context=section --variant=fused,rerank
+```
+
+合成题使用 Chat 生成问题、参考答案和证据，经程序校验与审核模型审核，未通过时最多尝试 3 次；工作目录为 `.nyz-data/evaluation/<名称>/`，中断后重跑继续未完成文章，导出默认写入 `packages/processing/test/evaluation/<名称>.json`。此流程不修改业务数据库，但会调用模型并写本地文件。
+
+实验索引不是只读操作：它在同一数据库创建 `eval_*` schema，执行迁移并复制文章、来源、知识库及模型配置（含加密密钥），重新切片和向量化。重复运行可续跑，`--reset` 会删除并重建指定实验 schema；需要相应建表权限、磁盘空间和费用预算。
+
+## 代码结构
+
+| 路径 | 职责 |
+| --- | --- |
+| `apps/web` | Vue 3 + Vite 用户端 |
+| `apps/admin` | Vue 3 + Vue Router + Vite 管理后台 |
+| `apps/api` | Fastify 分域插件、JSON Schema、认证权限、限流和 SSE |
+| `apps/worker` | BullMQ 消费、文章同步、重新处理、向量化和操作恢复 |
+| `packages/types` | 前后端共享接口类型，包名 `@nyz-rag/types` |
+| `packages/api-client` | 前端共享 fetch/SSE 客户端 |
+| `packages/ui` | 共享 Vue UI 组件、确认弹窗与主题样式 |
+| `packages/processing` | Drizzle 数据访问、文章解析/切片、去重、模型接口、检索与评估 |
+| `docker` | 后端启动地址改写和前端 Nginx 配置 |
+
+API 入口通过 `apps/api/src/app.ts` 装配领域插件。每条路由必须在 `apps/api/src/schemas.ts` 中注册请求/响应 Schema，响应 Schema 会移除未声明字段；错误响应统一为 `{ "error": "..." }`。
+
+相关设计资料：[系统架构](docs/rag-system-architecture.md)、[切片设计](docs/chunking-design.md)、[评估方案](docs/evaluation-plan.md)、[模块清单](docs/module-status.md)。设计与进度文档可能包含规划内容，当前能力以源码及上述边界为准。
