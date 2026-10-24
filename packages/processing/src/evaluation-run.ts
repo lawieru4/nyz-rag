@@ -1,6 +1,6 @@
 // 检索评估运行（hybrid 模式）：按变体裁剪 retrieve() 的依赖，得到文章排名与回答上下文，计算第七节的指标，并对比两次运行。方案见 docs/evaluation-plan.md 第七、八节。
 import type { CorpusSnapshot, EvaluationLabel, EvaluationQuestion, QuestionType, Specificity, Split } from "./evaluation.js";
-import { buildAnswerContext, buildSectionContext, CANDIDATE_LIMIT, retrieve, type RetrievalDependencies, type RetrievalSettings, type SectionContext } from "./rag.js";
+import { buildAnswerContext, buildSectionContext, CANDIDATE_LIMIT, retrieve, type AnswerContext, type RetrievalDependencies, type RetrievalSettings, type SectionContext } from "./rag.js";
 
 export const RETRIEVAL_VARIANTS = ["keyword", "vector", "summary", "fused", "rerank"] as const;
 export type RetrievalVariant = (typeof RETRIEVAL_VARIANTS)[number];
@@ -177,10 +177,15 @@ export function variantDependencies(variant: RetrievalVariant, full: RetrievalDe
  * 用一个变体检索一道题：排名列表取 RANKING_DEPTH 个切片，回答上下文按 context.mode 组装（默认取前 settings.topK 个并按 maxContextLength 截取）。
  * 只有 rerank 变体开启 Rerank，其余参数取自知识库。
  */
-export async function runVariant(
+export async function runVariant(...args: Parameters<typeof runVariantWithContext>): Promise<VariantResult> {
+  return (await runVariantWithContext(...args)).result;
+}
+
+/** 同 runVariant，另返回组装好的回答上下文，供回答层评估送入 Chat 模型。 */
+export async function runVariantWithContext(
   question: Pick<EvaluationQuestion, "question" | "type" | "labels">, variant: RetrievalVariant, settings: RetrievalSettings,
   dependencies: RetrievalDependencies, articleKeyOf: (documentId: string) => string, context: ContextOptions = { mode: "topk" },
-): Promise<VariantResult> {
+): Promise<{ result: VariantResult; context: AnswerContext }> {
   const started = performance.now();
   const { chunks, warnings } = await retrieve(question.question, { ...settings, topK: RANKING_DEPTH, rerankEnabled: variant === "rerank" }, variantDependencies(variant, dependencies));
   const retrievalMs = round(performance.now() - started, 1);
@@ -203,11 +208,12 @@ export async function runVariant(
     const text = items.filter((chunk) => chunk.articleKey === label.articleKey).map((chunk) => chunk.content).join("\n");
     return Boolean(text) && label.evidence[match]((evidence) => evidenceCoverage(evidence, text) >= EVIDENCE_COVERAGE);
   });
-  return {
+  const result: VariantResult = {
     articles, chunks: ranked, context: items.map(({ chunkId, articleKey, sectionId }) => ({ chunkId, articleKey, ...(context.mode === "section" && sectionId ? { sectionId } : {}) })),
     contextChars: items.reduce((sum, chunk) => sum + chunk.content.length, 0),
     rank: index >= 0 ? index + 1 : null, contextHit: items.some((chunk) => sources.has(chunk.articleKey)), evidenceHit: covered("some"), evidenceFull: covered("every"), retrievalMs, warnings,
   };
+  return { result, context: assembled };
 }
 
 export const failedResult = (error: string): VariantResult => ({ articles: [], chunks: [], context: [], rank: null, contextHit: false, evidenceHit: null, retrievalMs: 0, warnings: [], error });
@@ -229,7 +235,7 @@ export function hybridMetrics(results: VariantResult[]): HybridMetrics {
   };
 }
 
-const groupKey: Record<GroupDimension, (question: RunQuestion) => string> = {
+export const groupKey: Record<GroupDimension, (question: Pick<RunQuestion, "split" | "type" | "specificity" | "lexicalOverlap">) => string> = {
   split: (question) => question.split,
   type: (question) => question.type,
   specificity: (question) => question.specificity ?? "unknown",

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { join, relative, resolve, dirname } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import {
-  evaluateRetrieval, filterSplit, normalizeEvidenceText, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset,
+  evaluateRetrieval, filterSplit, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset,
   type DatasetValidationOptions, type EvaluationDataset, type EvaluationQuestion, type Split,
 } from "../evaluation.js";
 import {
@@ -24,8 +24,7 @@ import { DEFAULT_RETRIEVAL_SETTINGS, type RetrievalDependencies, type RetrievalS
 import { documents } from "../schema.js";
 import { getModelSelections, keywordSearchChunks, listKnowledgeBases, listSectionContexts, summarySearchChunks, vectorSearchChunks } from "../repository.js";
 import { searchTerms } from "../search-terms.js";
-import { evidenceSource } from "../synthetic-questions.js";
-import { loadCorpus, useEvaluationSchema, withRetry } from "./evaluation-corpus.js";
+import { loadCorpus, staleQuestionReason, useEvaluationSchema, withRetry } from "./evaluation-corpus.js";
 
 const arg = (name: string, fallback?: string) => process.argv.find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
@@ -171,18 +170,8 @@ async function hybrid() {
     if (incomplete) console.warn(`向量化覆盖率 ${(snapshot.embeddingCoverage * 100).toFixed(2)}%，运行结果标记为不完整。`);
     if (contextMode === "section" && snapshot.chunkerVersion !== 2) console.warn("语料不是全部按父子块（切片规则 2）切分，没有父块的切片按切片放入上下文。");
 
-    // 来源文章被删除或证据已不在原文中（含标题与元数据线索）的题目排除，标注到「文章 + 证据」，与切片无关。
-    const staleReason = (question: EvaluationQuestion) => {
-      for (const label of sourceLabels(question)) {
-        const article = byKey.get(label.articleKey);
-        if (!article) return `来源文章 ${label.articleKey} 不在语料中`;
-        const source = normalizeEvidenceText(evidenceSource(article, question.type === "metadata" ? "metadata" : "fact"));
-        if (label.evidence.some((text) => !source.includes(normalizeEvidenceText(text)))) return `证据已不在来源文章 ${label.articleKey} 中`;
-      }
-      return undefined;
-    };
     const entries: Array<[RunQuestion, EvaluationQuestion]> = selected.map((question) => {
-      const excluded = staleReason(question);
+      const excluded = staleQuestionReason(question, byKey);
       return [{
         id: question.id, question: question.question, type: question.type, split: question.split,
         ...(question.specificity ? { specificity: question.specificity } : {}),

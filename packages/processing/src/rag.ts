@@ -266,6 +266,14 @@ function historyMessages(history: ChatTurn[]): ChatMessage[] {
   });
 }
 
+/** 送入模型的参考资料正文：按引用编号排列，每项带文章标题与章节。 */
+export function referenceText(context: AnswerContext): string {
+  return [...context.chunks].sort((a, b) => a.citation - b.citation).map((chunk) => {
+    const header = `[${chunk.citation}] 《${chunk.title}》${chunk.sectionPath.length ? ` 章节：${chunk.sectionPath.join(" > ")}` : ""}`;
+    return `${header}\n${chunk.content}`;
+  }).join("\n\n");
+}
+
 export function buildChatMessages(prompt: string, question: string, context: AnswerContext, history: ChatTurn[] = []): ChatMessage[] {
   const system = [
     prompt.trim() || DEFAULT_ANSWER_PROMPT,
@@ -275,14 +283,10 @@ export function buildChatMessages(prompt: string, question: string, context: Ans
     "- 使用简体中文，条理清晰，保留化学式、数值与单位的原始写法。",
     ...(history.length ? ["- 之前的对话只用于理解当前问题的指代，事实依据仍以本轮「参考资料」为准。"] : []),
   ].join("\n");
-  const references = [...context.chunks].sort((a, b) => a.citation - b.citation).map((chunk) => {
-    const header = `[${chunk.citation}] 《${chunk.title}》${chunk.sectionPath.length ? ` 章节：${chunk.sectionPath.join(" > ")}` : ""}`;
-    return `${header}\n${chunk.content}`;
-  });
   return [
     { role: "system", content: system },
     ...historyMessages(history),
-    { role: "user", content: `参考资料：\n\n${references.join("\n\n")}\n\n问题：${question}` },
+    { role: "user", content: `参考资料：\n\n${referenceText(context)}\n\n问题：${question}` },
   ];
 }
 

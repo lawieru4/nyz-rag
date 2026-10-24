@@ -26,6 +26,8 @@ function isKnownOpenAI(provider: ProviderEndpoint): boolean {
   return [provider.name, provider.provider].some((value) => value.trim().toLowerCase() === "openai");
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
 /** 基础地址 + 接口路径（如 embeddings、chat/completions、rerank）；label 用于错误信息。 */
 export function providerUrl(provider: ProviderEndpoint, path: string, label: string): string {
   const configuredBaseUrl = provider.baseUrl.trim();
@@ -43,6 +45,9 @@ export function providerUrl(provider: ProviderEndpoint, path: string, label: str
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`The ${label} API base URL must use HTTP or HTTPS.`);
   }
+  // 容器内（docker/start.mjs 设置 NYZ_LOOPBACK_HOST）把本机地址改为宿主机，同一个 127.0.0.1 地址在容器内外都能访问宿主机上的本地模型或代理。
+  const loopbackHost = process.env.NYZ_LOOPBACK_HOST?.trim();
+  if (loopbackHost && LOOPBACK_HOSTS.has(url.hostname)) url.hostname = loopbackHost;
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/${path}`;
   return url.toString();
 }

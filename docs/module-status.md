@@ -120,6 +120,14 @@
   - **实验**：在 dev 集上比较了现有切片、子块和父块组装。在相同字数预算下，rerank 指标变化在 1 个百分点以内，没有正收益，暂不上线。线上 topK=5 只用了约一半上下文预算，填满后 fused 证据命中由 76.8 升到 94.0。详见 evaluation-plan.md 第 8.6 节。
   - **发现**：规则 1 拆超长段落时会丢掉没有句末标点、以换行结尾的行。为保持基线可比，暂未修复；规则 2 没有这个问题。
   - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 103 项（91 通过、12 项集成测试默认跳过）全部无失败。
+- 本轮完成（回答层评估工具，2026-10-24）：
+  - **命令**：`evaluate:answer` 逐题按问答的方式检索（`retrieve()`，变体默认随知识库），按 `--context=topk|budget|section` 组装上下文，调用 Chat 模型回答，不保存问答记录；再由审核模型评审 `faithful`（忠实于参考资料）、`complete`（答到参考答案要点）、`citation`（引用恰当）三项 1～5 分，以及是否表示资料不足。详见 evaluation-plan.md 第 8.7 节。
+  - **指标**：引用统计（有引用、无效编号、来源文章被引用的比例，分全部题目与来源文章在上下文中的题目两种分母）、各评审项通过率与均分、上下文字数、Token 与首 Token 耗时，按 split、题型、具体度、词面重叠分组。
+  - **工作文件与对比**：结果逐题追加到 `.nyz-data/eval-answers/<运行名>/items.jsonl`，可断点续跑（评审失败只重新评审），参数或模型变化时拒绝续跑；`--compare` 对比两次运行都已评审的题目并列出通过/未通过变化。
+  - **重构**：`rag.ts` 抽出 `referenceText`（Chat 与评审共用参考资料文本，问答 Prompt 不变）；`evaluation-run.ts` 新增 `runVariantWithContext`；「因语料变化排除」的判断移到 `evaluation-corpus.ts` 共用。
+  - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 109 项（97 通过、12 项集成测试默认跳过）、API 112 项（110 通过、2 项跳过）全部无失败；业务库 dev 前 2 题冒烟运行、续跑、参数不一致拒绝与 `--compare` 正常。
+  - **基线**：Chat 为 gemini-3.8-flash-high，审核为 gpt-6.1-sol。dev 集 `answer-topk` 的 faithful / complete / citation 通过率为 100.0 / 97.5 / 99.6，未通过的题主要是证据不在上下文中。按字数预算组装（`answer-budget`）的差别在 1～2 道题以内，输入 Token 翻倍，暂不上线。详见 evaluation-plan.md 第 8.8 节。
+  - **本机模型地址**：容器内 `providerUrl` 按 `NYZ_LOOPBACK_HOST`（由 `docker/start.mjs` 设置）把模型供应商地址中的本机地址改为 `host.docker.internal`，后台填 `http://127.0.0.1:<端口>/v1` 即可在容器内外共用。
 
 ## 向量化运行配置
 

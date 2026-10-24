@@ -22,7 +22,7 @@ docker compose ps
 Docker Desktop 将显示独立的 `nyz-rag` 分组，包含 `api`、`worker`、`web`、`admin`，不会新建 PostgreSQL 或 Redis。用户端为 http://localhost:5175，管理后台为 http://localhost:5176，API 健康检查为 http://localhost:3001/health。
 
 - 应用镜像统一使用仓库根 `Dockerfile` 构建；修改代码后重新运行上述构建启动命令。
-- `.env` 只注入后端运行时，不进入镜像。后端启动器将连接串中的 `localhost` / `127.0.0.1` / `::1` 转为 `host.docker.internal`，通过宿主机端口连接已有服务；非本机地址保持不变。
+- `.env` 只注入后端运行时，不进入镜像。后端启动器将连接串中的 `localhost` / `127.0.0.1` / `::1` 转为 `host.docker.internal`，通过宿主机端口连接已有服务；非本机地址保持不变。管理端配置的模型供应商地址同样处理（启动器设置 `NYZ_LOOPBACK_HOST`），本机的模型或代理填 `http://127.0.0.1:<端口>/v1` 即可，容器内与宿主机上的命令行都能访问；不要填 `host.docker.internal`，宿主机上它可能解析为局域网 IP，只监听 127.0.0.1 的服务无法访问。
 - 前端使用 Nginx 提供构建产物并将 `/api/` 代理到 API，浏览器不依赖容器 DNS，也不需要在镜像中配置宿主机 API 地址。Docker 构建固定使用同源 API，不使用本机的 `VITE_API_URL`。
 - 元数据与向量都存于 `DATABASE_URL` 指向的 PostgreSQL，容器不挂载数据目录；API 和 Worker 启动时自动执行数据库迁移。不要同时启动本机 Worker 和容器 Worker 消费同一队列。
 - 仅将端口暴露到 `127.0.0.1`。管理后台需在 `.env` 设置 `ADMIN_PASSWORD`（16 位以上随机密码）后才能登录；对外部署时设置实际 HTTPS 来源的 `ADMIN_ORIGINS` 与 `ADMIN_COOKIE_SECURE=true`。

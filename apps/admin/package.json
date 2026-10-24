@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc -b && vite build",
     "typecheck": "vue-tsc -b --pretty false",
+    "test": "node --test test/*.test.ts",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

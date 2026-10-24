@@ -29,9 +29,9 @@ function handleSubmit() {
   <div class="flex min-h-screen items-center justify-center p-4">
     <Card class="w-full max-w-100 gap-0 px-9 pt-10 pb-9">
       <div class="mb-9 flex items-center gap-3">
-        <span class="grid size-9 flex-none place-items-center rounded-lg bg-sidebar-primary text-base font-bold text-sidebar-primary-foreground">N</span>
+        <img src="/logo.png" alt="能知" class="h-12 w-36 flex-none object-contain" />
         <div>
-          <span class="block text-sm font-bold">NYZ <b class="mt-0.5 block font-mono text-[9px] font-medium text-muted-foreground">KNOWLEDGE OPS</b></span>
+          <span class="block font-mono text-[9px] font-medium text-muted-foreground">新能源知识助手</span>
           <span class="block text-[10px] text-muted-foreground">管理后台</span>
         </div>
       </div>

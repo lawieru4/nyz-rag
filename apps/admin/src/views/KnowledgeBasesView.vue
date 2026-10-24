@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { Plus } from "@lucide/vue";
+import type { KnowledgeBaseRecord, SaveKnowledgeBaseRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@nyz-rag/ui/components/dialog";
@@ -14,24 +15,22 @@ import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { client } from "../workspace";
 
-type KnowledgeBase = { id: string; name: string; description: string; topK: number; similarityThreshold: number; rerankEnabled: boolean; maxContextLength: number; prompt: string; model: string; createdAt: string; updatedAt: string };
-
-const emptyForm = () => ({ name: "", description: "", topK: 5, similarityThreshold: 0.35, rerankEnabled: false, maxContextLength: 6000, prompt: "请依据提供的知识库内容回答问题；若资料不足，请明确说明。", model: "默认模型" });
-const knowledgeBases = ref<KnowledgeBase[]>([]);
+const emptyForm = (): SaveKnowledgeBaseRequest => ({ name: "", description: "", topK: 5, similarityThreshold: 0.35, rerankEnabled: false, maxContextLength: 6000, prompt: "请依据提供的知识库内容回答问题；若资料不足，请明确说明。", model: "默认模型" });
+const knowledgeBases = ref<KnowledgeBaseRecord[]>([]);
 const dialogOpen = ref(false);
 const editingId = ref("");
 const form = ref(emptyForm());
 
 async function loadKnowledgeBases() {
   try {
-    knowledgeBases.value = await client.request<KnowledgeBase[]>("/api/admin/knowledge-bases");
+    knowledgeBases.value = await client.request<KnowledgeBaseRecord[]>("/api/admin/knowledge-bases");
   } catch {
     toast.error("知识库列表加载失败，请检查 API 服务");
   }
 }
 onMounted(loadKnowledgeBases);
 
-function edit(item?: KnowledgeBase) {
+function edit(item?: KnowledgeBaseRecord) {
   editingId.value = item?.id ?? "";
   form.value = item ? { name: item.name, description: item.description, topK: item.topK, similarityThreshold: item.similarityThreshold, rerankEnabled: item.rerankEnabled, maxContextLength: item.maxContextLength, prompt: item.prompt, model: item.model } : emptyForm();
   dialogOpen.value = true;

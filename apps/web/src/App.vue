@@ -348,7 +348,7 @@ function useSuggestion(text: string) {
       <header class="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 bg-background/85 px-5 backdrop-blur max-sm:px-3">
         <div class="flex min-w-0 items-center gap-1.5">
           <IconButton v-if="articleId === null" label="历史会话" class="lg:hidden" @click="sidebarOpen = true"><Menu /></IconButton>
-          <a class="flex items-center gap-2.5 text-sm font-bold max-sm:text-[13px]" href="#/" aria-label="NYZ RAG 首页"><span class="grid size-7 place-items-center rounded-md bg-brand text-[15px] text-brand-foreground">N</span><span>NYZ <b class="font-medium text-muted-foreground">知识问答</b></span></a>
+          <a class="flex items-center gap-2 text-sm max-sm:gap-1 max-sm:text-[13px]" href="#/" aria-label="能知首页"><img src="/logo.png" alt="能知" class="h-12 w-36 object-contain max-sm:h-10 max-sm:w-30" /><span class="font-medium text-muted-foreground">知识助手</span></a>
         </div>
         <div class="flex items-center gap-2">
           <IconButton v-if="articleId === null" label="新对话" class="lg:hidden" :disabled="busy" @click="newSession"><SquarePen /></IconButton>
@@ -392,8 +392,8 @@ function useSuggestion(text: string) {
 
         <section :class="['mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-200 flex-col px-8 max-sm:px-4', turns.length ? 'pt-8' : 'justify-center pt-12 pb-[12vh] max-sm:pt-8']">
           <div v-if="!turns.length" class="mb-7">
-            <p class="eyebrow mb-4">NYZ ARTICLE INTELLIGENCE</p>
-            <h1 class="text-[34px] leading-[1.35] font-semibold max-sm:text-[28px]">从文章中，<span class="text-[#788648]">找到答案。</span></h1>
+            <p class="eyebrow mb-4">能知 · 新能源知识助手</p>
+            <h1 class="text-[34px] leading-[1.35] font-semibold max-sm:text-[28px]">从文章中，<span class="text-[#788648]">找到有据可查的答案。</span></h1>
             <p class="mt-3 text-sm text-muted-foreground">向知识库提问，回答将基于已收录的文章内容。</p>
           </div>
           <h1 v-else class="mb-5 truncate text-[15px] font-semibold">{{ sessionTitle }}</h1>

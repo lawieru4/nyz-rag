@@ -2,9 +2,10 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { ArticleMetadata } from "@nyz-rag/types";
 import { getDb } from "../db.js";
-import { corpusFingerprint, type CorpusSnapshot } from "../evaluation.js";
+import { corpusFingerprint, normalizeEvidenceText, type CorpusSnapshot, type EvaluationQuestion } from "../evaluation.js";
+import { sourceLabels } from "../evaluation-run.js";
 import { documents } from "../schema.js";
-import type { CorpusArticle } from "../synthetic-questions.js";
+import { evidenceSource, type CorpusArticle } from "../synthetic-questions.js";
 
 export type EvaluationCorpusArticle = CorpusArticle & { documentId: string };
 
@@ -70,4 +71,18 @@ export async function loadCorpus(): Promise<{ articles: EvaluationCorpusArticle[
       embeddingCoverage: rows.length ? Math.round((embedded / rows.length) * 10_000) / 10_000 : 0,
     },
   };
+}
+
+/**
+ * 因语料变化需排除的原因：来源文章已不在语料中，或证据已不在原文（metadata 题含标题与元数据线索）中；仍有效时为 undefined。
+ * 标注到「文章 + 证据」，与切片无关。
+ */
+export function staleQuestionReason(question: EvaluationQuestion, byKey: Map<string, CorpusArticle>): string | undefined {
+  for (const label of sourceLabels(question)) {
+    const article = byKey.get(label.articleKey);
+    if (!article) return `来源文章 ${label.articleKey} 不在语料中`;
+    const source = normalizeEvidenceText(evidenceSource(article, question.type === "metadata" ? "metadata" : "fact"));
+    if (label.evidence.some((text) => !source.includes(normalizeEvidenceText(text)))) return `证据已不在来源文章 ${label.articleKey} 中`;
+  }
+  return undefined;
 }
