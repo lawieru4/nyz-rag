@@ -5,6 +5,7 @@ import ts from "typescript";
 import * as vue from "vue";
 import { compileScript, parse } from "vue/compiler-sfc";
 import { usePaginatedList } from "../src/composables/usePaginatedList.ts";
+import { usePending } from "../src/composables/usePending.ts";
 
 async function flush() {
   for (let index = 0; index < 6; index++) await Promise.resolve();
@@ -23,11 +24,15 @@ function mountView(name: string) {
   new Function("require", "exports", compiled)((id: string) => {
     if (id === "vue") return vue;
     if (id === "../composables/usePaginatedList") return { usePaginatedList };
+    if (id === "../composables/usePending") return { usePending };
     if (id === "../workspace") return {
       pageSize: 10,
       client: { request: (path: string, init: RequestInit = {}) => new Promise((resolve, reject) => requests.push({ path, init, resolve, reject })) },
       loadKnowledge: async () => { knowledgeLoads++; },
       errorMessage: (_error: unknown, fallback: string) => fallback,
+      refreshAfterWrite: async (refresh: () => Promise<unknown>) => {
+        try { await refresh(); } catch { errors.push("刷新失败"); }
+      },
     };
     if (id === "@nyz-rag/ui/lib/toast") return { toast: { error: (message: string) => errors.push(message), success: (message: string) => successes.push(message) } };
     if (id === "@nyz-rag/ui/confirm") return { confirm: async () => true };
@@ -118,6 +123,9 @@ test("document deletion retains last-row page fallback and shared knowledge refr
   view.page.value = 2;
   const deletion = view.deleteDocument(document);
   await flush();
+  await view.deleteDocument(document);
+  await view.embedDocument(document);
+  assert.equal(requests.length, 2, "writes to a pending document are ignored");
   assert.equal(requests[1].init.method, "DELETE");
   requests[1].resolve(undefined);
   await flush();
@@ -127,6 +135,23 @@ test("document deletion retains last-row page fallback and shared knowledge refr
   await deletion;
   assert.equal(knowledgeLoads(), 1);
   assert.deepEqual(successes, ["文档已删除"]);
+});
+
+test("a failed refresh after a successful write is not reported as a failed write", async (t) => {
+  const { view, requests, errors, successes, unmount } = mountView("DocumentsView");
+  t.after(unmount);
+  const document = { id: "a", title: "Article", updatedAt: "v1", chunkCount: 1 };
+  requests[0].resolve({ documents: [document], total: 1 });
+  await flush();
+  const embedding = view.embedDocument(document);
+  assert.equal(requests[1].path, "/api/admin/documents/a/embed");
+  requests[1].resolve(undefined);
+  await flush();
+  requests[2].reject(new Error("Unavailable"));
+  await embedding;
+  assert.deepEqual(successes, ["《Article》已加入向量化队列"]);
+  // The list composable reports its own load failure; the write itself is not reported as failed.
+  assert.ok(!errors.includes("向量化任务创建失败，请检查 API 服务"));
 });
 
 test("users retain account toggle behavior and current-page list replacement", async (t) => {

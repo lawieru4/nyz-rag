@@ -1,15 +1,12 @@
 import { ref } from "vue";
 import type { AdminPermission, KnowledgeOverview } from "@nyz-rag/types";
+import { toast } from "@nyz-rag/ui/lib/toast";
 import { AdminApiClient, ApiError } from "./adminClient";
+import { createKnowledgeOverview } from "./knowledge-overview";
 
 export { ApiError };
+export type { Source, Task } from "./knowledge-overview";
 export { errorMessage } from "@nyz-rag/api-client";
-
-export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; remoteTotal: number | null; backfillDone: boolean; failedCount: number; updated: string; syncedAt: string | null };
-export type Task = {
-  id: string; sourceId: string; source: string; status: "已完成" | "运行中" | "等待中" | "失败"; progress: number;
-  processedCount: number; failedCount: number; articleLimit?: number; started: string; error?: string;
-};
 
 export const client = new AdminApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
 export const pageSize = 10;
@@ -23,17 +20,10 @@ export const permissions = ref<readonly AdminPermission[]>([]);
 export const can = (...required: AdminPermission[]) => required.some((permission) => permissions.value.includes(permission));
 
 /** 数据源与任务由多个模块共用（文档筛选、来源名称），退出登录时清空。 */
-export const sources = ref<Source[]>([]);
-export const tasks = ref<Task[]>([]);
-
-function applyKnowledge(data: KnowledgeOverview) {
-  sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, syncedAt: source.updatedAt, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
-  tasks.value = data.tasks.map(({ sourceName, createdAt, ...task }) => ({ ...task, source: sourceName, started: new Date(createdAt).toLocaleString() }));
-}
-
-export async function loadKnowledge() {
-  applyKnowledge(await client.request<KnowledgeOverview>("/api/admin/knowledge"));
-}
+const overview = createKnowledgeOverview((signal) => client.request<KnowledgeOverview>("/api/admin/knowledge", { signal }));
+export const { sources, tasks } = overview;
+export const loadKnowledge = overview.load;
+export const resetKnowledge = overview.reset;
 
 /**
  * 订阅数据源与同步任务的实时推送（SSE），返回取消订阅函数。
@@ -43,9 +33,10 @@ export function watchKnowledge(): () => void {
   let source: EventSource | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
+  const generation = overview.generation();
   const connect = () => {
     source = new EventSource(`${client.baseUrl}/api/admin/knowledge/events`, { withCredentials: true });
-    source.addEventListener("overview", (event) => applyKnowledge(JSON.parse((event as MessageEvent<string>).data)));
+    source.addEventListener("overview", (event) => { if (!stopped) overview.applySnapshot((event as MessageEvent<string>).data, generation); });
     source.onerror = () => {
       if (source?.readyState !== EventSource.CLOSED || stopped) return;
       loadKnowledge().catch(() => {});
@@ -60,9 +51,13 @@ export function watchKnowledge(): () => void {
   };
 }
 
-export function resetKnowledge() {
-  sources.value = [];
-  tasks.value = [];
+/** 写入成功后刷新列表；刷新失败单独提示，不当作写入失败，避免重复提交。 */
+export async function refreshAfterWrite(refresh: () => Promise<unknown>) {
+  try {
+    await refresh();
+  } catch {
+    toast.error("操作已完成，但列表刷新失败，请稍后刷新页面");
+  }
 }
 
 export function sourceName(id: string | undefined) {

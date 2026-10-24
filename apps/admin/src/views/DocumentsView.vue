@@ -14,7 +14,8 @@ import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { usePaginatedList } from "../composables/usePaginatedList";
-import { can, client, errorMessage, loadKnowledge, pageSize, sourceName, sources } from "../workspace";
+import { usePending } from "../composables/usePending";
+import { can, client, errorMessage, loadKnowledge, pageSize, refreshAfterWrite, sourceName, sources } from "../workspace";
 import DocumentDetailSheet from "./DocumentDetailSheet.vue";
 import { documentBusy, documentStatuses, embeddingStatuses, processingLabel } from "./documents";
 
@@ -75,37 +76,49 @@ function closeDocument() {
   selected.value = null;
 }
 
-async function reprocessDocument(document: DocumentSummary) {
-  try {
-    await client.request(`/api/admin/documents/${document.id}/reprocess`, { method: "POST" });
+// 同一文档的重处理、向量化与删除在完成前不再重复提交。
+const { isPending, run } = usePending();
+
+function reprocessDocument(document: DocumentSummary) {
+  return run(document.id, async () => {
+    try {
+      await client.request(`/api/admin/documents/${document.id}/reprocess`, { method: "POST" });
+    } catch {
+      toast.error("文档重处理任务创建失败");
+      return;
+    }
     toast.success(`《${document.title}》已加入清洗与切片队列`);
-    await loadDocuments();
-  } catch {
-    toast.error("文档重处理任务创建失败");
-  }
+    await refreshAfterWrite(loadDocuments);
+  });
 }
 
-async function embedDocument(document: DocumentSummary) {
-  try {
-    await client.request(`/api/admin/documents/${document.id}/embed`, { method: "POST" });
+function embedDocument(document: DocumentSummary) {
+  return run(document.id, async () => {
+    try {
+      await client.request(`/api/admin/documents/${document.id}/embed`, { method: "POST" });
+    } catch (err) {
+      toast.error(errorMessage(err, "向量化任务创建失败，请检查 API 服务"));
+      return;
+    }
     toast.success(`《${document.title}》已加入向量化队列`);
-    await loadDocuments();
-  } catch (err) {
-    toast.error(errorMessage(err, "向量化任务创建失败，请检查 API 服务"));
-  }
+    await refreshAfterWrite(loadDocuments);
+  });
 }
 
 async function deleteDocument(document: DocumentSummary) {
-  if (!await confirm({ title: "删除文档", description: `确定删除《${document.title}》？此操作不可撤销。`, confirmText: "删除", destructive: true })) return;
-  try {
-    await client.request(`/api/admin/documents/${document.id}`, { method: "DELETE" });
+  if (isPending(document.id) || !await confirm({ title: "删除文档", description: `确定删除《${document.title}》？此操作不可撤销。`, confirmText: "删除", destructive: true })) return;
+  await run(document.id, async () => {
+    try {
+      await client.request(`/api/admin/documents/${document.id}`, { method: "DELETE" });
+    } catch {
+      toast.error("文档删除失败");
+      return;
+    }
     if (documents.value.length === 1 && page.value > 1) page.value -= 1;
-    closeDocument();
-    await Promise.all([loadDocuments(), loadKnowledge()]);
+    if (selected.value?.id === document.id) closeDocument();
     toast.success("文档已删除");
-  } catch {
-    toast.error("文档删除失败");
-  }
+    await refreshAfterWrite(() => Promise.all([loadDocuments(), loadKnowledge()]));
+  });
 }
 </script>
 
@@ -135,10 +148,10 @@ async function deleteDocument(document: DocumentSummary) {
           <TableCell>{{ new Date(document.updatedAt).toLocaleString() }}</TableCell>
           <TableCell>
             <div class="flex justify-end gap-0.5">
-              <Button v-if="can('documents:manage')" variant="ghost" size="sm" class="h-8 px-2 text-xs" :disabled="documentBusy(document) || !document.chunkCount" title="向量化或重试" @click="embedDocument(document)">向量化</Button>
-              <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" :disabled="documentBusy(document)" title="重新清洗与切片" aria-label="重新清洗与切片" @click="reprocessDocument(document)"><RefreshCw /></Button>
+              <Button v-if="can('documents:manage')" variant="ghost" size="sm" class="h-8 px-2 text-xs" :disabled="isPending(document.id) || documentBusy(document) || !document.chunkCount" title="向量化或重试" @click="embedDocument(document)">向量化</Button>
+              <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" :disabled="isPending(document.id) || documentBusy(document)" title="重新清洗与切片" aria-label="重新清洗与切片" @click="reprocessDocument(document)"><RefreshCw /></Button>
               <Button variant="ghost" size="icon-sm" title="查看详情" aria-label="查看详情" @click="openDocument(document.id)"><ArrowUpRight /></Button>
-              <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" class="hover:text-destructive" :disabled="documentBusy(document)" title="删除文档" aria-label="删除文档" @click="deleteDocument(document)"><Trash2 /></Button>
+              <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" class="hover:text-destructive" :disabled="isPending(document.id) || documentBusy(document)" title="删除文档" aria-label="删除文档" @click="deleteDocument(document)"><Trash2 /></Button>
             </div>
           </TableCell>
         </TableRow>
@@ -148,5 +161,5 @@ async function deleteDocument(document: DocumentSummary) {
     <EmptyState v-else-if="!documents.length">{{ query || sourceId || status ? '没有符合条件的文档' : '知识库中还没有文档' }}</EmptyState>
     <ListPager v-model:page="page" :total="total" unit="篇" :disabled="loading" class="mt-auto" @update:page="loadDocuments" />
   </Card>
-  <DocumentDetailSheet :document="selected" @close="closeDocument" @open="openDocument" @embed="embedDocument" @reprocess="reprocessDocument" @delete="deleteDocument" />
+  <DocumentDetailSheet :document="selected" :pending="!!selected && isPending(selected.id)" @close="closeDocument" @open="openDocument" @embed="embedDocument" @reprocess="reprocessDocument" @delete="deleteDocument" />
 </template>

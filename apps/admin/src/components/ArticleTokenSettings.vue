@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { KeyRound } from "@lucide/vue";
 import type { SecretSettingStatus } from "@nyz-rag/types";
 import { Badge } from "@nyz-rag/ui/components/badge";
@@ -17,6 +17,9 @@ const tokenStatus = ref<SecretSettingStatus | null>(null);
 const tokenDialogOpen = ref(false);
 const tokenValue = ref("");
 const tokenPath = "/api/admin/settings/article-token";
+const saving = ref(false);
+// 提交期间不能关闭弹窗。
+const dialogOpen = computed({ get: () => tokenDialogOpen.value, set: (value) => { if (!saving.value) tokenDialogOpen.value = value; } });
 
 async function loadTokenStatus() {
   try {
@@ -28,6 +31,8 @@ async function loadTokenStatus() {
 onMounted(loadTokenStatus);
 
 async function saveToken() {
+  if (saving.value) return;
+  saving.value = true;
   try {
     tokenStatus.value = await client.request<SecretSettingStatus>(tokenPath, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: tokenValue.value.trim() }) });
     tokenValue.value = "";
@@ -35,18 +40,25 @@ async function saveToken() {
     toast.success("接口 Token 已保存，下次同步生效");
   } catch (err) {
     toast.error(errorMessage(err, "接口 Token 保存失败"));
+  } finally {
+    saving.value = false;
   }
 }
 
 async function clearToken() {
-  if (!await confirm({ title: "清除接口 Token", description: "清除后数据源将无法同步，直到重新填写。确定清除？", confirmText: "清除", destructive: true })) return;
+  if (saving.value || !await confirm({ title: "清除接口 Token", description: "清除后数据源将无法同步，直到重新填写。确定清除？", confirmText: "清除", destructive: true })) return;
+  if (saving.value) return;
+  saving.value = true;
   try {
     await client.request(tokenPath, { method: "DELETE" });
-    await loadTokenStatus();
-    toast.success("接口 Token 已清除");
   } catch {
     toast.error("接口 Token 清除失败");
+    return;
+  } finally {
+    saving.value = false;
   }
+  if (tokenStatus.value) tokenStatus.value = { ...tokenStatus.value, configured: false, updatedAt: null };
+  toast.success("接口 Token 已清除");
 }
 </script>
 
@@ -66,11 +78,11 @@ async function clearToken() {
     </div>
     <div v-if="can('sources:manage')" class="flex gap-1.5">
       <Button variant="outline" size="sm" :disabled="tokenStatus?.encryptionReady === false" @click="tokenDialogOpen = true">{{ tokenStatus?.configured ? '更换' : '设置' }}</Button>
-      <Button v-if="tokenStatus?.configured" variant="outline" size="sm" class="text-destructive hover:text-destructive" @click="clearToken">清除</Button>
+      <Button v-if="tokenStatus?.configured" variant="outline" size="sm" class="text-destructive hover:text-destructive" :disabled="saving" @click="clearToken">清除</Button>
     </div>
   </Card>
 
-  <Dialog v-model:open="tokenDialogOpen">
+  <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[10px] font-medium tracking-wider text-link">ARTICLE API TOKEN</p>
@@ -80,8 +92,8 @@ async function clearToken() {
         <div class="grid gap-2"><Label for="article-token">Token</Label><Input id="article-token" v-model="tokenValue" type="password" autocomplete="new-password" required maxlength="4096" pattern="\S+" placeholder="nyzdata 文章接口 token" /></div>
         <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">Token 加密保存在数据库中，保存后不再显示；Worker 在每次同步时读取，无需重启。</p>
         <DialogFooter>
-          <Button type="button" variant="outline" @click="tokenDialogOpen = false">取消</Button>
-          <Button type="submit">保存</Button>
+          <Button type="button" variant="outline" :disabled="saving" @click="dialogOpen = false">取消</Button>
+          <Button type="submit" :disabled="saving" :aria-busy="saving">{{ saving ? '保存中…' : '保存' }}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

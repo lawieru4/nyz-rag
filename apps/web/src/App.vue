@@ -51,12 +51,16 @@ const wideQuery = window.matchMedia("(min-width: 1280px)");
 const wide = ref(wideQuery.matches);
 function onWideChange(event: MediaQueryListEvent) { wide.value = event.matches; }
 
-const { question, busy, sessions, sessionId, turns, sessionError, loadSessions, openSession, newSession, restoreSession, ask, regenerate, stop } = useChatSession({
+const {
+  question, busy, ready, sessions, sessionId, turns, sessionError,
+  initialize, openSession, newSession, identityChanged, ask, regenerate, stop,
+} = useChatSession({
   client,
   storage: localStorage,
   currentFilters,
   onSessionChange: () => { citing.value = null; },
   onContentChange: scrollToEnd,
+  onError: (message) => toast.error(message),
 });
 
 const activeFilterCount = computed(() => [dateFrom.value, dateTo.value, categoriesText.value, tagsText.value, scenariosText.value].filter(Boolean).length);
@@ -107,9 +111,9 @@ onMounted(async () => {
   window.addEventListener("hashchange", syncArticleRoute);
   syncArticleRoute();
   // 会话按身份隔离：先确定身份（同时取得访客 Cookie），再加载历史会话，避免并发请求各自分配访客身份。
-  try { user.value = (await api<UserSessionResponse>("/api/auth/session")).user; } catch { /* 按访客继续 */ }
-  void loadSessions();
-  restoreSession();
+  void initialize(async () => {
+    try { user.value = (await api<UserSessionResponse>("/api/auth/session")).user; } catch { /* 按访客继续 */ }
+  });
   // 统计会随管理端同步变化：页面可见时定时刷新，切回页面时立即刷新。
   document.addEventListener("visibilitychange", onVisibilityChange);
   wideQuery.addEventListener("change", onWideChange);
@@ -152,8 +156,7 @@ function openAccount(mode: AccountMode) {
 function onAuthenticated(account: UserAccount) {
   user.value = account;
   accountMode.value = null;
-  sessionError.value = "";
-  void loadSessions();
+  identityChanged("signed-in");
 }
 
 function onPasswordChanged() {
@@ -169,11 +172,8 @@ async function logout() {
     toast.error(error instanceof Error ? error.message : "退出失败");
     return;
   }
-  // 退出后浏览器成为新的访客，账号中的会话不再可见。
   user.value = null;
-  newSession();
-  sessions.value = [];
-  void loadSessions();
+  identityChanged("signed-out");
 }
 
 async function removeSession(id: string) {
@@ -332,7 +332,7 @@ function useSuggestion(text: string) {
                   <div class="flex items-center gap-3">
                     <span class="font-mono text-[10px] text-muted-foreground/80 max-sm:hidden">⌘/Ctrl + Enter 提交</span>
                     <Button v-if="busy" type="button" size="sm" @click="stop">停止生成 <Square class="fill-current" /></Button>
-                    <Button v-else type="submit" size="sm" :disabled="!question.trim()">提问 <ArrowUpRight /></Button>
+                    <Button v-else type="submit" size="sm" :disabled="!question.trim() || !ready">提问 <ArrowUpRight /></Button>
                   </div>
                 </div>
               </Collapsible>

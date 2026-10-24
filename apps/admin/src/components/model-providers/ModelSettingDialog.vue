@@ -23,6 +23,9 @@ const json = { "content-type": "application/json" };
 const settingForm = ref({ providerId: "", model: "", temperature: 0.3, maxTokens: 1024 });
 const models = ref<string[]>([]);
 const loadingModels = ref(false);
+const saving = ref(false);
+// 提交期间不能关闭弹窗，避免旧提交的结果作用到新一轮编辑上。
+const dialogOpen = computed({ get: () => open.value, set: (value) => { if (!saving.value) open.value = value; } });
 const enabledProviders = computed(() => props.providers.filter((provider) => provider.enabled));
 const modelCandidates = computed(() => {
   const { pattern, exclude } = props.capability;
@@ -36,26 +39,43 @@ const visibleModels = computed(() => {
   return modelCandidates.value.filter((model) => model.toLowerCase().includes(query));
 });
 
+// 模型列表只采用最近一次请求的结果：切换供应商（含 A→B→A）、关闭弹窗都会让旧请求失效。
+let modelsRequest: AbortController | undefined;
+
+function cancelModels() {
+  modelsRequest?.abort();
+  modelsRequest = undefined;
+  loadingModels.value = false;
+}
+
 async function loadModels() {
+  cancelModels();
   const { providerId } = settingForm.value;
   models.value = [];
   if (!providerId) return;
+  const request = new AbortController();
+  modelsRequest = request;
   loadingModels.value = true;
   try {
-    const listed = (await client.request<ListProviderModelsResponse>(`/api/admin/model-providers/${providerId}/models`)).models;
-    // 加载期间切换了供应商时丢弃旧结果。
-    if (settingForm.value.providerId !== providerId) return;
+    const listed = (await client.request<ListProviderModelsResponse>(`/api/admin/model-providers/${providerId}/models`, { signal: request.signal })).models;
+    if (modelsRequest !== request) return;
     models.value = listed;
     if (!listed.length) toast.info("供应商没有返回可用模型，可以直接输入模型名");
   } catch (err) {
-    toast.error(errorMessage(err, "获取模型列表失败，可以直接输入模型名"));
+    if (modelsRequest === request) toast.error(errorMessage(err, "获取模型列表失败，可以直接输入模型名"));
   } finally {
-    loadingModels.value = false;
+    if (modelsRequest === request) {
+      modelsRequest = undefined;
+      loadingModels.value = false;
+    }
   }
 }
 
 watch(open, (isOpen) => {
-  if (!isOpen) return;
+  if (!isOpen) {
+    cancelModels();
+    return;
+  }
   const current = props.setting;
   const providerId = current && enabledProviders.value.some((provider) => provider.id === current.providerId) ? current.providerId : enabledProviders.value[0]?.id ?? "";
   settingForm.value = { providerId, model: current?.model ?? "", temperature: current?.temperature ?? props.capability.defaultTemperature ?? 0.3, maxTokens: current?.maxTokens ?? 1024 };
@@ -68,25 +88,32 @@ function selectProvider(id: unknown) {
 }
 
 async function saveSetting() {
+  if (saving.value) return;
   const capability = props.capability;
   const { providerId, model, temperature, maxTokens } = settingForm.value;
   const previous = props.setting;
   if (capability.id === "embedding" && previous && previous.model !== model.trim()
     && !await confirm({ title: "更换 Embedding 模型", description: "更换后，已向量化的文档需要重新向量化；在此之前向量检索只会使用同一模型的文档。确定更换？", confirmText: "更换" })) return;
   const body: SaveModelSettingRequest = { providerId, model: model.trim(), ...(capability.generative ? { temperature, maxTokens } : {}) };
+  // 确认弹窗期间可能已提交过一次。
+  if (saving.value) return;
+  saving.value = true;
   try {
     await client.request<ModelSettingRecord>(`/api/admin/model-settings/${capability.id}`, { method: "PUT", headers: json, body: JSON.stringify(body) });
-    await props.refresh();
-    open.value = false;
-    toast.success(`${capability.label} 模型已保存`);
   } catch (err) {
     toast.error(errorMessage(err, "模型保存失败"));
+    return;
+  } finally {
+    saving.value = false;
   }
+  open.value = false;
+  toast.success(`${capability.label} 模型已保存`);
+  await props.refresh();
 }
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-lg" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[10px] font-medium tracking-wider text-link">MODEL SETTING</p>
@@ -123,8 +150,8 @@ async function saveSetting() {
         </div>
         <p v-if="capability.id === 'embedding'" class="text-xs leading-relaxed text-muted-foreground">更换 Embedding 模型后，已向量化的文档需要重新向量化。</p>
         <DialogFooter>
-          <Button type="button" variant="outline" @click="open = false">取消</Button>
-          <Button type="submit" :disabled="!settingForm.providerId || !settingForm.model.trim()">保存</Button>
+          <Button type="button" variant="outline" :disabled="saving" @click="dialogOpen = false">取消</Button>
+          <Button type="submit" :disabled="saving || !settingForm.providerId || !settingForm.model.trim()" :aria-busy="saving">{{ saving ? '保存中…' : '保存' }}</Button>
         </DialogFooter>
       </form>
     </DialogContent>

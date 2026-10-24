@@ -12,6 +12,7 @@ import ListPager from "../components/ListPager.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { usePaginatedList } from "../composables/usePaginatedList";
+import { usePending } from "../composables/usePending";
 import { can, client, errorMessage, pageSize } from "../workspace";
 
 const { items: users, total, query, page, loading, load: loadUsers, search } = usePaginatedList<AdminUserRecord>({
@@ -23,15 +24,20 @@ const { items: users, total, query, page, loading, load: loadUsers, search } = u
   onError: () => toast.error("用户列表加载失败，请检查 API 服务"),
 });
 
+const { isPending, run } = usePending();
+
 async function toggleUser(user: AdminUserRecord) {
+  if (isPending(user.id)) return;
   if (!user.disabled && !await confirm({ title: "停用账号", description: `确定停用账号“${user.email}”？该账号将立即退出登录且不能再登录，会话与问答记录保留。`, confirmText: "停用", destructive: true })) return;
-  try {
-    const updated = await client.request<AdminUserRecord>(`/api/admin/users/${user.id}`, { method: "PATCH", body: JSON.stringify({ disabled: !user.disabled }) });
-    users.value = users.value.map((item) => item.id === updated.id ? updated : item);
-    toast.success(updated.disabled ? `已停用 ${updated.email}` : `已启用 ${updated.email}`);
-  } catch (err) {
-    toast.error(errorMessage(err, "账号状态更新失败"));
-  }
+  await run(user.id, async () => {
+    try {
+      const updated = await client.request<AdminUserRecord>(`/api/admin/users/${user.id}`, { method: "PATCH", body: JSON.stringify({ disabled: !user.disabled }) });
+      users.value = users.value.map((item) => item.id === updated.id ? updated : item);
+      toast.success(updated.disabled ? `已停用 ${updated.email}` : `已启用 ${updated.email}`);
+    } catch (err) {
+      toast.error(errorMessage(err, "账号状态更新失败"));
+    }
+  });
 }
 </script>
 
@@ -57,7 +63,7 @@ async function toggleUser(user: AdminUserRecord) {
           <TableCell>{{ user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : '—' }}</TableCell>
           <TableCell>
             <div class="flex justify-end">
-              <Button v-if="can('users:manage')" :variant="user.disabled ? 'outline' : 'ghost'" size="sm" :class="!user.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'" @click="toggleUser(user)">{{ user.disabled ? '启用' : '停用' }}</Button>
+              <Button v-if="can('users:manage')" :variant="user.disabled ? 'outline' : 'ghost'" size="sm" :disabled="isPending(user.id)" :class="!user.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'" @click="toggleUser(user)">{{ user.disabled ? '启用' : '停用' }}</Button>
             </div>
           </TableCell>
         </TableRow>
