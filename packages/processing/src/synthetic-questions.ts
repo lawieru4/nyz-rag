@@ -174,7 +174,7 @@ const SPECIFICITY_GUIDES: Record<Specificity, string> = {
 };
 
 /** 提示中的元数据：期刊、标题中的机构、项目字段与关键词。 */
-function articleHeader(article: CorpusArticle): string {
+export function articleHeader(article: CorpusArticle): string {
   const fields = metadataSearchFields(article.metadata);
   const lines = [`标题：${article.title}`];
   if (article.category) lines.push(`栏目：${article.category}`);
@@ -188,7 +188,7 @@ function articleHeader(article: CorpusArticle): string {
   return lines.join("\n");
 }
 
-const articleBody = (article: CorpusArticle) => article.content.length > MAX_PROMPT_CONTENT ? `${article.content.slice(0, MAX_PROMPT_CONTENT)}\n（正文过长，以下省略）` : article.content;
+export const articleBody = (article: CorpusArticle) => article.content.length > MAX_PROMPT_CONTENT ? `${article.content.slice(0, MAX_PROMPT_CONTENT)}\n（正文过长，以下省略）` : article.content;
 
 export function generationMessages(article: CorpusArticle, target: SampleTarget, feedback: string[] = []): ChatMessage[] {
   const system = [
