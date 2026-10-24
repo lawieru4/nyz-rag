@@ -37,6 +37,7 @@ test("batches requests and restores vectors by response index", async (context) 
     globalThis.fetch = oldFetch;
   });
   process.env.PROCESSING_TEST_API_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "PROCESSING_TEST_API_KEY";
 
   const batchSizes: number[] = [];
   const requestUrls: string[] = [];
@@ -69,6 +70,7 @@ test("uses the OpenAI default URL only for a recognized OpenAI provider", async 
     globalThis.fetch = oldFetch;
   });
   process.env.PROCESSING_TEST_API_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "PROCESSING_TEST_API_KEY";
 
   let requestUrl = "";
   globalThis.fetch = (async (input) => {
@@ -90,6 +92,7 @@ test("rejects malformed vectors and hides provider response bodies", async (cont
     globalThis.fetch = oldFetch;
   });
   process.env.PROCESSING_TEST_API_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "PROCESSING_TEST_API_KEY";
 
   globalThis.fetch = (async () => new Response("sensitive provider body test-secret", { status: 401 })) as typeof fetch;
   await assert.rejects(embedChunks(target(), ["input"], noopLimiter()), (error: unknown) => {
@@ -117,6 +120,7 @@ test("retries transient failures per batch and gives up on permanent ones", asyn
     globalThis.fetch = oldFetch;
   });
   process.env.PROCESSING_TEST_API_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "PROCESSING_TEST_API_KEY";
   const ok =(count = 1) => new Response(JSON.stringify({ data: Array.from({ length: count }, (_, index) => ({ index, embedding: [1, index] })) }), { status: 200 });
   // 依次返回给定的响应（Error 表示 fetch 抛出），记录请求次数与租约次数。
   const script = (...steps: Array<Response | Error>) => {

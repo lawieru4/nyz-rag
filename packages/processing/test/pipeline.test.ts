@@ -139,7 +139,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
       cwd: new URL("../../../", import.meta.url),
       env: {
         ...process.env, API_PORT: String(apiPort), DATABASE_URL: testUrl.toString(), DOCUMENT_QUEUE_NAME: `test-${schema}`,
-        NYZ_SECRET_KEY: secretKey, NYZ_ARTICLE_REQUEST_DELAY_MS: "1000",
+        NYZ_SECRET_KEY: secretKey, NYZ_ARTICLE_REQUEST_DELAY_MS: "1000", NYZ_MODEL_CREDENTIAL_ENVS: "UNUSED_KEY",
         ADMIN_USERNAME: "admin", ADMIN_PASSWORD: adminPassword, ADMIN_COOKIE_SECURE: "false",
         // 不发送真实邮件：开发模式下验证码写入 API 日志，由测试从输出中读取。
         SMTP_HOST: "", USER_COOKIE_SECURE: "false",
@@ -230,6 +230,10 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     const listed = await fetch(`${apiBase}/api/admin/model-providers/models`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, providerId: localProvider.id }) });
     assert.deepEqual(await listed.json(), { models: ["test-chat", "test-embedding"] });
     assert.deepEqual(await (await fetch(`${apiBase}/api/admin/model-providers/${localProvider.id}/models`)).json(), { models: ["test-chat", "test-embedding"] });
+    // 已保存的密钥只发往原地址：换了 origin 时测试连接与保存都要求重新填写密钥。
+    const otherOrigin = { provider: "OpenAI 兼容", baseUrl: `http://localhost:${mockPort}/v1` };
+    assert.equal((await fetch(`${apiBase}/api/admin/model-providers/models`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ ...otherOrigin, providerId: localProvider.id }) })).status, 400);
+    assert.equal((await fetch(`${apiBase}/api/admin/model-providers/${localProvider.id}`, { method: "PATCH", headers: jsonHeaders, body: JSON.stringify({ ...otherOrigin, name: localProvider.name, enabled: true }) })).status, 400);
     const unauthorized = await fetch(`${apiBase}/api/admin/model-providers/models`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ provider: "OpenAI 兼容", baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: "wrong-key" }) });
     assert.equal(unauthorized.status, 502);
     assert.equal((await (await fetch(`${apiBase}/api/admin/model-providers`)).json()).length, 2);

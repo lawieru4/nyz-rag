@@ -105,6 +105,7 @@ async function saveProvider() {
           <div class="mt-2 grid gap-2">
             <Label for="mp-credential" class="text-xs">密钥环境变量</Label>
             <Input id="mp-credential" v-model="form.credentialEnv" pattern="[A-Z][A-Z0-9_]*" placeholder="例如 OPENAI_API_KEY，未保存 API Key 时使用" />
+            <p>只能使用服务端 NYZ_MODEL_CREDENTIAL_ENVS 中列出的变量。</p>
           </div>
         </details>
         <DialogFooter>

@@ -8,6 +8,16 @@ import {
 import { cookieToken, createAuthStore, digest, type AuthStore } from "./auth-store.js";
 import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
 
+declare module "fastify" {
+  interface FastifyContextConfig {
+    /** 仅超级管理员可访问（服务端密钥、模型连接、来源地址等），由 configureAdminAuth 的 onRequest 钩子统一检查。 */
+    superAdminOnly?: boolean;
+  }
+}
+
+/** 路由选项：仅超级管理员可访问。 */
+export const superAdminOnly = { config: { superAdminOnly: true } };
+
 const COOKIE = "nyz_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_SECONDS = 15 * 60;
@@ -142,6 +152,9 @@ export function configureAdminAuth(
         },
       };
       sessions.set(request, session);
+      if (request.routeOptions.config.superAdminOnly && !admin.isSuper) {
+        return reply.code(403).send({ error: "仅超级管理员可执行此操作" });
+      }
     } catch {
       return reply.code(503).send({ error: "认证服务暂不可用，请稍后重试" });
     }

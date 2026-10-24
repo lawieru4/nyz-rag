@@ -1,9 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import { createSource, updateSourceStatus } from "@nyz-rag/processing";
 import type { CreateSourceRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
+import { superAdminOnly } from "./admin-auth.js";
 
 export const dataSourceRoutes: FastifyPluginAsync = async (app) => {
-  app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", async (request, reply) => {
+  // Worker 会把全局文章 token 发往来源地址，新建来源仅限超级管理员。
+  app.post<{ Body: CreateSourceRequest }>("/api/admin/sources", superAdminOnly, async (request, reply) => {
     const { name, url, kind, frequency } = request.body;
     let parsed: URL;
     try { parsed = new URL(url.trim()); } catch { return reply.code(400).send({ error: "url must be a valid http(s) URL" }); }

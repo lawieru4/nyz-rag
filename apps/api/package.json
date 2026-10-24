@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
-    "test": "node --import tsx/esm --test test/contracts.test.ts test/queue.test.ts test/app.test.ts test/admin-auth.test.ts test/admin-accounts.test.ts test/user-auth.test.ts test/rate-limit.test.ts test/knowledge-events.test.ts"
+    "test": "node --import tsx/esm --test test/contracts.test.ts test/queue.test.ts test/app.test.ts test/admin-auth.test.ts test/admin-accounts.test.ts test/sensitive-routes.test.ts test/user-auth.test.ts test/rate-limit.test.ts test/knowledge-events.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

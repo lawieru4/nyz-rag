@@ -52,14 +52,35 @@ export function providerUrl(provider: ProviderEndpoint, path: string, label: str
   return url.toString();
 }
 
+/** 供应商地址的 origin（未填地址的 OpenAI 取默认地址），地址无效时为 null。已保存的密钥只发往保存时的 origin。 */
+export function providerOrigin(provider: ProviderEndpoint): string | null {
+  const baseUrl = provider.baseUrl.trim() || (isKnownOpenAI(provider) ? OPENAI_API_BASE_URL : "");
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 供应商密钥：后台保存的密钥优先，其次为 credentialEnv 指定的环境变量；都未配置时返回 null（不带认证头，如本地模型）。
- * 指定了环境变量但没有值、或已保存的密钥无法解密时报错。
+ * credentialEnv 可以引用的环境变量：部署配置 NYZ_MODEL_CREDENTIAL_ENVS（逗号分隔，默认为空）。
+ * 名单外的变量一律不读取，防止把 NYZ_SECRET_KEY、DATABASE_URL 等作为认证头发给模型地址。
+ */
+export function credentialEnvAllowed(name: string): boolean {
+  return (process.env.NYZ_MODEL_CREDENTIAL_ENVS ?? "").split(",").some((allowed) => allowed.trim() === name.trim());
+}
+
+/**
+ * 供应商密钥：后台保存的密钥优先，其次为 credentialEnv 指定的环境变量（须在 NYZ_MODEL_CREDENTIAL_ENVS 中）；都未配置时返回 null（不带认证头，如本地模型）。
+ * 指定的环境变量不在允许名单、没有值，或已保存的密钥无法解密时报错。
  */
 export function providerCredential(provider: ModelProviderConfig, label: string): string | null {
   if (provider.apiKeyCiphertext) return decryptSecret(provider.apiKeyCiphertext, providerSecretContext(provider.id));
   const credentialName = provider.credentialEnv.trim();
   if (!credentialName) return null;
+  if (!credentialEnvAllowed(credentialName)) {
+    throw new Error(`The configured ${label} API credential environment variable is not allowed.`);
+  }
   const apiKey = process.env[credentialName]?.trim();
   if (!apiKey) {
     throw new Error(`The configured ${label} API credential is missing.`);
