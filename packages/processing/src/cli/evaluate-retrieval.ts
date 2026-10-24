@@ -165,7 +165,7 @@ async function hybrid() {
 
     const corpusChanged = Boolean(dataset.corpus && dataset.corpus.fingerprint !== snapshot.fingerprint);
     if (corpusChanged) console.warn("语料快照与数据集生成时不同：来源文章被删除或证据已不在原文中的题目将排除在指标之外。");
-    if (embedding && snapshot.embeddingModel && embedding.model !== snapshot.embeddingModel) console.warn(`Embedding 模型 ${embedding.model} 与语料的 ${snapshot.embeddingModel} 不同，向量召回只比较同一模型的切片。`);
+    if (embedding && snapshot.embeddingModel && embedding.model !== snapshot.embeddingModel) console.warn(`Embedding 模型 ${embedding.model} 与语料的 ${snapshot.embeddingModel} 不同，向量召回只比较同一供应商与模型的切片。`);
     const incomplete = snapshot.embeddingCoverage < 1;
     if (incomplete) console.warn(`向量化覆盖率 ${(snapshot.embeddingCoverage * 100).toFixed(2)}%，运行结果标记为不完整。`);
     if (contextMode === "section" && snapshot.chunkerVersion !== 2) console.warn("语料不是全部按父子块（切片规则 2）切分，没有父块的切片按切片放入上下文。");
@@ -205,8 +205,8 @@ async function hybrid() {
       const dependencies: RetrievalDependencies = {
         keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit),
         ...(vector && embedding ? {
-          vectorSearch: (_text: string, limit: number) => vectorSearchChunks(vector, embedding.model, limit),
-          summarySearch: (_text: string, limit: number) => summarySearchChunks(vector, embedding.model, limit),
+          vectorSearch: (_text: string, limit: number) => vectorSearchChunks(vector, embedding, limit),
+          summarySearch: (_text: string, limit: number) => summarySearchChunks(vector, embedding, limit),
         } : {}),
         ...(reranker ? { rerank: (query: string, texts: string[], topN: number) => withRetry(() => reranker.rerank(query, texts, topN)) } : {}),
       };

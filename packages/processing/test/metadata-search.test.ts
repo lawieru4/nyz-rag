@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { closeDatabase, getDb, getPool, migrate, withTransaction } from "../src/db.js";
 import { parseRetrievalFilters } from "../src/retrieval-filters.js";
 import type { ArticleMetadata } from "@nyz-rag/types";
-import { createSource, getDocumentDetail, keywordSearchChunks, reindexDocumentMetadataTerms, replaceDocumentChunks, upsertDocument, vectorSearchChunks } from "../src/repository.js";
+import { createSource, getDocumentDetail, keywordSearchChunks, reindexDocumentMetadataTerms, replaceDocumentChunks, upsertDocument, vectorSearchChunks, type VectorSpace } from "../src/repository.js";
 import { searchTerms } from "../src/search-terms.js";
 import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
@@ -33,6 +33,7 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
     await migrate();
     const source = await createSource({ name: "Filter fixtures", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
     const vector = Array.from({ length: 384 }, (_, i) => i === 0 ? 1 : 0);
+    const space: VectorSpace = { providerId: "provider-1", model: "test-model" };
     const create = async (name: string, category: string, tags: string[], publishedAt: string | null, scenario: string) => withTransaction(async (tx) => {
       const id = await upsertDocument(tx, articleDocument(source.id, name, name, "battery materials"));
       await replaceDocumentChunks(tx, id, { content: "battery materials", category, tags, publishedAt: publishedAt ? new Date(publishedAt) : null }, [{ id: `${id}-chunk`, index: 0, content: "battery materials", tokenEstimate: 5 }]);
@@ -44,7 +45,7 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
     const d = await create("d", "research", [], null, "");
     for (const item of [a, b, c, d]) {
       await getPool().query("UPDATE documents SET metadata = $2, processing_error = 'private error' WHERE id = $1", [item.id, { summary: "Summary", sourceMeta: { repostSource: "Original", keywords: ["battery"], scenarios: item.scenario ? [item.scenario] : [] } }]);
-      await getPool().query("UPDATE document_chunks SET embedding = $2::vector, dimensions = 384, model = 'test-model' WHERE document_id = $1", [item.id, JSON.stringify(vector)]);
+      await getPool().query("UPDATE document_chunks SET embedding = $2::vector, dimensions = 384, provider_id = 'provider-1', model = 'test-model' WHERE document_id = $1", [item.id, JSON.stringify(vector)]);
     }
     const detail = await getDocumentDetail(a.id);
     assert.equal(detail?.repostSource, "Original");
@@ -65,21 +66,25 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
     ];
     for (const { filters, ids } of cases) {
       const keyword = await keywordSearchChunks(searchTerms("battery"), 20, getDb(), filters);
-      const semantic = await vectorSearchChunks(vector, "test-model", 20, getDb(), filters);
+      const semantic = await vectorSearchChunks(vector, space, 20, getDb(), filters);
       assert.deepEqual(keyword.map((hit) => hit.documentId).sort(), [...ids].sort(), `keyword ${JSON.stringify(filters)}`);
       assert.deepEqual(semantic.map((hit) => hit.documentId).sort(), [...ids].sort(), `vector ${JSON.stringify(filters)}`);
     }
     const single = await keywordSearchChunks(searchTerms("battery"), 1, getDb(), { tags: ["lithium"] });
     assert.deepEqual(single.map((hit) => hit.documentId), [b.id], "filtering is applied before the retrieval limit");
-    assert.deepEqual((await vectorSearchChunks(vector, "test-model", 1, getDb(), { tags: ["lithium"] })).map((hit) => hit.documentId), [b.id]);
-    assert.deepEqual(await vectorSearchChunks(vector, "different-model", 20), []);
+    assert.deepEqual((await vectorSearchChunks(vector, space, 1, getDb(), { tags: ["lithium"] })).map((hit) => hit.documentId), [b.id]);
+    assert.deepEqual(await vectorSearchChunks(vector, { ...space, model: "different-model" }, 20), []);
+    assert.deepEqual(await vectorSearchChunks(vector, { ...space, providerId: "provider-2" }, 20), [], "the same model name from another provider is a different vector space");
+    assert.equal((await vectorSearchChunks(vector, { ...space, model: " test-model " }, 20)).length, 4, "model names are compared trimmed, as they are stored");
     await getPool().query("UPDATE document_chunks SET model = 'different-model' WHERE document_id = $1", [d.id]);
-    assert.equal((await vectorSearchChunks(vector, "test-model", 20)).length, 3, "same-dimension embeddings from another model are excluded");
-    await getPool().query("UPDATE document_chunks SET model = 'test-model' WHERE document_id = $1", [d.id]);
+    assert.equal((await vectorSearchChunks(vector, space, 20)).length, 3, "same-dimension embeddings from another model are excluded");
+    await getPool().query("UPDATE document_chunks SET model = 'test-model', provider_id = 'provider-2' WHERE document_id = $1", [d.id]);
+    assert.equal((await vectorSearchChunks(vector, space, 20)).length, 3, "same-model embeddings from another provider are excluded");
+    await getPool().query("UPDATE document_chunks SET provider_id = 'provider-1' WHERE document_id = $1", [d.id]);
     await getPool().query("UPDATE documents SET status = 'failed' WHERE id = $1", [a.id]);
     assert.equal(await getDocumentDetail(a.id), null);
     assert.ok(!(await keywordSearchChunks(searchTerms("battery"), 20)).some((hit) => hit.documentId === a.id));
-    assert.ok(!(await vectorSearchChunks(vector, "test-model", 20)).some((hit) => hit.documentId === a.id));
+    assert.ok(!(await vectorSearchChunks(vector, space, 20)).some((hit) => hit.documentId === a.id));
     // Actual execution proves expression/predicate compatibility, not just index existence.
     const client = await getPool().connect();
     try {
@@ -92,15 +97,15 @@ test("public projection, filtered retrieval and HNSW plan in an isolated schema"
         ORDER BY c.embedding::vector(384) <=> $1::vector LIMIT 2`, [JSON.stringify(vector)]);
       assert.match(JSON.stringify(plan.rows), /document_chunks_embedding_384_hnsw_idx/);
       await client.query("SET LOCAL hnsw.ef_search = 1");
-      const recovered = await vectorSearchChunks(vector, "test-model", 20, drizzle(client, { casing: "snake_case" }), { categories: ["research", "report"] });
+      const recovered = await vectorSearchChunks(vector, space, 20, drizzle(client, { casing: "snake_case" }), { categories: ["research", "report"] });
       assert.equal(recovered.length, 3, "exact fallback fills results after an underfilled ANN scan");
       await client.query("ROLLBACK");
     } finally { client.release(); }
     // Non-indexed dimensions retain exact search, and mixed dimensions do not break casts.
     await getPool().query("UPDATE document_chunks SET embedding = '[1,0,0]'::vector, dimensions = 3 WHERE document_id = $1", [d.id]);
-    assert.deepEqual((await vectorSearchChunks([1, 0, 0], "test-model", 20)).map((hit) => hit.documentId), [d.id]);
-    assert.equal((await vectorSearchChunks(vector, "test-model", 20)).length, 2);
-    await assert.rejects(vectorSearchChunks([], "test-model", 1), /Invalid query vector/);
+    assert.deepEqual((await vectorSearchChunks([1, 0, 0], space, 20)).map((hit) => hit.documentId), [d.id]);
+    assert.equal((await vectorSearchChunks(vector, space, 20)).length, 2);
+    await assert.rejects(vectorSearchChunks([], space, 1), /Invalid query vector/);
     await getPool().query("UPDATE document_chunks SET search_vector = array_to_tsvector(ARRAY['battery','rareone','raretwo','rarethree','rarefour','rarefive','raresix','rareseven','rareeight']) WHERE document_id = $1", [c.id]);
     assert.deepEqual((await keywordSearchChunks(searchTerms("battery rareone raretwo rarethree rarefour rarefive raresix rareseven rareeight"), 20, getDb(), { categories: ["report"] })).map((hit) => hit.documentId), [b.id], "rare terms outside the filtered corpus must not crowd out eligible terms");
   } finally {

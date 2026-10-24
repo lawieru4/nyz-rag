@@ -10,6 +10,8 @@ const MAX_LISTED_MODELS = 2000;
 const RERANK_TIMEOUT_MS = 30_000;
 
 export interface EmbeddingModel {
+  /** 供应商 ID 与模型名共同确定向量空间，检索只比较同一空间的向量（见 repository 的 VectorSpace）。 */
+  readonly providerId: string;
   readonly model: string;
   embedDocuments(texts: string[]): Promise<number[][]>;
   embedQuery(text: string): Promise<number[]>;
@@ -69,6 +71,7 @@ export async function listProviderModels(provider: Pick<ModelProviderConfig, "na
 
 export function createEmbeddingModel(selection: ModelTarget, limiter?: AdmissionLimiter): EmbeddingModel {
   return {
+    providerId: selection.provider.id,
     model: selection.model.trim(),
     embedDocuments: (texts) => embedChunks(selection, texts, limiter),
     embedQuery: async (text) => (await embedChunks(selection, [text], limiter))[0],

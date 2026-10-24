@@ -168,12 +168,16 @@
   - **启动对账**：向量排队中/向量化中超过 1 分钟且队列中没有对应 job 的文档标为失败（此前同步中途 Worker 退出会让文档一直显示为向量化中、不能手动重试）。
   - 未做：等待重试期间手动提前执行（promote）；完整的 operation/outbox 状态机。
   - 验证：`pnpm verify` 通过；新增错误分类与延迟配置的单元测试；集成测试覆盖手动向量化重试后仍失败（共 6 次请求）、400 不重试、重新处理后重试成功且不重新切片、同步中失败的文档由延迟任务补齐、中断的向量化启动对账；把「延后当前 job」换成同 ID 入队时测试失败（BullMQ 忽略同 ID）。
+- 本轮完成（向量检索按供应商隔离，2026-10-24）：
+  - **向量空间**：切片向量召回、摘要召回与启动时的文章级向量回填，在模型名与维度之外再匹配写入向量时的供应商 ID（`document_chunks.provider_id`、`documents.embedding_provider_id`，此前已写入，无需迁移），不同供应商的同名同维度模型不再混在一起比较；查询时模型名去掉首尾空白，与写入一致。
+  - **影响**：更换 Embedding 供应商（包括删除后重建同一地址的供应商）后，旧向量不参与召回，需重新向量化；管理端在更换供应商或模型时都会提示。业务库现有 1126 篇已向量化文档均由当前配置的 Embedding 供应商写入，不受影响。
+  - 验证：`pnpm verify` 通过（processing 121 项中 108 通过、13 跳过，API 120 项中 118 通过、2 跳过，api-client、web、admin 全部通过）；集成测试覆盖同模型名、同维度但不同供应商的切片召回、摘要召回与回填均被排除，模型名去空白后匹配；去掉供应商条件后这两项测试失败；端到端集成测试通过。
 
 ## 向量化运行配置
 
 - 在根目录 `.env` 设置 `DATABASE_URL`、`REDIS_URL` 和 `NYZ_SECRET_KEY`，API/Worker 的 dev/start 命令会加载该文件。
 - 在模型配置中选择服务类型或填写 OpenAI 兼容基础 URL（例如 `https://api.siliconflow.cn/v1`，系统追加 `/embeddings`），填写 API Key（本地模型可不填，也可改填密钥环境变量名），启用后在「业务模型」中为 Embedding 选择该供应商和模型。只有明确标识为 OpenAI 的供应商可省略 URL。
-- `vector` 扩展需管理员预先创建；表结构由迁移创建。向量列不限维度，384/512/768/1024/1536/2000 维使用 HNSW 部分表达式索引，其他维度保留精确扫描，均按模型与维度过滤。ANN 过滤后候选不足时精确回退；首次建索引宜安排维护窗口，不是并发建索引。
+- `vector` 扩展需管理员预先创建；表结构由迁移创建。向量列不限维度，384/512/768/1024/1536/2000 维使用 HNSW 部分表达式索引，其他维度保留精确扫描，均按供应商、模型与维度过滤。ANN 过滤后候选不足时精确回退；首次建索引宜安排维护窗口，不是并发建索引。
 - 问答使用业务模型中的 Chat 模型生成回答（系统追加 `/chat/completions`，流式调用）；配置 Rerank 模型并在知识库开启重排序后调用 `/rerank`（Jina/Cohere/SiliconFlow 兼容格式）。三项可来自不同供应商。检索参数取请求指定或最近创建的知识库，没有知识库时为 topK 5、相似度阈值 0.3、上下文 6000 字。
 - 根目录 `pnpm dev` 和 `pnpm typecheck` 会先构建共享处理包；单独启动 API 或 Worker 前，先执行 `pnpm --filter @nyz-rag/processing build`。
 - 验证命令：`pnpm --filter @nyz-rag/processing test`、`pnpm --filter @nyz-rag/api test`、`pnpm --filter @nyz-rag/api-client test`；本地基础设施启动后运行 `NYZ_INTEGRATION_TEST=1 pnpm --filter @nyz-rag/processing test`。集成测试使用临时 PostgreSQL schema、本地模拟模型接口及隔离的 Redis 队列，结束时删除该 schema。
