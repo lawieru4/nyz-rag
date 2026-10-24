@@ -52,15 +52,20 @@ function metricRows(a: HybridMetrics, b: HybridMetrics, delta: MetricsDelta): Ar
     ...HIT_KS.map((k): [string, number, number, number] => [`Hit@${k}`, a.hitAt[String(k)], b.hitAt[String(k)], delta.hitAt[String(k)]]),
     ["MRR", a.mrr, b.mrr, delta.mrr],
     ["证据命中", a.evidenceHit, b.evidenceHit, delta.evidenceHit],
+    ["全部证据", a.evidenceFull, b.evidenceFull, delta.evidenceFull],
     ["上下文命中", a.contextHit, b.contextHit, delta.contextHit],
   ];
 }
+
+const chars = (value: number | null) => value === null ? "-" : String(Math.round(value));
+const signedChars = (value: number | null) => value === null ? "-" : `${value > 0 ? "+" : ""}${Math.round(value)}`;
 
 function printComparison(comparison: RunComparison) {
   const [left, right] = comparison.variants;
   console.info(`\n## ${left} → ${right}：两边都有效的题目 ${comparison.questions} 道（指标为 %）`);
   console.info(`${"指标".padEnd(8)}${"A".padStart(8)}${"B".padStart(8)}${"差值".padStart(8)}`);
   for (const [label, a, b, delta] of metricRows(comparison.a, comparison.b, comparison.delta)) console.info(`${label.padEnd(8)}${pct(a).padStart(8)}${pct(b).padStart(8)}${signed(delta).padStart(8)}`);
+  console.info(`${"上下文字数".padEnd(8)}${chars(comparison.a.contextChars).padStart(7)}${chars(comparison.b.contextChars).padStart(8)}${signedChars(comparison.delta.contextChars).padStart(8)}`);
   for (const [dimension, title] of [["specificity", "按具体度"], ["type", "按题型"]] as const) {
     console.info(`${title}（Hit@10 / MRR 差值）：${Object.entries(comparison.groups[dimension]).map(([key, group]) => `${key}（${group.a.questions} 道）${signed(group.delta.hitAt["10"])} / ${signed(group.delta.mrr)}`).join("；")}`);
   }
@@ -74,7 +79,11 @@ function printComparison(comparison: RunComparison) {
   list("跌出前 10", comparison.moves.leftTop10);
   list("进入前 5", comparison.moves.enteredTop5);
   list("跌出前 5", comparison.moves.leftTop5);
+  list("证据由未命中变为命中", comparison.evidence.gained);
+  list("证据由命中变为未命中", comparison.evidence.lost);
 }
+
+const setup = (run: RunRecord) => `上下文 ${run.settings.context ?? "topk"}/${run.settings.retrieval.maxContextLength} 字，索引 ${run.settings.schema ?? "业务库"}（切片规则 ${run.corpus.chunkerVersion ?? 1}）`;
 
 const refs = process.argv.slice(2).filter((value) => !value.startsWith("--"));
 if (refs.length !== 2) throw new Error("Usage: evaluate:compare <run A> <run B> [--variant=fused | --variant=fused:rerank] [--json]");
@@ -84,8 +93,8 @@ const comparisons = variantPairs(a.run, b.run).map(([left, right]) => compareRun
 if (process.argv.includes("--json")) {
   console.log(JSON.stringify({ a: a.path, b: b.path, warnings, comparisons }, null, 2));
 } else {
-  console.info(`A：${a.run.name}（${a.run.createdAt}）${a.path}`);
-  console.info(`B：${b.run.name}（${b.run.createdAt}）${b.path}`);
+  console.info(`A：${a.run.name}（${a.run.createdAt}，${setup(a.run)}）${a.path}`);
+  console.info(`B：${b.run.name}（${b.run.createdAt}，${setup(b.run)}）${b.path}`);
   console.info(`数据集 ${a.run.dataset.name}@${a.run.dataset.version}（${a.run.dataset.split}）`);
   for (const warning of warnings) console.warn(`注意：${warning}`);
   comparisons.forEach(printComparison);

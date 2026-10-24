@@ -1,5 +1,5 @@
 // 清洗与切片：由文档原始内容生成正文、解析字段与切片。纯函数，Worker 在事务内调用后写库。
-import { articleContent, articleQuestions, chunkArticle, type StructuredChunk } from "./chunking.js";
+import { articleContent, articleQuestions, CHUNKER_VERSION, chunkArticleWith, type ChunkedArticle, type ChunkerVersion } from "./chunking.js";
 import { parseArticle, type ArticleDetail, type ParsedArticle } from "./article/parse.js";
 import { contentFingerprint } from "./dedup.js";
 import type { DocumentContentUpdate } from "./repository.js";
@@ -26,8 +26,10 @@ export function articleDocumentUpdate(article: ParsedArticle): DocumentContentUp
   };
 }
 
-/** 从原始 JSON 重新解析并切片（解析器升级后重新处理即可生效）。 */
-export function prepareDocument(documentId: string, input: { rawJson: ArticleDetail }): { update: DocumentContentUpdate; chunks: StructuredChunk[] } {
+/** 从原始 JSON 重新解析并切片（解析器升级后重新处理即可生效）；切片规则默认为 CHUNKER_VERSION。 */
+export function prepareDocument(
+  documentId: string, input: { rawJson: ArticleDetail }, chunkerVersion: ChunkerVersion = CHUNKER_VERSION,
+): { update: DocumentContentUpdate } & ChunkedArticle {
   const article = parseArticle(input.rawJson);
-  return { update: articleDocumentUpdate(article), chunks: chunkArticle(documentId, article) };
+  return { update: { ...articleDocumentUpdate(article), chunkerVersion }, ...chunkArticleWith(chunkerVersion, documentId, article) };
 }

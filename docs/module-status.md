@@ -111,6 +111,15 @@
   - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 99 项（87 通过、12 项集成测试默认跳过）全部无失败；dev 前 10 题冒烟运行与 compare 正常。
   - **基线**：dev 集全部变体约 4 分钟，rerank Hit@1 95.0、Hit@10 99.2，keyword 单路 Hit@1 91.6 高于 fused 的 76.9，详见 evaluation-plan.md 第 8.4 节。
   - **未做**：失败题复判（H）与回答层评估（I）。
+- 本轮完成（父子块切片实验，2026-10-24）：
+  - **切片规则 2**：`chunkSections` 生成章节父块与段落子块，`CHUNKER_VERSION` 写入 `documents.chunker_version`。迁移 `0017_document_sections` 新增父块表与 `document_chunks.section_id`。`buildSectionContext` 按父块组装上下文。新处理的文档仍按规则 1 切片，问答链路不变。详见 chunking-design.md 第六节。
+  - **评估工具**：
+    - `evaluate:index` 在 `nyzrag` 库的 `eval_<名称>` schema 中复制文章与模型配置并重新切片、向量化，不改业务 schema；
+    - `evaluate:retrieval` 新增 `--schema` 与 `--context=topk|budget|section`，新增全部证据覆盖率与上下文字数两项指标；
+    - `evaluate:compare` 列出证据命中有变化的题目。
+  - **实验**：在 dev 集上比较了现有切片、子块和父块组装。在相同字数预算下，rerank 指标变化在 1 个百分点以内，没有正收益，暂不上线。线上 topK=5 只用了约一半上下文预算，填满后 fused 证据命中由 76.8 升到 94.0。详见 evaluation-plan.md 第 8.6 节。
+  - **发现**：规则 1 拆超长段落时会丢掉没有句末标点、以换行结尾的行。为保持基线可比，暂未修复；规则 2 没有这个问题。
+  - **验证**：`pnpm typecheck`、`pnpm build` 通过；processing 103 项（91 通过、12 项集成测试默认跳过）全部无失败。
 
 ## 向量化运行配置
 

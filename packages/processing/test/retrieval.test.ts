@@ -4,7 +4,7 @@ import type { ModelProviderRecord } from "@nyz-rag/types";
 import { createChatModel, createRerankModel } from "../src/models.js";
 import type { ModelSelection } from "../src/provider.js";
 import { summaryEmbeddingInput } from "../src/chunking.js";
-import { buildAnswerContext, buildChatMessages, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, SUMMARY_RECALL_LIMIT, type ChunkHit } from "../src/rag.js";
+import { buildAnswerContext, buildChatMessages, buildSectionContext, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, SUMMARY_RECALL_LIMIT, type ChunkHit, type SectionContext } from "../src/rag.js";
 import { metadataScore, metadataSearchFields, metadataSearchTerms, metadataTermWeights, searchTerms, termCounts } from "../src/search-terms.js";
 import { noopLimiter } from "./admission-helpers.js";
 
@@ -137,6 +137,31 @@ test("retrieve degrades to keyword results when the vector search or rerank fail
   const empty = await retrieve("？！", settings, { keywordSearch: async () => { called = true; return []; } });
   assert.equal(empty.chunks.length, 0);
   assert.equal(called, false, "questions without terms skip the keyword search");
+});
+
+test("section context places each parent once, keeps the hit when the parent does not fit and falls back to chunks", () => {
+  const piece = (id: string, length: number, char: string) => ({ id, content: char.repeat(length) });
+  const section = (id: string, documentId: string, chunks: Array<{ id: string; content: string }>): SectionContext => ({
+    id, documentId, sectionPath: [id], content: chunks.map((chunk) => chunk.content).join("\n"), chunks,
+  });
+  const small = section("s1", "doc-1", [piece("a1", 30, "甲"), piece("a2", 30, "乙")]);
+  const large = section("s2", "doc-2", [piece("b1", 40, "丙"), piece("b2", 40, "丁"), piece("b3", 40, "戊"), piece("b4", 40, "己")]);
+  const ranked = (id: string, sectionId: string | undefined, documentId: string) => ({ ...hit(id, 0), documentId, ...(sectionId ? { sectionId } : {}), content: [...small.chunks, ...large.chunks].find((chunk) => chunk.id === id)?.content ?? `正文${id}` });
+
+  const context = buildSectionContext([ranked("a2", "s1", "doc-1"), ranked("b4", "s2", "doc-2"), ranked("a1", "s1", "doc-1"), ranked("legacy", undefined, "doc-3")], [small, large], 160);
+  assert.deepEqual(context.chunks.map((chunk) => [chunk.chunkId, chunk.citation]), [["a2", 1], ["b4", 2], ["legacy", 3]]);
+  assert.equal(context.chunks[0].content, small.content, "a parent that fits goes in whole and only once");
+  assert.equal(context.chunks[1].content, `${"戊".repeat(40)}\n${"己".repeat(40)}`, "a parent that does not fit keeps the hit and its neighbour");
+  assert.deepEqual(context.chunks[1].chunkIds, ["b4"]);
+  assert.equal(context.chunks[2].content, "正文legacy", "chunks without a parent are placed as chunks");
+  assert.deepEqual(context.sources[0].excerpts, [{ sectionPath: [], text: "乙".repeat(30) }], "excerpts come from the hit chunk");
+
+  // 同一父块的后续命中补入已放入的片段，不相邻的片段之间用省略行分隔。
+  const merged = buildSectionContext([ranked("b1", "s2", "doc-2"), ranked("b4", "s2", "doc-2")], [large], 130);
+  assert.equal(merged.chunks.length, 1);
+  assert.equal(merged.chunks[0].content, `${"丙".repeat(40)}\n${"丁".repeat(40)}\n……\n${"己".repeat(40)}`);
+  assert.deepEqual(merged.chunks[0].chunkIds, ["b1", "b4"]);
+  assert.equal(buildSectionContext([ranked("b1", "s2", "doc-2")], [large], 20).chunks[0].content.length, 20, "the first entry is truncated");
 });
 
 test("answer context groups citations by article and respects the length limit", () => {

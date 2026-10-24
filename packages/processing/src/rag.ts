@@ -10,6 +10,8 @@ import { searchTerms } from "./search-terms.js";
 export interface ChunkHit {
   chunkId: string;
   documentId: string;
+  /** 所属父块（切片规则 2）。 */
+  sectionId?: string;
   title: string;
   url: string;
   repostSource?: string;
@@ -110,8 +112,11 @@ export async function retrieve(question: string, settings: RetrievalSettings, de
 }
 
 export interface AnswerContext {
-  /** 送入模型的切片（正文可能被截断），citation 为所属文章的引用编号。 */
-  chunks: Array<RetrievedChunk & { citation: number }>;
+  /**
+   * 送入模型的切片（正文可能被截断），citation 为所属文章的引用编号。
+   * 按父块组装时每项为一个父块（全文或命中切片附近的内容），字段取排名最高的命中切片，chunkIds 为其中全部命中切片。
+   */
+  chunks: Array<RetrievedChunk & { citation: number; chunkIds?: string[] }>;
   /** 按引用编号排列的文章。 */
   sources: ChatSource[];
 }
@@ -138,6 +143,100 @@ export function buildAnswerContext(chunks: RetrievedChunk[], maxContextLength: n
     context.sources[citation - 1].excerpts!.push({ sectionPath: chunk.sectionPath, text: content.slice(0, EXCERPT_CHARS) });
     context.chunks.push({ ...chunk, content, citation });
     used += content.length;
+  }
+  return context;
+}
+
+/** 父块正文及其切片（按原文顺序）。 */
+export interface SectionContext {
+  id: string;
+  documentId: string;
+  sectionPath: string[];
+  content: string;
+  chunks: Array<{ id: string; content: string }>;
+}
+
+// 父块放不下时，保留命中切片及其前后各一个切片；不相邻的片段之间用省略行分隔。
+const SECTION_WINDOW = 1;
+const WINDOW_GAP = "\n……\n";
+
+// 选中的切片按原文顺序拼接。
+function windowText(section: SectionContext, selected: Set<number>): string {
+  let text = "";
+  let previous = -2;
+  for (const index of [...selected].sort((a, b) => a - b)) {
+    text += text ? (index === previous + 1 ? "\n" : WINDOW_GAP) : "";
+    text += section.chunks[index].content;
+    previous = index;
+  }
+  return text;
+}
+
+/**
+ * 按父块组装上下文：按切片排名依次放入其父块，同一父块只放一次。父块放得下时放全文，放不下时保留命中切片及前后相邻切片（按原文顺序），
+ * 仍放不下时只放命中切片；同一父块的后续命中切片（及其相邻切片）补入已放入的片段。正文总字数不超过上限，第一项超长时截断。
+ * 没有父块的切片（切片规则 1）与 buildAnswerContext 相同，按切片放入。引用编号与摘录规则同 buildAnswerContext，摘录取命中切片。
+ */
+export function buildSectionContext(chunks: RetrievedChunk[], sections: SectionContext[], maxContextLength: number): AnswerContext {
+  const byId = new Map(sections.map((section) => [section.id, section]));
+  const entries: Array<{ chunk: RetrievedChunk; content: string; section?: SectionContext; selected?: Set<number>; hits: string[] }> = [];
+  const placed = new Map<string, (typeof entries)[number]>();
+  // 加入命中切片（先连同相邻切片，放不下时只加它本身）后的选中集合；都放不下时为 null。
+  const extend = (section: SectionContext, selected: Set<number>, index: number, budget: number) => {
+    for (const radius of [SECTION_WINDOW, 0]) {
+      const next = new Set(selected);
+      for (let offset = -radius; offset <= radius; offset += 1) if (section.chunks[index + offset]) next.add(index + offset);
+      const text = windowText(section, next);
+      if (text.length <= budget) return { selected: next, text };
+    }
+    return null;
+  };
+  let used = 0;
+  for (const chunk of chunks) {
+    const remaining = maxContextLength - used;
+    if (remaining <= 0) break;
+    const section = chunk.sectionId ? byId.get(chunk.sectionId) : undefined;
+    const index = section ? section.chunks.findIndex((item) => item.id === chunk.chunkId) : -1;
+    const existing = section && placed.get(section.id);
+    if (existing) {
+      if (existing.hits.includes(chunk.chunkId)) continue;
+      existing.hits.push(chunk.chunkId);
+      // 已放入全文，或命中切片已在片段中时不再扩展。
+      if (!existing.selected || index < 0) continue;
+      const next = extend(section, existing.selected, index, existing.content.length + remaining);
+      if (next) {
+        used += next.text.length - existing.content.length;
+        existing.selected = next.selected;
+        existing.content = next.text;
+      }
+      continue;
+    }
+    let content = chunk.content;
+    let selected: Set<number> | undefined;
+    if (section && section.content.length <= remaining) content = section.content;
+    else if (section && index >= 0) {
+      const window = extend(section, new Set(), index, remaining);
+      if (window) ({ text: content, selected } = window);
+      else selected = new Set([index]);
+    }
+    if (content.length > remaining && entries.length) continue;
+    const entry = { chunk, content: content.slice(0, remaining), ...(section ? { section } : {}), ...(selected ? { selected } : {}), hits: [chunk.chunkId] };
+    entries.push(entry);
+    if (section) placed.set(section.id, entry);
+    used += entry.content.length;
+  }
+
+  const context: AnswerContext = { chunks: [], sources: [] };
+  const citations = new Map<string, number>();
+  for (const { chunk, content, section, hits } of entries) {
+    let citation = citations.get(chunk.documentId);
+    if (!citation) {
+      citation = citations.size + 1;
+      citations.set(chunk.documentId, citation);
+      context.sources.push({ documentId: chunk.documentId, title: chunk.title, url: chunk.url, ...(chunk.repostSource ? { repostSource: chunk.repostSource } : {}), excerpts: [] });
+    }
+    context.sources[citation - 1].excerpts!.push({ sectionPath: chunk.sectionPath, text: (section ? chunk.content : content).slice(0, EXCERPT_CHARS) });
+    context.chunks.push({ ...chunk, content, citation, ...(section ? { chunkIds: hits } : {}) });
   }
   return context;
 }
