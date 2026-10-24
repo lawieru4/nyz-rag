@@ -39,7 +39,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
   - `embed-document`：对已切片文档向量化（手动重试入口）。
   - 文档级 job 使用 `jobId: document-<id>`，API 据此及 active 的 `sync-source` 判断重复任务并返回 409；同一来源已有等待/运行中的 `sync-source` 时再次同步也返回 409。
 - `packages/processing`：API 与 Worker 共享的运行时逻辑。
-  - `schema.ts` / `db.ts`：Drizzle ORM（`node-postgres` 驱动，`casing: "snake_case"`）。`db.ts` 提供连接池（`DATABASE_URL` 必填）、`getDb()`、`withTransaction`、`migrate()`；迁移由 drizzle-kit 生成到 `migrations/`，运行时用 Drizzle migrator 执行，外加咨询锁串行，迁移记录表 `__drizzle_migrations` 放在当前 schema。不要手改已执行的迁移文件。
+  - `schema.ts` / `db.ts`：Drizzle ORM（`node-postgres` 驱动，`casing: "snake_case"`）。`db.ts` 提供连接池（`DATABASE_URL` 必填；`onConnect` 为每个连接设置 `hnsw.ef_search = 100`，默认 40 时摘要召回会漏掉最相近的文章）、`getDb()`、`withTransaction`、`migrate()`；迁移由 drizzle-kit 生成到 `migrations/`，运行时用 Drizzle migrator 执行，外加咨询锁串行，迁移记录表 `__drizzle_migrations` 放在当前 schema。不要手改已执行的迁移文件。
   - Drizzle 在单表查询里渲染列名不带表名：`sql` 模板中的相关子查询引用外层列时须用 `repository.ts` 的 `outer()` 显式限定（查询构建器生成的子查询不受影响）。
   - `repository.ts`：按实体的数据访问函数（数据源、任务、文档/切片、知识库、模型供应商、问答记录），负责数据库行与 `@nyz-rag/types` 结构的映射。需要多步一致性的操作接收事务内的执行器（`Executor`）。向量存在 `document_chunks.embedding`（pgvector，不限维度），切片和向量随文档级联删除。
   - 文章级向量：`documents.summary_embedding` 存「标题 + 摘要」（`summaryEmbeddingInput`）的向量，与切片在同一次 Embedding 调用中生成、同一事务写入，模型与维度沿用 `documents.embedding_model` / `embedding_dimensions`（常用维度有 HNSW 部分索引）；没有摘要的文章为空，重新切片或重新向量化开始时清除。`summarySearchChunks` 先按它召回文章，再用同一查询向量取每篇文章内最相关的一个切片（得分为摘要相似度，记为 `summaryScore`）。升级前已向量化的文章由 Worker 启动时在后台补齐（只处理与当前默认模型一致的文档）。
