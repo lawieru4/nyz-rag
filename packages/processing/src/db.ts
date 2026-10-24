@@ -14,11 +14,21 @@ export type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 let pool: Pool | undefined;
 let database: Database | undefined;
 
+/**
+ * HNSW 近似检索的候选宽度（pgvector 默认 40）。默认值下业务库的摘要召回 recall@10 约 98.5%，会漏掉最相近的文章；100 时为 100%。
+ * 每个连接设置一次会话值，事务内的 SET LOCAL 仍可覆盖（测试据此验证候选不足时的精确回退）。
+ */
+const HNSW_EF_SEARCH = 100;
+
 export function getPool(): Pool {
   const connectionString = process.env.DATABASE_URL?.trim();
   if (!connectionString) throw new Error("DATABASE_URL is required.");
   if (!pool) {
-    pool = new Pool({ connectionString, connectionTimeoutMillis: 5000, statement_timeout: 10000 });
+    pool = new Pool({
+      connectionString, connectionTimeoutMillis: 5000, statement_timeout: 10000,
+      // 连接交给调用方之前执行。不用连接参数 options：连接串里的 options（实验 schema、集成测试的 search_path）会覆盖它。
+      onConnect: async (client) => { await client.query(`SET hnsw.ef_search = ${HNSW_EF_SEARCH}`); },
+    });
     pool.on("error", () => console.error("Database idle connection failed"));
   }
   return pool;
