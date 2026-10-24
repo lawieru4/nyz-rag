@@ -1,5 +1,5 @@
 export { closeDatabase, DocumentBusyError, getDb, getPool, migrate, withDocumentWork, withTransaction, type Database, type Executor, type Transaction } from "./db.js";
-export { embedChunks, requireEmbeddingModel } from "./embedding.js";
+export { embedChunks, embeddingRetryDelay, embeddingRetryDelays, EMBEDDING_RETRY_DELAYS_MS, requireEmbeddingModel } from "./embedding.js";
 export { credentialEnvAllowed, hasProviderCredential, providerCredential, providerOrigin, usableModel, type ModelCapability, type ModelProviderConfig, type ModelSelection, type ModelTarget } from "./provider.js";
 export { secretKeyConfigured, SecretKeyError } from "./secrets.js";
 export { ADMIN_PERMISSIONS, isAdminPermission, normalizeAdminPermissions } from "./admin-permissions.js";

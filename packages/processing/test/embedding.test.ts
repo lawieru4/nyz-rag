@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ModelProviderRecord } from "@nyz-rag/types";
-import { embedChunks, requireEmbeddingModel } from "../src/embedding.js";
+import { AdmissionError } from "../src/admission.js";
+import { embedChunks, embeddingRetryDelay, embeddingRetryDelays, EMBEDDING_RETRY_DELAYS_MS, requireEmbeddingModel } from "../src/embedding.js";
 import { providerUrl, type ModelTarget } from "../src/provider.js";
 import { noopLimiter } from "./admission-helpers.js";
 
@@ -165,6 +166,33 @@ test("retries transient failures per batch and gives up on permanent ones", asyn
   const invalid = script(new Response("not json", { status: 200 }), ok());
   await assert.rejects(embedChunks(target(), ["input"], noopLimiter(), noWait), /invalid response/);
   assert.equal(invalid(), 1, "invalid responses are not retried");
+});
+
+test("only transient failures are retried later through the queue", async (context) => {
+  const oldFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = oldFetch; });
+  process.env.PROCESSING_TEST_API_KEY = "test-secret";
+  process.env.NYZ_MODEL_CREDENTIAL_ENVS = "PROCESSING_TEST_API_KEY";
+  // 取得 embedChunks 实际抛出的错误（本次调用内不再重试）。
+  const failure = async (step: Response | Error) => {
+    globalThis.fetch = (async () => { if (step instanceof Error) throw step; return step; }) as typeof fetch;
+    return embedChunks(target(), ["input"], noopLimiter(), []).then(() => assert.fail("expected a failure"), (error: unknown) => error);
+  };
+  const delays = [1_000, 5_000];
+  assert.equal(embeddingRetryDelay(await failure(new Response("", { status: 503 })), 0, delays), 1_000);
+  assert.equal(embeddingRetryDelay(await failure(new TypeError("fetch failed")), 1, delays), 5_000);
+  assert.equal(embeddingRetryDelay(await failure(new DOMException("timeout", "TimeoutError")), 0, delays), 1_000, "timeouts are retried later");
+  assert.equal(embeddingRetryDelay(await failure(new Response("", { status: 429, headers: { "retry-after": "60" } })), 0, delays), 60_000, "a longer Retry-After wins");
+  assert.equal(embeddingRetryDelay(new AdmissionError(429, 30, "busy"), 1, delays), 30_000, "local admission limits are retried");
+  assert.equal(embeddingRetryDelay(await failure(new Response("", { status: 503 })), 2, delays), null, "attempts are bounded");
+  for (const permanent of [await failure(new Response("", { status: 400 })), await failure(new Response("not json", { status: 200 })), new Error("Document changed during embedding")]) {
+    assert.equal(embeddingRetryDelay(permanent, 0, delays), null);
+  }
+
+  assert.deepEqual(embeddingRetryDelays(undefined), EMBEDDING_RETRY_DELAYS_MS);
+  assert.deepEqual(embeddingRetryDelays(""), [], "an empty value disables retries");
+  assert.deepEqual(embeddingRetryDelays(" 100, 0 "), [100, 0]);
+  assert.throws(() => embeddingRetryDelays("1m"), /NYZ_EMBED_RETRY_DELAYS_MS/);
 });
 
 test("provider URLs map loopback hosts to NYZ_LOOPBACK_HOST only when it is set (inside Docker)", () => {

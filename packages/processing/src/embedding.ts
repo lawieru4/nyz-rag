@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { AdmissionError } from "./admission.js";
 import { acquireModelLease, type AdmissionLimiter } from "./model-admission.js";
 import { authorizationHeaders, providerCredential, providerUrl, type ModelTarget } from "./provider.js";
 
@@ -56,6 +57,9 @@ class TransientEmbeddingError extends Error {
   constructor(message: string, readonly retryAfterMs?: number) { super(message); }
 }
 
+/** 请求超时：不在本次调用内重试，但可由队列稍后重试。 */
+class EmbeddingTimeoutError extends Error {}
+
 function retryAfterMs(response: Response): number | undefined {
   const seconds = Number(response.headers.get("retry-after") ?? undefined);
   return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
@@ -78,7 +82,7 @@ async function requestBatch(url: string, apiKey: string | null, providerId: stri
       });
     } catch (error) {
       const message = "The embedding request failed or timed out.";
-      throw error instanceof Error && error.name === "TimeoutError" ? new Error(message) : new TransientEmbeddingError(message);
+      throw error instanceof Error && error.name === "TimeoutError" ? new EmbeddingTimeoutError(message) : new TransientEmbeddingError(message);
     }
 
     if (!response.ok) {
@@ -147,4 +151,31 @@ export async function embedChunks(
   }
 
   return vectors;
+}
+
+/** 队列重试的默认等待：1、5、15 分钟。 */
+export const EMBEDDING_RETRY_DELAYS_MS: readonly number[] = [60_000, 300_000, 900_000];
+
+/** 解析 NYZ_EMBED_RETRY_DELAYS_MS（逗号分隔的毫秒数）；未设置时用默认值，空字符串表示不重试。 */
+export function embeddingRetryDelays(value: string | undefined): number[] {
+  if (value === undefined) return [...EMBEDDING_RETRY_DELAYS_MS];
+  return value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => {
+    const delayMs = Number(item);
+    if (!Number.isSafeInteger(delayMs) || delayMs < 0) throw new Error("NYZ_EMBED_RETRY_DELAYS_MS must be comma-separated non-negative integers");
+    return delayMs;
+  });
+}
+
+/**
+ * 向量化失败后由队列稍后重试的等待时间；不应重试（4xx、响应无效、未配置模型、文档已变化等）或次数用完时返回 null。
+ * 只重试临时错误：429/5xx/连接失败（本次调用内的重试已用完）、超时与本地限流；服务端要求的等待更长时取其值。
+ * @param retried 已经重试过的次数。
+ */
+export function embeddingRetryDelay(error: unknown, retried: number, delaysMs: readonly number[]): number | null {
+  if (retried >= delaysMs.length) return null;
+  let requestedMs = 0;
+  if (error instanceof TransientEmbeddingError) requestedMs = error.retryAfterMs ?? 0;
+  else if (error instanceof AdmissionError) requestedMs = error.retryAfter * 1000;
+  else if (!(error instanceof EmbeddingTimeoutError)) return null;
+  return Math.max(delaysMs[retried], requestedMs);
 }
