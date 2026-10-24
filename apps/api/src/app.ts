@@ -37,7 +37,7 @@ export function buildApp(options: {
   app.register(cors, {
     // 管理端与用户端只对各自配置的来源允许携带 Cookie；其他来源仍可无状态地调用公开接口。
     delegator: async (request: FastifyRequest) => request.url.startsWith("/api/admin/")
-      ? { origin: auth.origins, credentials: true, exposedHeaders: ["Retry-After"], allowedHeaders: ["Content-Type", "X-NYZ-Admin"], methods: ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"] }
+      ? { origin: auth.origins, credentials: true, exposedHeaders: ["Retry-After"], allowedHeaders: ["Content-Type", "X-NYZ-Admin"], methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }
       : userAuth.origins.includes(request.headers.origin ?? "")
         ? { origin: userAuth.origins, credentials: true, exposedHeaders: ["Retry-After"], allowedHeaders: ["Content-Type", "X-NYZ-Client"], methods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"] }
         : { origin: true, credentials: false, exposedHeaders: ["Retry-After"] },

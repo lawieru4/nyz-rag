@@ -6,7 +6,7 @@ import { buildTestApp as buildApp } from "./auth-helpers.js";
 import { adminAuthConfig, configureAdminAuth, createAdminAuthStore } from "../src/admin-auth.js";
 import { configureCommon } from "../src/common.js";
 import { routeSchemas } from "../src/schemas.js";
-import { adminAuth, adminHeaders, memoryAuthStore, memoryAdmins } from "./auth-helpers.js";
+import { adminAuth, adminHeaders, memoryAuthStore, memoryAdmins, userAuth } from "./auth-helpers.js";
 import { hashPassword } from "../src/passwords.js";
 
 const queue = {
@@ -130,6 +130,22 @@ test("CSRF header and exact origins are enforced on admin routes", async () => {
     assert.equal((await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: { ...adminHeaders, origin: "https://evil.example" }, payload: { username: email, password } })).statusCode, 403);
     // null origin
     assert.equal((await app.inject({ method: "POST", url: "/api/admin/auth/login", headers: { ...adminHeaders, origin: "null" }, payload: { username: email, password } })).statusCode, 403);
+  } finally { await app.close(); }
+});
+
+test("CORS preflight allows every method used by admin and credentialed user routes", async () => {
+  const { repository } = await makeAdmins();
+  const app = buildApp({ queue, adminAuth, authStore: memoryAuthStore(), admins: repository, userAuth });
+  try {
+    for (const key of Object.keys(routeSchemas)) {
+      const [method, path] = key.split(" ") as [string, string];
+      const origin = path.startsWith("/api/admin/") ? adminAuth.origins[0]!
+        : /^\/api\/(chat|messages|auth)(\/|$)/.test(path) ? userAuth.origins[0]! : null;
+      if (!origin) continue;
+      const preflight = await app.inject({ method: "OPTIONS", url: path.replace(":id", randomUUID()), headers: { origin, "access-control-request-method": method } });
+      assert.equal(preflight.statusCode, 204, `${key}: ${preflight.body}`);
+      assert.ok(String(preflight.headers["access-control-allow-methods"]).split(/,\s*/).includes(method), `${key}: ${preflight.headers["access-control-allow-methods"]}`);
+    }
   } finally { await app.close(); }
 });
 
