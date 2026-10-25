@@ -81,19 +81,20 @@ test("single-answer and SSE use the same citation presence/ID gate and exact ref
       assert.equal(saved.length, 1);
       assert.equal(saved[0].answer, result.answer);
       assert.equal(saved[0].model, accepted ? "mock-chat" : undefined);
-      assert.equal(saved[0].promptTokens, 20, "provider usage is retained even when output is rejected");
+      // An out-of-range citation stops reading the provider stream, so its trailing usage never arrives.
+      assert.equal(saved[0].promptTokens, /\[[02]\]/.test(text) ? undefined : 20, "provider usage is retained when output is rejected after completion");
       assert.equal(typeof saved[0].firstTokenMs, sse ? "number" : "undefined");
       assert.ok(prompt[0].content.includes(refusal));
       if (sse) {
-        assert.equal(tokens(response.body), result.answer);
+        if (accepted) assert.equal(tokens(response.body), result.answer);
         assert.equal(events(response.body).filter((event) => event.event === "source").length, 1);
-      }
-      if (!accepted) assert.doesNotMatch(response.body, /REJECTED_/);
+        assert.doesNotMatch(tokens(response.body), /\[[02]\]/, "out-of-range citations are never streamed");
+      } else if (!accepted) assert.doesNotMatch(response.body, /REJECTED_/);
     } finally { await app.close(); }
   });
 });
 
-test("provider failure after buffered tokens emits only cautious evidence", async () => {
+test("provider failure after streamed tokens is replaced by cautious evidence in done", async () => {
   for (const sse of [false, true]) {
     const app = makeApp();
     stream = async function* () {
@@ -103,15 +104,17 @@ test("provider failure after buffered tokens emits only cautious evidence", asyn
     try {
       const response = await send(app, sse);
       assert.equal(response.statusCode, 200);
-      assert.doesNotMatch(response.body, /REJECTED_PARTIAL/);
       assert.equal(saved[0].answerMode, "extractive");
       assert.match(saved[0].answer, /未验证其是否足以回答问题/);
-      if (sse) assert.equal(tokens(response.body), saved[0].answer);
+      if (sse) {
+        assert.equal(tokens(response.body), "REJECTED_PARTIAL [1]", "streamed text is not followed by fallback tokens");
+        assert.equal(events(response.body).find((event) => event.event === "done")!.data.answer, saved[0].answer);
+      } else assert.doesNotMatch(response.body, /REJECTED_PARTIAL/);
     } finally { await app.close(); }
   }
 });
 
-test("AdmissionError after buffered output stays an error, without fallback or save", async () => {
+test("AdmissionError after streamed output stays an error, without fallback or save", async () => {
   for (const status of [429, 503] as const) for (const sse of [false, true]) {
     const app = makeApp();
     stream = async function* () {
@@ -122,16 +125,37 @@ test("AdmissionError after buffered output stays an error, without fallback or s
       const response = await send(app, sse);
       assert.equal(response.statusCode, sse ? 200 : status);
       assert.equal(saved.length, 0);
-      assert.doesNotMatch(response.body, /REJECTED_ADMISSION/);
       if (sse) {
-        assert.equal(tokens(response.body), "");
-        assert.deepEqual(events(response.body).filter((event) => event.event !== "source"), [{ event: "error", data: { error: "Model busy" } }]);
+        assert.deepEqual(events(response.body).filter((event) => event.event !== "source"), [
+          { event: "token", data: { content: "REJECTED_ADMISSION [1]" } },
+          { event: "error", data: { error: "Model busy" } },
+        ]);
       } else {
+        assert.doesNotMatch(response.body, /REJECTED_ADMISSION/);
         assert.equal(response.headers["retry-after"], "7");
         assert.deepEqual(response.json(), { error: "Model busy" });
       }
     } finally { await app.close(); }
   }
+});
+
+test("an out-of-range citation stops generation before it is streamed", async () => {
+  const app = makeApp();
+  let requested = 0;
+  let closed = false;
+  stream = async function* () {
+    try {
+      for (const text of ["Answer [", "1] then [1", "，", "3] tail", "UNREACHED"]) { requested++; yield { type: "token", text }; }
+    } finally { closed = true; }
+  };
+  try {
+    const response = await send(app, true);
+    assert.equal(tokens(response.body), "Answer [1] then ", "held-back partial citation is dropped with the invalid one");
+    assert.equal(requested, 4, "provider stream is not read after the invalid citation");
+    assert.ok(closed, "provider stream is closed");
+    assert.equal(saved[0].answerMode, "extractive");
+    assert.equal(events(response.body).find((event) => event.event === "done")!.data.answer, saved[0].answer);
+  } finally { await app.close(); }
 });
 
 test("no context or no configured model keeps the extractive path without calling the provider", async () => {
@@ -149,15 +173,15 @@ test("no context or no configured model keeps the extractive path without callin
   }
 });
 
-test("SSE buffers until completion, measures emitted text, and discards on disconnect", { timeout: 10000 }, async (t) => {
+test("SSE streams tokens as they arrive, measures first token, and discards on disconnect", { timeout: 10000 }, async (t) => {
   for (const disconnect of [false, true]) await t.test(`disconnect=${disconnect}`, async (t) => {
     const app = makeApp();
-    let buffered!: () => void;
+    let yielded!: () => void;
     let finish!: () => void;
     let aborted!: () => void;
     let handled!: () => void;
     let drained!: () => void;
-    const buffering = new Promise<void>((resolve) => { buffered = resolve; });
+    const firstYield = new Promise<void>((resolve) => { yielded = resolve; });
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     const abort = new Promise<void>((resolve) => { aborted = resolve; });
     const complete = new Promise<void>((resolve) => { handled = resolve; });
@@ -168,33 +192,33 @@ test("SSE buffers until completion, measures emitted text, and discards on disco
     stream = async function* (_messages, options) {
       options!.signal!.addEventListener("abort", () => { aborted(); finish(); }, { once: true });
       now = 100;
-      yield { type: "token", text: "Buffered accepted answer [1]" } satisfies ChatChunk;
-      buffered();
+      yield { type: "token", text: "Streamed answer " } satisfies ChatChunk;
+      yielded();
       await pending;
       now = 900;
-      // Deliberately finish normally on abort: even an uncooperative provider
-      // must not cause buffered text to be emitted or persisted after disconnect.
-      drained();
+      // Deliberately keep yielding after abort: even an uncooperative provider
+      // must not cause more text to be emitted or persisted after disconnect.
+      try { yield { type: "token", text: "[1]" } satisfies ChatChunk; }
+      finally { drained(); }
     };
     try {
       const address = await app.listen({ host: "127.0.0.1", port: 0 });
       let received = "";
       let closeClient!: () => void;
-      let sawSource!: () => void;
-      const source = new Promise<void>((resolve) => { sawSource = resolve; });
+      let sawToken!: () => void;
+      const token = new Promise<void>((resolve) => { sawToken = resolve; });
       const responseDone = new Promise<void>((resolve, reject) => {
         const client = httpRequest(`${address}/api/chat/sessions/${sessionId}/stream`, { method: "POST", headers: { ...userHeaders, "content-type": "application/json" } }, (response) => {
           closeClient = () => { response.destroy(); resolve(); };
-          response.on("data", (chunk) => { received += chunk.toString(); if (received.includes("event: source")) sawSource(); });
+          response.on("data", (chunk) => { received += chunk.toString(); if (received.includes("event: token")) sawToken(); });
           response.on("end", resolve);
           response.on("error", reject);
         });
         client.on("error", reject);
         client.end(JSON.stringify({ question: "Question" }));
       });
-      await Promise.all([source, buffering]);
-      assert.equal(tokens(received), "", "no token before validation completes");
-      assert.doesNotMatch(received, /Buffered accepted/);
+      await Promise.all([token, firstYield]);
+      assert.equal(tokens(received), "Streamed answer ", "first token arrives before the model finishes");
       if (disconnect) {
         closeClient();
         await abort;
@@ -206,8 +230,8 @@ test("SSE buffers until completion, measures emitted text, and discards on disco
       } else await complete;
       if (disconnect) assert.equal(saved.length, 0);
       else {
-        assert.equal(tokens(received), "Buffered accepted answer [1]");
-        assert.equal(saved[0].firstTokenMs, 900, "not the provider's buffered arrival at 100ms");
+        assert.equal(tokens(received), "Streamed answer [1]");
+        assert.equal(saved[0].firstTokenMs, 100, "measured at the first streamed token");
         assert.equal(saved[0].answerMode, "generated");
       }
     } finally { finish(); await app.close(); }

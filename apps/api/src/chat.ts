@@ -17,6 +17,8 @@ import { getAdminSession, requires } from "./admin-auth.js";
 
 // SSE 心跳间隔，避免检索或等待首 Token 期间被代理（Nginx 默认 60 秒）断开。
 const HEARTBEAT_MS = 15_000;
+// 文本末尾可能尚未写完的引用编号，如 "[" "[1" "[1，"。
+const PARTIAL_CITATION = /\[[\d\s,，、]*$/;
 
 interface AnswerOptions {
   question: string;
@@ -84,14 +86,26 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   let answer = extractiveAnswer(context);
   let answerMode: ChatAnswerMode = "extractive";
   const usage: AnswerResult["usage"] = {};
+  // 模型输出边生成边发送（token 事件），done 事件中的回答为准：未通过引用门控的输出由 done 替换为摘录。
+  let text = "";
+  let sent = 0;
+  const emit = (end: number) => {
+    if (!options.onToken || options.signal?.aborted || end <= sent) return;
+    usage.firstTokenMs ??= elapsed(started);
+    options.onToken(text.slice(sent, end));
+    sent = end;
+  };
   if (context.chunks.length && chatModel && !options.signal?.aborted) {
     const chat = createChatModel(chatModel);
     try {
-      let text = "";
       for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context, options.history), { signal: options.signal })) {
         if (options.signal?.aborted) break;
         if (chunk.type === "token") {
           text += chunk.text;
+          // 末尾未闭合的疑似引用（如 "[1、"）暂不发送；出现越界编号时立即停止生成，越界编号本身不会发给客户端。
+          const end = text.length - (PARTIAL_CITATION.exec(text)?.[0].length ?? 0);
+          if (validateCitations(text.slice(sent, end), context.sources.length).invalid.length) break;
+          emit(end);
         } else {
           usage.promptTokens = chunk.promptTokens;
           usage.completionTokens = chunk.completionTokens;
@@ -103,6 +117,7 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
         answer = candidate;
         answerMode = "generated";
         usage.model = chat.model;
+        emit(text.length);
       } else {
         log.warn({ cited: citations.cited, invalid: citations.invalid }, "Chat answer rejected by citation presence/ID gate; using extractive evidence");
       }
@@ -111,11 +126,10 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
       if (!options.signal?.aborted) log.warn(`Chat model failed; using extractive answer: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   }
-  // Buffer the complete model response before releasing any answer text. This
-  // increases visible latency; firstTokenMs measures accepted output, not arrival.
-  if (options.onToken && !options.signal?.aborted) {
-    usage.firstTokenMs = elapsed(started);
-    options.onToken(answer);
+  // 尚未发出任何模型输出（未调用模型、模型无输出或首段即被拒绝）时，把最终回答作为 token 发出。
+  if (!sent) {
+    text = answer;
+    emit(text.length);
   }
   return { answer, answerMode, context, usage, retrievalMs, totalMs: elapsed(started) };
 }
