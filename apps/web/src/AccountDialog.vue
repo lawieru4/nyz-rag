@@ -106,7 +106,7 @@ async function submit() {
 
 <template>
   <Dialog :open="true" @update:open="(open) => { if (!open) emit('close'); }">
-    <DialogContent class="max-h-[calc(100vh-2.5rem)] overflow-y-auto sm:max-w-100">
+    <DialogContent class="sm:max-w-100">
       <DialogHeader>
         <p class="eyebrow mb-1">能知账号</p>
         <DialogTitle>{{ titles[mode] }}</DialogTitle>

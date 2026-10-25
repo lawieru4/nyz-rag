@@ -26,8 +26,8 @@ function handleSubmit() {
 </script>
 
 <template>
-  <div class="flex min-h-screen items-center justify-center p-4">
-    <Card class="w-full max-w-100 gap-0 px-9 pt-10 pb-9">
+  <div class="flex min-h-dvh items-center justify-center p-4">
+    <Card class="w-full max-w-100 gap-0 px-9 pt-10 pb-9 max-sm:px-6 max-sm:pt-8 max-sm:pb-7">
       <div class="mb-9 flex items-center gap-3">
         <img src="/logo.png" alt="能知" class="h-12 w-36 flex-none object-contain" />
         <div>

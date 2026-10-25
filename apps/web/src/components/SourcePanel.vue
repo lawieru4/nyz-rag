@@ -35,7 +35,7 @@ const documentHref = (id: string) => `#/documents/${encodeURIComponent(id)}`;
       <IconButton v-if="closable" label="关闭引用来源" size="icon-sm" class="-mt-1 -mr-1.5" @click="emit('close')"><X /></IconButton>
     </div>
 
-    <ol ref="list" class="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
+    <ol ref="list" class="min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain p-3 wrap-break-word">
       <li
         v-for="(source, index) in sources" :key="source.documentId" :data-citation="index + 1"
         :class="['scroll-my-3 rounded-lg bg-card transition-shadow', activeCitation === index + 1 ? 'shadow-[0_0_0_1px_var(--ring),0_0_0_4px_color-mix(in_oklab,var(--brand)_40%,transparent)]' : 'hover:shadow-[0_1px_3px_#202b1414]']"

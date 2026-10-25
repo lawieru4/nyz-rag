@@ -6,6 +6,20 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
+ * 触屏（粗指针）上用透明伪元素把点击区域扩大到至少 44×44，视觉尺寸不变；本身不小于 44px 时不扩大。
+ * 元素须是定位元素（relative/absolute 等），伪元素才以它为参照。
+ */
+@utility touch-target {
+  @media (pointer: coarse) {
+    &::after {
+      content: "";
+      position: absolute;
+      inset: min(0px, calc((100% - 44px) / 2));
+    }
+  }
+}
+
+/*
  * 只自托管西文字体（拉丁字符子集，SIL OFL 1.1，见 fonts/OFL-*.txt），中文使用系统字体，不请求外部字体服务。
  * DM Sans 的字符范围去掉了中文常用的弯引号、破折号与省略号（U+2014、U+2018–201F、U+2026），使其按中文字体显示。
  */
@@ -138,7 +152,7 @@
     text-rendering: optimizeLegibility;
   }
   body {
-    @apply min-h-screen bg-background font-sans text-foreground antialiased;
+    @apply min-h-dvh bg-background font-sans text-foreground antialiased;
   }
   button:not(:disabled),
   [role="button"]:not(:disabled) {

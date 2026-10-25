@@ -84,7 +84,7 @@ async function saveProvider() {
 
 <template>
   <Dialog v-model:open="dialogOpen">
-    <DialogContent class="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl" :aria-describedby="undefined">
+    <DialogContent class="sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[11px] font-medium tracking-wider text-link">MODEL PROVIDER</p>
         <DialogTitle>{{ provider ? '编辑供应商' : '添加供应商' }}</DialogTitle>
@@ -103,7 +103,7 @@ async function saveProvider() {
             <Label v-if="provider?.hasApiKey" class="text-xs font-normal text-muted-foreground"><Switch v-model="form.clearApiKey" :disabled="Boolean(form.apiKey)" />清除已保存的密钥</Label>
           </div>
         </div>
-        <div class="flex items-center justify-between gap-3 rounded-md bg-secondary px-3 py-2">
+        <div class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-secondary px-3 py-2">
           <p class="text-xs text-secondary-foreground">填写地址和 Key 后可以测试连接；具体模型在「业务模型」中选择</p>
           <Button type="button" variant="outline" size="sm" :disabled="testing" @click="testConnection"><LoaderCircle v-if="testing" class="animate-spin" /><RefreshCw v-else />测试连接</Button>
         </div>

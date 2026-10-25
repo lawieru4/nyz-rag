@@ -139,7 +139,8 @@ function startCrawl(source: Source) {
   <section class="mb-7">
     <div class="mb-3"><h2 class="text-sm font-semibold">数据源</h2><p class="mt-1 text-xs text-muted-foreground">配置 nyzdata 文章接口，并管理同步计划</p></div>
     <Card class="gap-0 overflow-hidden py-0">
-      <Table class="min-w-[750px]">
+      <!-- 手机端（<768px）用下方的摘要列表，与表格共用数据和操作 -->
+      <Table class="min-w-[750px]" container-class="max-md:hidden">
         <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>同步频率</TableHead><TableHead title="已入库文章数 / 最近一次同步时接口返回的文章总数">已入库 / 接口总数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
         <TableBody>
           <TableRow v-for="{ source, coverage } in sourceRows" :key="source.id" class="text-[13px] text-muted-foreground">
@@ -168,6 +169,27 @@ function startCrawl(source: Source) {
           </TableRow>
         </TableBody>
       </Table>
+      <ul class="divide-y md:hidden" aria-label="数据源列表">
+        <li v-for="{ source, coverage } in sourceRows" :key="source.id" class="grid gap-3 px-4 py-3.5 text-[13px] text-muted-foreground">
+          <div class="flex items-start gap-2.5">
+            <span class="grid size-7 flex-none place-items-center rounded-md border bg-secondary font-mono text-xs text-link">A</span>
+            <span class="grid min-w-0 flex-1 gap-1"><b class="text-sm font-semibold break-words text-foreground">{{ source.name }}</b><small class="text-xs wrap-anywhere">{{ source.url }}</small></span>
+            <StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge>
+          </div>
+          <div class="grid gap-1.5">
+            <span class="tabular-nums"><span class="text-xs">已入库 / 接口总数</span> <b class="font-semibold text-foreground">{{ source.pages.toLocaleString() }}</b> / {{ source.remoteTotal?.toLocaleString() ?? "—" }}<span v-if="coverage.percent !== null" class="ml-1.5 text-xs">{{ coverage.percent }}%</span></span>
+            <Progress v-if="coverage.percent !== null" :model-value="coverage.percent" class="h-1" />
+            <small class="text-xs tabular-nums">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span>{{ source.frequency }} · 最近同步 {{ source.updated }}</span>
+            <div v-if="can('sources:manage')" class="flex gap-1.5">
+              <Button variant="outline" size="sm" :disabled="syncingSources.has(source.id) || isPending(source.id)" @click="startCrawl(source)"><RefreshCw :class="syncingSources.has(source.id) && 'animate-spin'" />{{ syncingSources.has(source.id) ? '同步中' : '立即同步' }}</Button>
+              <Button variant="outline" size="sm" :disabled="isPending(source.id)" @click="toggleSource(source)"><template v-if="source.status === '运行中'"><Pause />暂停</template><template v-else><Play />启用</template></Button>
+            </div>
+          </div>
+        </li>
+      </ul>
       <EmptyState v-if="sources.length === 0">尚未添加数据源 <Button v-if="can('sources:manage')" variant="link" size="sm" class="text-link" @click="dialogOpen = true">添加第一个来源</Button></EmptyState>
     </Card>
   </section>
@@ -175,17 +197,18 @@ function startCrawl(source: Source) {
   <section class="mb-7">
     <div class="mb-3"><h2 class="text-sm font-semibold">抓取任务</h2><p class="mt-1 text-xs text-muted-foreground">查看近期同步状态与处理进度</p></div>
     <Card class="gap-0 py-0">
-      <div v-for="task in tasks" :key="task.id" class="flex min-h-14 items-center gap-3 border-b px-4 last:border-b-0">
+      <!-- 小于 768px 时进度与结果各占一行，与任务名称左对齐 -->
+      <div v-for="task in tasks" :key="task.id" class="flex min-h-14 items-center gap-3 border-b px-4 last:border-b-0 max-md:flex-wrap max-md:gap-y-1.5 max-md:py-3">
         <span :class="['grid size-6 flex-none place-items-center rounded-full', taskState[task.status].class]"><component :is="taskState[task.status].icon" class="size-3.5" /></span>
-        <div class="grid w-56 min-w-0 gap-1 max-lg:w-44">
+        <div class="grid w-56 min-w-0 gap-1 max-lg:w-44 max-md:w-auto max-md:flex-1">
           <b class="truncate text-xs font-semibold">{{ task.source }} <span class="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground" :title="task.id">{{ task.id.startsWith('CR-') ? task.id : task.id.slice(0, 8) }}</span></b>
-          <small class="truncate text-xs text-muted-foreground">{{ task.error || task.started }}</small>
+          <small class="truncate text-xs text-muted-foreground max-md:whitespace-normal max-md:wrap-anywhere">{{ task.error || task.started }}</small>
         </div>
-        <div class="flex max-w-80 flex-1 items-center gap-2.5">
+        <div class="flex max-w-80 flex-1 items-center gap-2.5 max-md:max-w-none max-md:basis-full max-md:pl-9">
           <Progress :model-value="taskProgress(task).value" class="h-1" />
           <small class="min-w-24 text-xs whitespace-nowrap text-muted-foreground tabular-nums">{{ taskProgress(task).label }}</small>
         </div>
-        <span class="ml-auto w-32 text-xs text-muted-foreground tabular-nums max-md:hidden">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
+        <span class="ml-auto w-32 text-xs text-muted-foreground tabular-nums max-md:ml-0 max-md:w-auto max-md:basis-full max-md:pl-9">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
       </div>
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>

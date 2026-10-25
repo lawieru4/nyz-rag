@@ -60,13 +60,13 @@ async function save() {
   </PageHeading>
   <Card class="min-h-72 gap-0 py-0">
     <div class="px-5 py-4"><h2 class="text-sm font-semibold">知识库配置</h2><p class="mt-1 text-xs text-muted-foreground">{{ knowledgeBases.length }} 个知识库</p></div>
-    <article v-for="item in knowledgeBases" :key="item.id" class="flex items-start justify-between gap-5 border-t p-5">
-      <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-center gap-3"><h3 class="text-sm font-semibold">{{ item.name }}</h3><StatusBadge :on="item.rerankEnabled">{{ item.rerankEnabled ? '重排序开启' : '重排序关闭' }}</StatusBadge></div>
-        <p class="mt-1.5 mb-4 text-xs text-muted-foreground">{{ item.description || '未填写描述' }}</p>
+    <article v-for="item in knowledgeBases" :key="item.id" class="flex items-start justify-between gap-5 border-t p-5 max-sm:flex-col max-sm:gap-4 max-sm:px-4">
+      <div class="min-w-0 flex-1 max-sm:w-full">
+        <div class="flex flex-wrap items-center gap-3"><h3 class="min-w-0 text-sm font-semibold break-words">{{ item.name }}</h3><StatusBadge :on="item.rerankEnabled">{{ item.rerankEnabled ? '重排序开启' : '重排序关闭' }}</StatusBadge></div>
+        <p class="mt-1.5 mb-4 text-xs break-words text-muted-foreground">{{ item.description || '未填写描述' }}</p>
         <dl class="flex flex-wrap gap-5">
           <div v-for="[label, value] in [['召回数量', item.topK], ['相似度阈值', item.similarityThreshold.toFixed(2)], ['最大上下文', `${item.maxContextLength.toLocaleString()} 字符`], ['模型', item.model]]" :key="label" class="grid gap-1">
-            <dt class="text-xs text-muted-foreground">{{ label }}</dt><dd class="font-mono text-xs">{{ value }}</dd>
+            <dt class="text-xs text-muted-foreground">{{ label }}</dt><dd class="font-mono text-xs break-all">{{ value }}</dd>
           </div>
         </dl>
       </div>
@@ -76,7 +76,7 @@ async function save() {
   </Card>
 
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl" :aria-describedby="undefined">
+    <DialogContent class="sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
         <p class="font-mono text-[11px] font-medium tracking-wider text-link">KNOWLEDGE BASE</p>
         <DialogTitle>{{ editingId ? '编辑知识库' : '新建知识库' }}</DialogTitle>

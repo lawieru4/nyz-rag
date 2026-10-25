@@ -38,12 +38,12 @@ const emit = defineEmits<{
         </MetaRow>
         <MetaRow v-if="document.processingStatus === 'duplicate'">
           <span>与已有文档内容相同，不切片、不参与检索</span>
-          <Button v-if="document.primary" variant="link" size="sm" class="h-auto p-0 text-xs text-link" @click="emit('open', document.primary.id)">主文档：{{ sourceName(document.primary.sourceId) }} · {{ document.primary.title }}</Button>
+          <Button v-if="document.primary" variant="link" size="sm" class="h-auto p-0 text-left text-xs whitespace-normal text-link" @click="emit('open', document.primary.id)">主文档：{{ sourceName(document.primary.sourceId) }} · {{ document.primary.title }}</Button>
           <span v-else>主文档已删除，请重新处理</span>
         </MetaRow>
         <MetaRow v-if="document.duplicates?.length">
           <span>同内容的其他来源 {{ document.duplicates.length }}</span>
-          <Button v-for="duplicate in document.duplicates" :key="duplicate.id" variant="link" size="sm" class="h-auto p-0 text-xs text-link" @click="emit('open', duplicate.id)">{{ sourceName(duplicate.sourceId) }} · {{ duplicate.title }}</Button>
+          <Button v-for="duplicate in document.duplicates" :key="duplicate.id" variant="link" size="sm" class="h-auto p-0 text-left text-xs whitespace-normal text-link" @click="emit('open', duplicate.id)">{{ sourceName(duplicate.sourceId) }} · {{ duplicate.title }}</Button>
         </MetaRow>
         <MetaRow v-if="document.externalId">
           <span v-if="document.author">作者 {{ document.author }}</span>
