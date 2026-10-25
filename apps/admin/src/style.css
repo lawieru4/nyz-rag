@@ -21,7 +21,7 @@
     overflow-wrap: anywhere;
   }
   pre.document-text {
-    max-height: 48vh;
+    max-height: 48dvh;
     overflow: auto;
     font-family: var(--font-mono);
     font-size: 12px;

@@ -39,7 +39,8 @@ const { items: logs, total, query, page, loading, load: loadAuditLogs, search, f
       </label>
       <FilterSelect v-model="result" label="筛选结果" all-label="全部结果" :options="AUDIT_RESULTS" @update:model-value="filter" />
     </div>
-    <Table class="min-w-[820px]">
+    <!-- 手机端（<768px）用下方的摘要列表，列出表格的全部字段（含请求 ID） -->
+    <Table class="min-w-[820px]" container-class="max-md:hidden">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">时间</TableHead><TableHead>操作者</TableHead><TableHead>操作</TableHead><TableHead>资源 ID</TableHead><TableHead>结果</TableHead><TableHead>IP</TableHead></TableRow></TableHeader>
       <TableBody>
         <TableRow v-for="log in logs" :key="log.id" class="text-[13px] text-muted-foreground">
@@ -56,6 +57,20 @@ const { items: logs, total, query, page, loading, load: loadAuditLogs, search, f
         </TableRow>
       </TableBody>
     </Table>
+    <ul class="divide-y md:hidden" aria-label="操作日志列表">
+      <li v-for="log in logs" :key="log.id" class="grid gap-1.5 px-4 py-3 text-xs text-muted-foreground">
+        <div class="flex items-start justify-between gap-3">
+          <span class="grid min-w-0 gap-0.5"><b class="text-[13px] font-semibold text-foreground">{{ auditActionLabel(log) }}</b><span class="font-mono text-[11px] wrap-anywhere">{{ log.method }} {{ log.route }}</span></span>
+          <Badge :variant="auditResultVariant(log.result)">{{ auditResultLabel(log.result) }} · {{ log.statusCode }}</Badge>
+        </div>
+        <span class="wrap-anywhere"><span class="text-foreground">{{ auditOperator(log) }}</span><template v-if="log.adminEmail"> · {{ log.adminEmail }}</template></span>
+        <span>{{ new Date(log.createdAt).toLocaleString() }} · <span class="font-mono text-[11px]">{{ log.ip }}</span></span>
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono text-[11px]">
+          <dt class="font-sans text-xs">资源 ID</dt><dd class="wrap-anywhere">{{ log.resourceId ?? '—' }}</dd>
+          <dt class="font-sans text-xs">请求 ID</dt><dd class="wrap-anywhere">{{ log.requestId }}</dd>
+        </dl>
+      </li>
+    </ul>
     <EmptyState v-if="loading && !logs.length">正在加载操作日志…</EmptyState>
     <EmptyState v-else-if="!logs.length">没有符合条件的操作日志</EmptyState>
     <ListPager v-model:page="page" :total="total" unit="条" :disabled="loading" class="mt-auto" @update:page="loadAuditLogs" />

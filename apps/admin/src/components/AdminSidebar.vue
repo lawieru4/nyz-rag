@@ -6,7 +6,8 @@ import type { AdminSession } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { homePath, routeVisible } from "../router";
 
-const props = defineProps<{ session: AdminSession; activeModule: string; sourceCount: number }>();
+// drawer：手机端在抽屉中显示（由抽屉负责定位与背景），否则为平板及桌面的常驻侧栏。
+const props = defineProps<{ session: AdminSession; activeModule: string; sourceCount: number; drawer?: boolean }>();
 const emit = defineEmits<{
   (e: "select", event: MouseEvent, name: string): void;
   (e: "logout"): void;
@@ -31,43 +32,42 @@ const roleLabel = computed(() => props.session.admin.isSuper ? "超级管理员"
 </script>
 
 <template>
-  <aside class="fixed inset-y-0 left-0 z-10 flex w-58 flex-col bg-sidebar px-3.5 pt-6 pb-3.5 text-sidebar-foreground max-lg:w-48 max-md:w-14 max-md:px-2">
-    <RouterLink class="flex items-center gap-1 px-2 text-sm font-bold text-sidebar-accent-foreground max-md:px-1" :to="homePath(session)" aria-label="能知管理后台">
-      <img src="/logo_t.png" alt="能知" class="h-10 w-30 flex-none object-contain max-lg:w-24 max-md:hidden" />
-      <img src="/favicon_t.png" alt="" class="hidden size-7 flex-none object-contain max-md:block" />
-      <span class="text-[11px] font-medium text-sidebar-foreground max-md:hidden">管理后台</span>
+  <aside :class="['flex flex-col px-3.5 pt-6 pb-3.5', drawer ? 'h-full' : 'fixed inset-y-0 left-0 z-10 w-58 bg-sidebar text-sidebar-foreground max-lg:w-48 max-md:hidden']">
+    <RouterLink class="flex items-center gap-1 px-2 text-sm font-bold text-sidebar-accent-foreground" :to="homePath(session)" aria-label="能知管理后台" @click="emit('select', $event, '')">
+      <img src="/logo_t.png" alt="能知" class="h-10 w-30 flex-none object-contain max-lg:w-24" />
+      <span class="text-[11px] font-medium text-sidebar-foreground">管理后台</span>
     </RouterLink>
-    <div class="mx-2.5 mt-11 mb-3 text-[11px] font-medium tracking-wider text-sidebar-foreground max-md:hidden">工作空间</div>
-    <nav class="grid gap-1 max-md:mt-9" aria-label="管理模块">
+    <div :class="['mx-2.5 mb-3 text-[11px] font-medium tracking-wider text-sidebar-foreground', drawer ? 'mt-8' : 'mt-11']">工作空间</div>
+    <nav class="-mx-1 grid min-h-0 content-start gap-1 overflow-y-auto px-1" aria-label="管理模块">
       <RouterLink
         v-for="item in modules"
         :key="item.name"
-        :class="['flex h-10 items-center gap-3 rounded-md px-3 text-left text-[13px] transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground max-md:justify-center max-md:px-0', activeModule === item.name && 'bg-sidebar-accent text-sidebar-accent-foreground']"
+        :class="['flex flex-none items-center gap-3 rounded-md px-3 text-left text-[13px] transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground', drawer ? 'h-11' : 'h-10', activeModule === item.name && 'bg-sidebar-accent text-sidebar-accent-foreground']"
         :title="item.name"
         :aria-current="activeModule === item.name ? 'page' : undefined"
         :to="{ name: item.name }"
         @click="emit('select', $event, item.name)"
       >
         <component :is="item.icon" :class="['size-4 flex-none', activeModule === item.name ? 'text-sidebar-primary' : 'text-sidebar-foreground/80']" />
-        <span class="max-md:sr-only">{{ item.name }}</span>
-        <span v-if="item.name === '数据源'" class="ml-auto font-mono text-[11px] max-md:hidden">{{ sourceCount }}</span>
+        <span>{{ item.name }}</span>
+        <span v-if="item.name === '数据源'" class="ml-auto font-mono text-[11px]">{{ sourceCount }}</span>
       </RouterLink>
     </nav>
-    <div class="mt-auto flex items-center gap-2.5 border-t border-sidebar-border px-1.5 pt-4 pb-1 max-md:flex-col max-md:justify-center max-md:px-0">
+    <div class="mt-auto flex items-center gap-2.5 border-t border-sidebar-border px-1.5 pt-4 pb-1">
       <RouterLink
-        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent/60 max-md:justify-center"
+        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent/60"
         title="个人资料"
         :aria-current="activeModule === PROFILE_MODULE ? 'page' : undefined"
         :to="{ name: PROFILE_MODULE }"
         @click="emit('select', $event, PROFILE_MODULE)"
       >
         <span class="grid size-7.5 flex-none place-items-center rounded-full bg-sidebar-accent font-mono text-[11px] text-sidebar-accent-foreground"><User class="size-3.5" /></span>
-        <span class="grid min-w-0 gap-0.5 text-xs max-md:hidden">
+        <span class="grid min-w-0 gap-0.5 text-xs">
           <b class="truncate text-sidebar-accent-foreground">{{ session.admin.nickname }}</b>
           <small class="text-xs text-sidebar-foreground">{{ roleLabel }}</small>
         </span>
       </RouterLink>
-      <Button variant="ghost" size="icon-sm" class="ml-auto flex-none text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:ml-0" title="退出登录" aria-label="退出登录" @click="emit('logout')"><LogOut /></Button>
+      <Button variant="ghost" size="icon-sm" class="ml-auto flex-none text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" title="退出登录" aria-label="退出登录" @click="emit('logout')"><LogOut /></Button>
     </div>
   </aside>
 </template>

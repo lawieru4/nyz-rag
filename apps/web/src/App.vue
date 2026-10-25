@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { ArrowUpRight, KeyRound, LogOut, Menu, SlidersHorizontal, Square, SquarePen, X } from "@lucide/vue";
 import type {
   ChatFeedbackRating, ChatFeedbackRequest, KnowledgeStats,
@@ -50,6 +50,11 @@ const citing = ref<{ turn: number; citation: number | null } | null>(null);
 const wideQuery = window.matchMedia("(min-width: 1280px)");
 const wide = ref(wideQuery.matches);
 function onWideChange(event: MediaQueryListEvent) { wide.value = event.matches; }
+/** 内容更新时是否滚动到底部：用户主动向上滚动后不再跟随，回到底部附近、切换会话或开始新的生成时恢复。 */
+let followOutput = true;
+const distanceToBottom = () => document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+function onUserScroll() { requestAnimationFrame(() => { followOutput = distanceToBottom() <= 240; }); }
+function onScroll() { if (distanceToBottom() <= 48) followOutput = true; }
 
 const {
   question, busy, ready, sessions, sessionId, turns, sessionError,
@@ -58,10 +63,12 @@ const {
   client,
   storage: localStorage,
   currentFilters,
-  onSessionChange: () => { citing.value = null; },
+  onSessionChange: () => { citing.value = null; followOutput = true; },
   onContentChange: scrollToEnd,
   onError: (message) => toast.error(message),
 });
+
+watch(busy, (value) => { if (value) followOutput = true; });
 
 const activeFilterCount = computed(() => [dateFrom.value, dateTo.value, categoriesText.value, tagsText.value, scenariosText.value].filter(Boolean).length);
 const filterFields = [
@@ -117,6 +124,9 @@ onMounted(async () => {
   // 统计会随管理端同步变化：页面可见时定时刷新，切回页面时立即刷新。
   document.addEventListener("visibilitychange", onVisibilityChange);
   wideQuery.addEventListener("change", onWideChange);
+  window.addEventListener("wheel", onUserScroll, { passive: true });
+  window.addEventListener("touchmove", onUserScroll, { passive: true });
+  window.addEventListener("scroll", onScroll, { passive: true });
   statsTimer = setInterval(() => { if (!document.hidden) void loadStats(); }, STATS_REFRESH_MS);
   void loadStats();
 });
@@ -125,6 +135,9 @@ onUnmounted(() => {
   window.removeEventListener("hashchange", syncArticleRoute);
   document.removeEventListener("visibilitychange", onVisibilityChange);
   wideQuery.removeEventListener("change", onWideChange);
+  window.removeEventListener("wheel", onUserScroll);
+  window.removeEventListener("touchmove", onUserScroll);
+  window.removeEventListener("scroll", onScroll);
   clearInterval(statsTimer);
 });
 
@@ -189,6 +202,7 @@ async function removeSession(id: string) {
 
 async function scrollToEnd() {
   await nextTick();
+  if (!followOutput) return;
   thread.value?.lastElementChild?.scrollIntoView({ block: "end", behavior: "smooth" });
 }
 
@@ -233,7 +247,7 @@ function useSuggestion(text: string) {
       <header class="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 bg-background/85 px-5 backdrop-blur max-sm:px-3">
         <div class="flex min-w-0 items-center gap-1.5">
           <IconButton v-if="articleId === null" label="历史会话" class="lg:hidden" @click="sidebarOpen = true"><Menu /></IconButton>
-          <a class="flex items-center gap-2 text-sm max-sm:gap-1 max-sm:text-[13px]" href="#/" aria-label="能知首页"><img src="/logo.png" alt="能知" class="h-12 w-36 object-contain max-sm:h-10 max-sm:w-30" /><span class="font-medium text-muted-foreground">知识助手</span></a>
+          <a class="flex items-center gap-2 text-sm max-sm:gap-1 max-sm:text-[13px]" href="#/" aria-label="能知首页"><img src="/logo.png" alt="能知" class="h-12 w-36 object-contain max-sm:h-10 max-sm:w-30 max-[399px]:w-24" /><span class="font-medium text-muted-foreground max-[399px]:hidden">知识助手</span></a>
         </div>
         <div class="flex items-center gap-2">
           <IconButton v-if="articleId === null" label="新对话" class="lg:hidden" :disabled="busy" @click="newSession"><SquarePen /></IconButton>
@@ -303,11 +317,12 @@ function useSuggestion(text: string) {
               <Collapsible v-slot="{ open }" v-model:open="filtersOpen">
                 <!-- 常驻挂载，用 grid-rows 0fr → 1fr 过渡高度；收起后 invisible，筛选项不会被 Tab 选中 -->
                 <CollapsibleContent force-mount class="grid transition-[grid-template-rows,visibility] duration-250 ease-out data-[state=closed]:invisible data-[state=closed]:grid-rows-[0fr] data-[state=open]:grid-rows-[1fr]">
-                  <div class="min-h-0 overflow-hidden"><div class="bg-background/70 px-4 pt-3.5 pb-3">
+                  <!-- 手机竖屏为单列，筛选区限高并单独滚动，避免与输入框一起超出短屏或键盘上方的可视区域 -->
+                  <div class="min-h-0 overflow-hidden"><div class="bg-background/70 px-4 pt-3.5 pb-3 max-md:max-h-[40dvh] max-md:overflow-y-auto max-md:overscroll-contain">
                     <div class="grid grid-cols-5 gap-2.5 max-md:grid-cols-2 max-sm:grid-cols-1">
                       <div v-for="field in filterFields" :key="field.id" class="grid gap-1">
                         <Label :for="field.id" class="text-xs font-normal text-muted-foreground">{{ field.label }}</Label>
-                        <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8 border-transparent bg-card text-xs shadow-none md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔' : undefined" :aria-label="field.aria" />
+                        <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8 border-transparent bg-card shadow-none md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔' : undefined" :aria-label="field.aria" />
                       </div>
                     </div>
                     <p class="mt-2 text-xs text-muted-foreground">
@@ -319,7 +334,7 @@ function useSuggestion(text: string) {
                 <Label for="question" class="sr-only">{{ turns.length ? '继续提问' : '你的问题' }}</Label>
                 <Textarea
                   id="question" v-model="question" :rows="turns.length ? 2 : 3"
-                  class="max-h-60 min-h-0 resize-none rounded-none border-0 bg-transparent px-4 pt-3.5 shadow-none focus-visible:ring-0 md:text-sm"
+                  class="max-h-[min(15rem,30dvh)] min-h-0 resize-none rounded-none border-0 bg-transparent px-4 pt-3.5 shadow-none focus-visible:ring-0 md:text-sm"
                   :placeholder="turns.length ? '继续提问…' : '例如：文章中提到的核心观点是什么？'"
                   @keydown.meta.enter.prevent="ask" @keydown.ctrl.enter.prevent="ask"
                 />

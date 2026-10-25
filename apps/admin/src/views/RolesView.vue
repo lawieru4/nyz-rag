@@ -148,7 +148,8 @@ async function deleteRole(role: AdminRole) {
     <Button @click="openEditor()"><Plus /> 新建角色</Button>
   </PageHeading>
   <Card class="min-h-96 gap-0 overflow-hidden py-0">
-    <Table class="min-w-[760px]">
+    <!-- 手机端（<768px）用下方的摘要列表，与表格共用数据和操作 -->
+    <Table class="min-w-[760px]" container-class="max-md:hidden">
       <TableHeader class="bg-muted/50">
         <TableRow>
           <TableHead class="pl-4">角色</TableHead>
@@ -204,6 +205,42 @@ async function deleteRole(role: AdminRole) {
         </TableRow>
       </TableBody>
     </Table>
+    <ul class="divide-y md:hidden" aria-label="角色列表">
+      <li v-for="role in roles" :key="role.id" class="grid gap-2.5 px-4 py-3 text-xs text-muted-foreground">
+        <div class="flex items-start justify-between gap-3">
+          <span class="grid min-w-0 gap-0.5"><b class="text-sm font-semibold break-words text-foreground">{{ role.name }}</b><span v-if="role.description" class="break-words">{{ role.description }}</span></span>
+          <StatusBadge :on="!role.disabled">{{ role.disabled ? '已停用' : '正常' }}</StatusBadge>
+        </div>
+        <div v-if="grantedModules(role).length" class="flex flex-wrap gap-1">
+          <Badge v-for="item in grantedModules(role)" :key="item.label" :variant="item.manage ? 'brand' : 'muted'">{{ item.label }} · {{ item.manage ? '管理' : '查看' }}</Badge>
+        </div>
+        <span v-else>无权限</span>
+        <span>{{ role.adminCount }} 位管理员 · 更新于 {{ new Date(role.updatedAt).toLocaleString() }}</span>
+        <div class="flex flex-wrap justify-end gap-1">
+          <Button variant="ghost" size="sm" :disabled="updating.has(role.id)" @click="openEditor(role)">编辑</Button>
+          <Button
+            :variant="role.disabled ? 'outline' : 'ghost'"
+            size="sm"
+            :disabled="updating.has(role.id)"
+            :aria-busy="updating.has(role.id)"
+            :class="!role.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'"
+            @click="toggleRole(role)"
+          >
+            {{ role.disabled ? '启用' : '停用' }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            :disabled="role.adminCount > 0 || updating.has(role.id)"
+            @click="deleteRole(role)"
+          >
+            删除
+          </Button>
+        </div>
+        <p v-if="role.adminCount" class="text-right">仍有管理员使用该角色，需先为他们更换角色才能删除</p>
+      </li>
+    </ul>
     <EmptyState v-if="loading && !roles.length">正在加载角色…</EmptyState>
     <EmptyState v-else-if="!roles.length">尚未创建角色 <Button variant="link" size="sm" class="text-link" @click="openEditor()">创建第一个角色</Button></EmptyState>
   </Card>

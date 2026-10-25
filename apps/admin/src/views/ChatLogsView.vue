@@ -42,7 +42,8 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
       </label>
       <FilterSelect v-model="rating" label="筛选评价" all-label="全部评价" :options="[{ value: 'rated', label: '已评价' }, { value: 'unrated', label: '未评价' }]" @update:model-value="filter" />
     </div>
-    <Table class="min-w-[750px]">
+    <!-- 手机端（<768px）用下方的摘要列表，完整问答与引用在详情抽屉 -->
+    <Table class="min-w-[750px]" container-class="max-md:hidden">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">用户提问</TableHead><TableHead>提问人</TableHead><TableHead>引用来源</TableHead><TableHead>评价</TableHead><TableHead>时间</TableHead><TableHead /></TableRow></TableHeader>
       <TableBody>
         <TableRow v-for="log in logs" :key="log.id" class="text-[13px] text-muted-foreground">
@@ -57,6 +58,20 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
         </TableRow>
       </TableBody>
     </Table>
+    <ul class="divide-y md:hidden" aria-label="问答记录列表">
+      <li v-for="log in logs" :key="log.id">
+        <button class="grid w-full min-w-0 gap-1.5 px-4 py-3 text-left text-[13px] text-muted-foreground" @click="selected = log">
+          <b class="line-clamp-2 text-sm break-words text-foreground">{{ log.question }}</b>
+          <small class="line-clamp-2 text-xs break-words">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small>
+          <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            <StatusBadge :on="log.rating === 'positive'">{{ ratingLabel(log.rating) }}</StatusBadge>
+            <span>{{ new Date(log.createdAt).toLocaleString() }}</span>
+            <span class="truncate">{{ chatLogOwner(log) }}</span>
+            <span>{{ log.sources.length ? `${log.sources.length} 篇引用` : '无引用' }}</span>
+          </span>
+        </button>
+      </li>
+    </ul>
     <EmptyState v-if="loading && !logs.length">正在加载问答记录…</EmptyState>
     <EmptyState v-else-if="!logs.length">没有符合条件的问答记录</EmptyState>
     <ListPager v-model:page="page" :total="total" unit="条" :disabled="loading" class="mt-auto" @update:page="loadChatLogs" />

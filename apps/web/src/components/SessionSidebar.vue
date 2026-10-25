@@ -51,12 +51,12 @@ const statsNote = computed(() => {
       <Button variant="ghost" class="w-full justify-start gap-2 text-[13px] hover:bg-card" :disabled="busy" @click="emit('new')"><SquarePen />新对话</Button>
     </div>
 
-    <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-3" aria-label="历史会话">
+    <nav class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3" aria-label="历史会话">
       <section v-for="group in groups" :key="group.label" class="mt-2 first:mt-0">
         <h2 class="px-2 py-1.5 text-xs font-medium text-muted-foreground">{{ group.label }}</h2>
         <div v-for="session in group.sessions" :key="session.id" :class="['group flex items-center rounded-md transition-colors hover:bg-card/60', session.id === sessionId && 'bg-card hover:bg-card']">
           <button
-            class="min-w-0 flex-1 px-2 py-2 text-left text-[13px] text-body disabled:cursor-default disabled:opacity-60"
+            class="min-w-0 flex-1 px-2 py-2 text-left pointer-coarse:py-3 text-[13px] text-body disabled:cursor-default disabled:opacity-60"
             :disabled="busy" :title="session.title" :aria-current="session.id === sessionId ? 'page' : undefined"
             @click="emit('open', session.id)"
           >

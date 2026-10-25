@@ -64,7 +64,7 @@ watch(() => props.id, load, { immediate: true });
         <div v-if="article.tags.length || article.keywords.length || article.scenarios.length" class="mt-5 grid gap-2.5">
           <div v-for="[label, values] in ([['标签', article.tags], ['关键词', article.keywords], ['适用场景', article.scenarios]] as const)" v-show="values.length" :key="label" class="flex flex-wrap items-center gap-1.5">
             <strong class="min-w-16 text-xs font-medium text-muted-foreground">{{ label }}</strong>
-            <Badge v-for="value in values" :key="value" variant="brand" class="rounded-sm font-normal">{{ value }}</Badge>
+            <Badge v-for="value in values" :key="value" variant="brand" class="max-w-full rounded-sm font-normal whitespace-normal wrap-break-word">{{ value }}</Badge>
           </div>
         </div>
         <p v-if="article.repostSource" class="mt-3 text-xs text-muted-foreground">转载自 {{ article.repostSource }}</p>

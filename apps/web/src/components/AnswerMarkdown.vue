@@ -22,7 +22,8 @@ const cite = (citation: number) => emit("cite", citation);
 </script>
 
 <template>
-  <div :class="['my-4 text-base leading-[1.85] text-pretty text-body max-sm:text-[15px]', streaming && 'answer-streaming']">
+  <!-- 长 URL、连续英文在段落内断行；代码与表格在各自的容器内横向滚动 -->
+  <div :class="['my-4 text-base leading-[1.85] text-pretty wrap-break-word text-body max-sm:text-[15px]', streaming && 'answer-streaming']">
     <MarkdownBlocks v-slot="{ text }" :blocks="blocks" variant="answer">
       <AnswerInline :text="text" v-bind="inline" @cite="cite" />
     </MarkdownBlocks>

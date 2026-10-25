@@ -129,7 +129,8 @@ async function toggleAdmin(admin: AdminAccount) {
     <Button @click="openCreate"><Plus /> 添加管理员</Button>
   </PageHeading>
   <Card class="min-h-96 gap-0 overflow-hidden py-0">
-    <Table class="min-w-[640px]">
+    <!-- 手机端（<768px）用下方的摘要列表，与表格共用数据和操作 -->
+    <Table class="min-w-[640px]" container-class="max-md:hidden">
       <TableHeader class="bg-muted/50">
         <TableRow>
           <TableHead class="pl-4">昵称</TableHead>
@@ -177,6 +178,37 @@ async function toggleAdmin(admin: AdminAccount) {
         </TableRow>
       </TableBody>
     </Table>
+    <ul class="divide-y md:hidden" aria-label="管理员列表">
+      <li v-for="admin in admins" :key="admin.id" class="grid gap-2.5 px-4 py-3 text-xs text-muted-foreground">
+        <div class="flex items-start justify-between gap-3">
+          <span class="grid min-w-0 gap-0.5"><b class="text-sm font-semibold break-words text-foreground">{{ admin.nickname }}</b><span class="wrap-anywhere">{{ admin.email }}</span></span>
+          <StatusBadge :on="!admin.disabled">{{ admin.disabled ? '已停用' : '正常' }}</StatusBadge>
+        </div>
+        <span>创建于 {{ new Date(admin.createdAt).toLocaleString() }}</span>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <span v-if="admin.isSuper" class="rounded-sm bg-brand-soft px-1.5 py-0.5 text-[11px] font-medium text-accent-foreground">超级管理员</span>
+          <Select v-else :model-value="admin.roleId ?? NO_ROLE" :disabled="updating.has(admin.id)" @update:model-value="changeRole(admin, String($event))">
+            <SelectTrigger size="sm" class="min-w-0 flex-1 text-xs" :aria-label="`${admin.nickname} 的角色`"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="NO_ROLE">未分配角色</SelectItem>
+              <SelectItem v-for="role in roles" :key="role.id" :value="role.id">{{ roleOptionLabel(role) }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            v-if="!admin.isSuper"
+            :variant="admin.disabled ? 'outline' : 'ghost'"
+            size="sm"
+            :disabled="updating.has(admin.id)"
+            :aria-busy="updating.has(admin.id)"
+            :class="!admin.disabled && 'text-destructive hover:bg-destructive/10 hover:text-destructive'"
+            @click="toggleAdmin(admin)"
+          >
+            {{ admin.disabled ? '启用' : '停用' }}
+          </Button>
+          <span v-else class="text-muted-foreground">不可停用</span>
+        </div>
+      </li>
+    </ul>
     <EmptyState v-if="loading && !admins.length">正在加载管理员…</EmptyState>
     <EmptyState v-else-if="!admins.length">尚无管理员账号</EmptyState>
   </Card>

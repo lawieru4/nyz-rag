@@ -135,7 +135,8 @@ async function deleteDocument(document: DocumentSummary) {
       <FilterSelect v-model="sourceId" label="筛选数据源" all-label="全部数据源" :options="sources.map((source) => ({ value: source.id, label: source.name }))" @update:model-value="filter" />
       <FilterSelect v-model="status" label="筛选文档状态" all-label="全部状态" :options="Object.entries(documentStatuses).map(([value, label]) => ({ value, label }))" @update:model-value="filter" />
     </div>
-    <Table class="min-w-[750px]">
+    <!-- 手机端（<768px）用下方的摘要列表，与表格共用数据和操作；完整信息在详情抽屉 -->
+    <Table class="min-w-[750px]" container-class="max-md:hidden">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">文档</TableHead><TableHead>数据源</TableHead><TableHead>状态</TableHead><TableHead>向量化</TableHead><TableHead>最后更新</TableHead><TableHead /></TableRow></TableHeader>
       <TableBody>
         <TableRow v-for="document in documents" :key="document.id" class="text-[13px] text-muted-foreground">
@@ -157,6 +158,21 @@ async function deleteDocument(document: DocumentSummary) {
         </TableRow>
       </TableBody>
     </Table>
+    <ul class="divide-y md:hidden" aria-label="文档列表">
+      <li v-for="document in documents" :key="document.id" class="grid gap-2 px-4 py-3 text-[13px] text-muted-foreground">
+        <button class="grid min-w-0 gap-1 text-left" @click="openDocument(document.id)"><b class="line-clamp-2 text-sm break-words text-foreground">{{ document.title }}</b><small class="truncate text-xs">{{ sourceName(document.sourceId) }} · {{ new Date(document.updatedAt).toLocaleString() }}</small></button>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <StatusBadge :tone="processingTone(document)">{{ processingLabel(document) }}</StatusBadge>
+          <StatusBadge :tone="embeddingTone(document.embedding?.status)">{{ embeddingStatuses[document.embedding?.status ?? 'pending'] }}</StatusBadge>
+          <div class="ml-auto flex gap-0.5">
+            <Button v-if="can('documents:manage')" variant="ghost" size="sm" class="h-8 px-2 text-xs" :disabled="isPending(document.id) || documentBusy(document) || !document.chunkCount" @click="embedDocument(document)">向量化</Button>
+            <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" :disabled="isPending(document.id) || documentBusy(document)" aria-label="重新清洗与切片" @click="reprocessDocument(document)"><RefreshCw /></Button>
+            <Button variant="ghost" size="icon-sm" aria-label="查看详情" @click="openDocument(document.id)"><ArrowUpRight /></Button>
+            <Button v-if="can('documents:manage')" variant="ghost" size="icon-sm" class="hover:text-destructive" :disabled="isPending(document.id) || documentBusy(document)" aria-label="删除文档" @click="deleteDocument(document)"><Trash2 /></Button>
+          </div>
+        </div>
+      </li>
+    </ul>
     <EmptyState v-if="loading && !documents.length">正在加载文档…</EmptyState>
     <EmptyState v-else-if="!documents.length">{{ query || sourceId || status ? '没有符合条件的文档' : '知识库中还没有文档' }}</EmptyState>
     <ListPager v-model:page="page" :total="total" unit="篇" :disabled="loading" class="mt-auto" @update:page="loadDocuments" />

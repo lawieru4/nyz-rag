@@ -26,7 +26,8 @@ const answerCaption = computed(() => props.turn.streaming
 </script>
 
 <template>
-  <article class="grid scroll-mb-48 gap-2.5">
+  <!-- min-w-0：回答中的宽表格、代码块只在自身容器内滚动，不撑宽对话列 -->
+  <article class="grid min-w-0 scroll-mb-48 grid-cols-[minmax(0,1fr)] gap-2.5">
     <p class="max-w-[85%] justify-self-end rounded-lg rounded-br-sm bg-primary px-4 py-2.5 text-[15px] leading-[1.7] max-sm:text-sm break-words whitespace-pre-wrap text-primary-foreground">{{ turn.question }}</p>
     <section class="rounded-lg bg-card p-4.5" aria-live="polite">
       <div class="flex items-center gap-2.5">
