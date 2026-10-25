@@ -13,7 +13,7 @@ import {
   ANSWER_EVAL_VERSION, answeredItems, citationStats, compareAnswerRuns, JUDGE_CRITERIA, judgeMessages, parseJudgement, summarizeAnswers,
   type AnswerChange, type AnswerItem, type AnswerMetrics, type AnswerSummary,
 } from "../evaluation-answer.js";
-import { filterSplit, readEvaluationDataset, SPLITS, validateEvaluationDataset, type CorpusSnapshot, type EvaluationQuestion, type Split } from "../evaluation.js";
+import { assertSupportedEvaluationInputs, filterSplit, readEvaluationDataset, SPLITS, validateEvaluationDataset, type CorpusSnapshot, type EvaluationQuestion, type Split } from "../evaluation.js";
 import { CONTEXT_MODES, runVariantWithContext, sourceLabels, type ContextMode } from "../evaluation-run.js";
 import { closeModelAdmissionLimiter } from "../model-admission.js";
 import { createChatModel, createEmbeddingModel, createRerankModel, type ChatMessage, type ChatModel } from "../models.js";
@@ -123,6 +123,7 @@ async function run() {
   const errors = validateEvaluationDataset(fullDataset);
   if (errors.length) throw new Error(`Evaluation dataset invalid:\n${errors.join("\n")}`);
   const dataset = filterSplit(fullDataset, split);
+  assertSupportedEvaluationInputs(dataset.questions);
   const selected = dataset.questions.slice(0, limit);
   if (!selected.length) throw new Error(`No questions in split ${split}`);
 

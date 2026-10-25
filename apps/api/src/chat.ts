@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import {
+  getChatReview, saveChatReview, approveChatReview, exportChatReview, parseChatReview, parseFeedbackReasons,
   AdmissionError, buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, getModelSelections, HISTORY_TURNS, keywordSearchChunks,
   listChatMessages, listChatSessions, listKnowledgeBases, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve,
@@ -8,11 +9,11 @@ import {
 } from "@nyz-rag/processing";
 import type {
   ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
-  ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord, RetrievalFilters,
+  ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord, RetrievalFilters, ChatReviewInput,
 } from "@nyz-rag/types";
 import { elapsed, MAX_QUESTION_LENGTH, pageParams } from "./common.js";
 import { requestOwner } from "./user-auth.js";
-import { requires } from "./admin-auth.js";
+import { getAdminSession, requires } from "./admin-auth.js";
 
 // SSE 心跳间隔，避免检索或等待首 Token 期间被代理（Nginx 默认 60 秒）断开。
 const HEARTBEAT_MS = 15_000;
@@ -131,9 +132,36 @@ async function saveAnswer(result: AnswerResult, input: { question: string; knowl
 }
 
 export const chatRoutes: FastifyPluginAsync = async (app) => {
-  app.get<{ Querystring: { query?: string; rating?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", requires("chat-logs:view"), async (request): Promise<ChatLogListResponse> => {
-    const { query = "", rating, page = "1", pageSize = "20" } = request.query;
-    return listChatMessages({ query, rating, ...pageParams(page, pageSize) });
+  app.get<{ Querystring: { query?: string; rating?: string; status?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", requires("chat-logs:view"), async (request): Promise<ChatLogListResponse> => {
+    const { query = "", rating, status, page = "1", pageSize = "20" } = request.query;
+    return listChatMessages({ query, rating, status, ...pageParams(page, pageSize) });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/admin/chat-logs/:id/review", requires("chat-logs:view"), async (request, reply) => {
+    const review = await getChatReview(request.params.id);
+    return review ?? reply.code(404).send({ error: "message not found" });
+  });
+  app.put<{ Params: { id: string }; Body: { revision: number; review: ChatReviewInput } }>("/api/admin/chat-logs/:id/review", requires("chat-logs:manage"), async (request, reply) => {
+    let review: ChatReviewInput;
+    try { review = parseChatReview(request.body.review); }
+    catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
+    if (!await saveChatReview(request.params.id, request.body.revision, review)) return reply.code(409).send({ error: "Review changed or message removed; reload before editing" });
+    return reply.code(204).send();
+  });
+  app.post<{ Params: { id: string }; Body: { revision: number; confirmSanitized: boolean } }>("/api/admin/chat-logs/:id/review/approve", requires("chat-logs:manage"), async (request, reply) => {
+    if (request.body.confirmSanitized !== true) return reply.code(400).send({ error: "Explicit human confirmation of sanitized question, history, answer and evidence is required" });
+    try {
+      if (!await approveChatReview(request.params.id, request.body.revision, getAdminSession(request)!.admin.id)) return reply.code(409).send({ error: "Current valid candidate revision required; reload and review" });
+    } catch (error) { return reply.code(409).send({ error: (error as Error).message }); }
+    return reply.code(204).send();
+  });
+  app.post<{ Params: { id: string }; Body: { revision: number } }>("/api/admin/chat-logs/:id/review/export", requires("chat-logs:manage"), async (request, reply) => {
+    try {
+      const dataset = await exportChatReview(request.params.id, request.body.revision);
+      if (!dataset) return reply.code(404).send({ error: "message not found" });
+      reply.header("content-disposition", 'attachment; filename="reviewed-feedback-v2.json"');
+      return dataset;
+    } catch (error) { return reply.code(409).send({ error: (error as Error).message }); }
   });
 
   // 单次问答：不属于会话，完整回答一次返回。
@@ -243,10 +271,12 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post<{ Params: { id: string }; Body: ChatFeedbackRequest }>("/api/messages/:id/feedback", async (request, reply) => {
-    const { rating } = request.body ?? {};
-    if (rating !== "positive" && rating !== "negative") return reply.code(400).send({ error: "rating must be positive or negative" });
+    const { rating, reasons = [] } = request.body ?? {};
+    if (rating !== null && rating !== "positive" && rating !== "negative") return reply.code(400).send({ error: "rating must be positive, negative or null" });
+    try { parseFeedbackReasons(reasons); }
+    catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
     // 只能评价自己的问答。
-    if (!await rateChatMessage(request.params.id, rating, requestOwner(request))) return reply.code(404).send({ error: "message not found" });
+    if (!await rateChatMessage(request.params.id, rating, requestOwner(request), undefined, reasons)) return reply.code(404).send({ error: "message not found" });
     return reply.code(204).send();
   });
 };

@@ -4,6 +4,10 @@ import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { ArticleDetail } from "./article/parse.js";
 import { embeddingInput, summaryEmbeddingInput, type StructuredSection } from "./chunking.js";
 import { ADMIN_PERMISSIONS, normalizeAdminPermissions } from "./admin-permissions.js";
+import { emptyChatReview, exportReviewedCandidate, parseChatReview } from "./chat-review.js";
+import { normalizeEvidenceText } from "./evaluation.js";
+import { evidenceSource } from "./synthetic-questions.js";
+import type { ChatFeedbackReason, ChatReviewInput, ChatReviewRecord } from "@nyz-rag/types";
 import { contentFingerprint } from "./dedup.js";
 import type { ModelProviderConfig, ModelSelection, ModelTarget } from "./provider.js";
 import type { ChunkHit, SectionContext } from "./rag.js";
@@ -1065,7 +1069,7 @@ const messageColumns = {
 };
 
 type ChatLogRow = typeof chatMessages.$inferSelect & { sources: ChatLogRecord["sources"]; chunks: ChatLogRecord["chunks"]; userEmail: string | null };
-const toChatLog = ({ rating, userId, visitorHash, ...row }: ChatLogRow): ChatLogRecord => ({
+const toChatLog = ({ rating, userId, visitorHash, review: _review, reviewRevision: _revision, approvedRevision: _approvedRevision, approvedBy: _approvedBy, approvedAt: _approvedAt, ...row }: ChatLogRow): ChatLogRecord => ({
   ...compact<Omit<ChatLogRecord, "rating" | "ownerType">>({ ...row, supersededAt: iso(row.supersededAt), createdAt: iso(row.createdAt)! }),
   ownerType: userId ? "user" : visitorHash ? "visitor" : "none",
   rating,
@@ -1122,7 +1126,7 @@ export async function createChatMessage(log: NewChatMessage, db?: Executor): Pro
   else await withTransaction(insert);
 }
 
-export async function listChatMessages(filter: { query?: string; rating?: string; page: number; pageSize: number }, db: Executor = getDb()): Promise<ChatLogListResponse> {
+export async function listChatMessages(filter: { query?: string; rating?: string; status?: string; page: number; pageSize: number }, db: Executor = getDb()): Promise<ChatLogListResponse> {
   const query = filter.query?.trim().toLocaleLowerCase();
   const where = and(
     query ? or(
@@ -1130,7 +1134,9 @@ export async function listChatMessages(filter: { query?: string; rating?: string
       sql`EXISTS (SELECT 1 FROM ${messageSources} WHERE ${messageSources.messageId} = ${outer("chat_messages", "id")} AND ${contains(sql`${messageSources.title}`, query)})`,
       sql`EXISTS (SELECT 1 FROM ${users} WHERE ${users.id} = ${outer("chat_messages", "user_id")} AND ${contains(sql`${users.email}`, query)})`,
     ) : undefined,
-    filter.rating === "rated" ? isNotNull(chatMessages.rating) : filter.rating === "unrated" ? isNull(chatMessages.rating) : undefined,
+    filter.rating === "rated" ? isNotNull(chatMessages.rating) : filter.rating === "unrated" ? isNull(chatMessages.rating)
+      : filter.rating === "positive" || filter.rating === "negative" ? eq(chatMessages.rating, filter.rating) : undefined,
+    filter.status ? sql`COALESCE(${chatMessages.review}->>'status', 'new') = ${filter.status}` : undefined,
   );
   const { limit, offset } = paging(filter.page, filter.pageSize);
   const [rows, [{ total }]] = await Promise.all([
@@ -1152,15 +1158,63 @@ const messageSourcesWithExcerptsColumn = sql<ChatSessionMessage["sources"]>`COAL
 /** 会话中仍有效的问答，按时间正序。 */
 export async function listSessionMessages(sessionId: string, db: Executor = getDb()): Promise<ChatSessionMessage[]> {
   const rows = await db.select({
-    id: chatMessages.id, question: chatMessages.question, answer: chatMessages.answer, answerMode: chatMessages.answerMode, rating: chatMessages.rating,
+    id: chatMessages.id, question: chatMessages.question, answer: chatMessages.answer, answerMode: chatMessages.answerMode, rating: chatMessages.rating, feedbackReasons: chatMessages.feedbackReasons,
     createdAt: chatMessages.createdAt, sources: messageSourcesWithExcerptsColumn,
   }).from(chatMessages).where(and(eq(chatMessages.sessionId, sessionId), isNull(chatMessages.supersededAt))).orderBy(asc(chatMessages.createdAt), asc(chatMessages.id));
   return rows.map((row) => ({ ...row, createdAt: iso(row.createdAt)! }));
 }
 
 /** 只能评价自己的问答；他人的与不存在的问答一样返回 false。 */
-export async function rateChatMessage(id: string, rating: ChatFeedbackRating, owner: ChatOwner, db: Executor = getDb()): Promise<boolean> {
-  return (await db.update(chatMessages).set({ rating }).where(and(eq(chatMessages.id, id), ownedBy(chatMessages, owner))).returning({ id: chatMessages.id })).length > 0;
+export async function rateChatMessage(id: string, rating: ChatFeedbackRating | null, owner: ChatOwner, db: Executor = getDb(), reasons: ChatFeedbackReason[] = []): Promise<boolean> {
+  return (await db.update(chatMessages).set({ rating, feedbackReasons: rating === null ? [] : reasons }).where(and(eq(chatMessages.id, id), ownedBy(chatMessages, owner))).returning({ id: chatMessages.id })).length > 0;
+}
+
+export async function getChatReview(id: string, db: Executor = getDb()): Promise<ChatReviewRecord | null> {
+  const [row] = await db.select({ review: chatMessages.review, revision: chatMessages.reviewRevision, approvedRevision: chatMessages.approvedRevision, approvedAt: chatMessages.approvedAt }).from(chatMessages).where(eq(chatMessages.id, id));
+  return row ? { ...(row.review ?? emptyChatReview()), revision: row.revision, approvedRevision: row.approvedRevision, approvedAt: iso(row.approvedAt) ?? null } : null;
+}
+
+/** Optimistic compare-and-swap: every edit invalidates approval, including triage-only edits. */
+export async function saveChatReview(id: string, revision: number, input: ChatReviewInput, db: Executor = getDb()): Promise<boolean> {
+  const review = parseChatReview(input);
+  return (await db.update(chatMessages).set({ review, reviewRevision: sql`${chatMessages.reviewRevision} + 1`, approvedRevision: null, approvedBy: null, approvedAt: null })
+    .where(and(eq(chatMessages.id, id), eq(chatMessages.reviewRevision, revision))).returning({ id: chatMessages.id })).length > 0;
+}
+
+export async function approveChatReview(id: string, revision: number, adminId: string, db: Executor = getDb()): Promise<boolean> {
+  const review = await getChatReview(id, db);
+  if (!review || review.revision !== revision || !review.candidate) return false;
+  parseChatReview(reviewInput(review));
+  await validateCandidateEvidence(review, db);
+  return (await db.update(chatMessages).set({ approvedRevision: revision, approvedBy: adminId, approvedAt: sql`now()` })
+    .where(and(eq(chatMessages.id, id), eq(chatMessages.reviewRevision, revision))).returning({ id: chatMessages.id })).length > 0;
+}
+
+const reviewInput = ({ status, reasons, notes, correctedAnswer, candidate }: ChatReviewRecord): ChatReviewInput => ({ status, reasons, notes, correctedAnswer, candidate });
+
+export async function exportChatReview(id: string, revision: number, db?: Executor): Promise<ReturnType<typeof exportReviewedCandidate> | null> {
+  if (!db) return withTransaction((tx) => exportChatReview(id, revision, tx));
+  // Keep approval current until the export snapshot and evidence check complete.
+  await db.select({ id: chatMessages.id }).from(chatMessages).where(eq(chatMessages.id, id)).for("share");
+  const review = await getChatReview(id, db);
+  if (!review) return null;
+  const dataset = exportReviewedCandidate(review, revision);
+  await validateCandidateEvidence(review, db);
+  return dataset;
+}
+
+async function validateCandidateEvidence(review: ChatReviewRecord, db: Executor) {
+  const candidate = review.candidate!;
+  const keys = candidate.labels.map((label) => label.articleKey);
+  if (!keys.length) return;
+  const articles = await db.select({ articleKey: documents.externalId, title: documents.title, content: documents.content, category: documents.category, metadata: documents.metadata, contentHash: documents.contentHash })
+    .from(documents).where(and(inArray(documents.externalId, keys), eq(documents.status, "ready"), isNull(documents.duplicateOf)));
+  for (const label of candidate.labels) {
+    const matching = articles.filter((article) => article.articleKey === label.articleKey);
+    if (matching.length !== 1) throw new Error(`Article ${label.articleKey} is missing or ambiguous in current corpus`);
+    const source = normalizeEvidenceText(evidenceSource(matching[0]!, candidate.type === "metadata" ? "metadata" : "fact"));
+    if (label.evidence.some((entry) => !source.includes(normalizeEvidenceText(entry)))) throw new Error(`Evidence is not an exact excerpt of current article ${label.articleKey}`);
+  }
 }
 
 // ---- 管理员账号与角色 ----

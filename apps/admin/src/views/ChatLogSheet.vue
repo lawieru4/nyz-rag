@@ -5,9 +5,10 @@ import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@nyz-
 import DetailSection from "../components/DetailSection.vue";
 import MetaRow from "../components/MetaRow.vue";
 import { chatLogOwner, ratingLabel, type ChatLog } from "./chat-logs";
+import ChatReviewPanel from "./ChatReviewPanel.vue";
 
 defineProps<{ log: ChatLog | null }>();
-const emit = defineEmits<{ (e: "close"): void }>();
+const emit = defineEmits<{ (e: "close"): void; (e: "saved"): void }>();
 </script>
 
 <template>
@@ -36,6 +37,8 @@ const emit = defineEmits<{ (e: "close"): void }>();
         <p class="document-text py-2">{{ log.question }}</p>
         <h3 class="mt-2 text-xs font-semibold text-muted-foreground">回答</h3>
         <p class="document-text py-2">{{ log.answer }}</p>
+        <p v-if="log.feedbackReasons?.length" class="py-2 text-xs text-muted-foreground">用户反馈原因：{{ log.feedbackReasons.join(' / ') }}</p>
+        <ChatReviewPanel :key="log.id" :id="log.id" @saved="emit('saved')" />
         <h3 class="mt-2 text-xs font-semibold text-muted-foreground">引用来源</h3>
         <div class="grid gap-2 border-b py-2.5 text-xs">
           <a v-for="(source, index) in log.sources" :key="source.documentId" :href="source.url" target="_blank" rel="noreferrer" class="inline-flex items-start gap-0.5 break-words text-link hover:underline">[{{ index + 1 }}] {{ source.title }}{{ source.repostSource ? `（转载自 ${source.repostSource}）` : '' }} <ArrowUpRight class="mt-0.5 size-3.5 flex-none" /></a>

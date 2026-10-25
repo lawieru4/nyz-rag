@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Check, Copy, RefreshCw, Sparkles, ThumbsDown, ThumbsUp } from "@lucide/vue";
-import type { ChatFeedbackRating } from "@nyz-rag/types";
+import type { ChatFeedbackRating, ChatFeedbackReason } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import type { ChatTurnState } from "../composables/useChatSession";
 import AnswerMarkdown from "./AnswerMarkdown.vue";
@@ -16,13 +16,21 @@ const props = defineProps<{
 const emit = defineEmits<{
   copy: [];
   retry: [];
-  feedback: [rating: ChatFeedbackRating];
+  feedback: [rating: ChatFeedbackRating | null, reasons?: ChatFeedbackReason[]];
   source: [citation: number | null];
 }>();
 
 const answerCaption = computed(() => props.turn.streaming
   ? (props.turn.answer ? "正在生成…" : "正在检索知识库…")
   : props.turn.answerMode === "generated" ? "由模型依据知识库生成，[n] 对应引用来源" : props.turn.answerMode === "extractive" ? "知识库原文摘录" : "");
+const reasons: Array<{ value: ChatFeedbackReason; label: string }> = [
+  { value: "missing-evidence", label: "资料未召回" }, { value: "incorrect-answer", label: "答案错误" },
+  { value: "citation-mismatch", label: "引用不符" }, { value: "outdated", label: "内容过时" }, { value: "other", label: "其他" },
+];
+function toggleReason(reason: ChatFeedbackReason) {
+  const selected = props.turn.feedbackReasons ?? [];
+  emit("feedback", "negative", selected.includes(reason) ? selected.filter((item) => item !== reason) : [...selected, reason]);
+}
 </script>
 
 <template>
@@ -65,9 +73,14 @@ const answerCaption = computed(() => props.turn.streaming
         <Button v-if="isLast" variant="ghost" size="xs" class="text-muted-foreground" :disabled="busy" @click="emit('retry')"><RefreshCw />重新生成</Button>
         <template v-if="turn.id">
           <span class="ml-auto">{{ turn.rating ? '感谢反馈' : '这个回答有帮助吗？' }}</span>
-          <IconButton label="有帮助" size="icon-sm" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'positive' && 'bg-secondary text-olive disabled:opacity-100 motion-safe:[&_svg]:animate-pop'" @click="emit('feedback', 'positive')"><ThumbsUp /></IconButton>
-          <IconButton label="需要改进" size="icon-sm" :disabled="turn.feedbackBusy || !!turn.rating" :class="turn.rating === 'negative' && 'bg-secondary text-olive disabled:opacity-100 motion-safe:[&_svg]:animate-pop'" @click="emit('feedback', 'negative')"><ThumbsDown /></IconButton>
+          <IconButton :label="turn.rating === 'positive' ? '撤销有帮助' : '有帮助'" size="icon-sm" :disabled="turn.feedbackBusy" :aria-pressed="turn.rating === 'positive'" :class="turn.rating === 'positive' && 'bg-secondary text-olive'" @click="emit('feedback', turn.rating === 'positive' ? null : 'positive')"><ThumbsUp /></IconButton>
+          <IconButton :label="turn.rating === 'negative' ? '撤销需要改进' : '需要改进'" size="icon-sm" :disabled="turn.feedbackBusy" :aria-pressed="turn.rating === 'negative'" :class="turn.rating === 'negative' && 'bg-secondary text-olive'" @click="emit('feedback', turn.rating === 'negative' ? null : 'negative')"><ThumbsDown /></IconButton>
         </template>
+      </div>
+      <div v-if="turn.rating === 'negative' && !turn.streaming" class="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground" aria-label="反馈原因">
+        <span>原因（可多选）：</span>
+        <Button v-for="reason in reasons" :key="reason.value" variant="outline" size="xs" :disabled="turn.feedbackBusy" :aria-pressed="turn.feedbackReasons?.includes(reason.value) ?? false" :class="turn.feedbackReasons?.includes(reason.value) && 'bg-secondary text-olive'" @click="toggleReason(reason.value)">{{ reason.label }}</Button>
+        <span>再次点击赞或踩可撤销</span>
       </div>
     </section>
   </article>

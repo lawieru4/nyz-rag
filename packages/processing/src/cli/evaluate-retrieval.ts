@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { join, relative, resolve, dirname } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import {
-  evaluateRetrieval, filterSplit, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset,
+  assertSupportedEvaluationInputs, evaluateRetrieval, filterSplit, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset,
   type DatasetValidationOptions, type EvaluationDataset, type EvaluationQuestion, type Split,
 } from "../evaluation.js";
 import {
@@ -53,6 +53,7 @@ if (split !== undefined && !SPLITS.includes(split)) throw new Error("--split mus
 // 先校验完整数据集（ID 唯一等），再按 --split 取子集。
 const fullDataset = await readEvaluationDataset(datasetPath);
 const dataset = filterSplit(fullDataset, split);
+assertSupportedEvaluationInputs(dataset.questions);
 if (!dataset.questions.length) throw new Error(`No questions in split ${split}`);
 
 // --- Offline mode: rank using a stable keyword baseline against local clean files. ---

@@ -2,6 +2,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
+  ChatFeedbackReason, ChatReviewInput,
   AdminAuditResult, ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
 } from "@nyz-rag/types";
 
@@ -368,6 +369,12 @@ export const chatMessages = pgTable("chat_messages", {
   promptTokens: integer(),
   completionTokens: integer(),
   rating: text().$type<ChatFeedbackRating>(),
+  feedbackReasons: jsonb().$type<ChatFeedbackReason[]>().notNull().default([]),
+  review: jsonb().$type<ChatReviewInput>(),
+  reviewRevision: integer().notNull().default(0),
+  approvedRevision: integer(),
+  approvedBy: text(),
+  approvedAt: timestamptz(),
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   index("chat_messages_created_at_idx").on(table.createdAt.desc()),

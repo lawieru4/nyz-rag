@@ -1,7 +1,7 @@
 import { computed, onScopeDispose, ref } from "vue";
 import { ApiError, type ApiClient } from "@nyz-rag/api-client";
 import type {
-  ChatAnswerMode, ChatFeedbackRating, ChatSessionListResponse, ChatSessionMessagesResponse,
+  ChatAnswerMode, ChatFeedbackRating, ChatFeedbackReason, ChatSessionListResponse, ChatSessionMessagesResponse,
   ChatSessionRecord, ChatSource, ChatStreamRequest, RetrievalFilters,
 } from "@nyz-rag/types";
 
@@ -12,6 +12,7 @@ export interface ChatTurnState {
   answerMode?: ChatAnswerMode;
   sources: ChatSource[];
   rating: ChatFeedbackRating | null;
+  feedbackReasons?: ChatFeedbackReason[];
   streaming?: boolean;
   /** 本轮未完成（出错或已停止），不会保存到会话。 */
   notice?: string;
@@ -198,9 +199,9 @@ export function useChatSession(options: {
   async function regenerate() {
     const turn = lastTurn.value;
     if (!turn || busy.value || !ready.value) return;
-    const previous = { ...turn, sources: [...turn.sources] };
+    const previous = { ...turn, sources: [...turn.sources], feedbackReasons: [...(turn.feedbackReasons ?? [])] };
     const request: ChatStreamRequest = turn.id ? { regenerate: turn.id, filters: currentFilters() } : { question: turn.question, filters: currentFilters() };
-    Object.assign(turn, { answer: "", sources: [], rating: null, notice: undefined, copied: false, answerMode: undefined });
+    Object.assign(turn, { answer: "", sources: [], rating: null, feedbackReasons: [], notice: undefined, copied: false, answerMode: undefined });
     // 重新生成失败时原回答仍在会话中，恢复显示。
     if (!await stream(turn, request) && previous.id) Object.assign(turn, previous, { notice: "重新生成未完成，已保留原回答。" });
   }

@@ -55,6 +55,10 @@ const ROUTE_ACCESS: Record<string, AdminAccess> = {
   "PATCH /api/admin/knowledge-bases/:id": "knowledge-bases:manage",
 
   "GET /api/admin/chat-logs": "chat-logs:view",
+  "GET /api/admin/chat-logs/:id/review": "chat-logs:view",
+  "PUT /api/admin/chat-logs/:id/review": "chat-logs:manage",
+  "POST /api/admin/chat-logs/:id/review/approve": "chat-logs:manage",
+  "POST /api/admin/chat-logs/:id/review/export": "chat-logs:manage",
   "GET /api/admin/audit-logs": "audit-logs:view",
 
   "GET /api/admin/users": "users:view",

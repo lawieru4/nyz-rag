@@ -8,6 +8,7 @@ import { configureCommon } from "../src/common.js";
 import { routeSchemas } from "../src/schemas.js";
 import { adminAuth, adminHeaders, memoryAuthStore, memoryAdmins, userAuth } from "./auth-helpers.js";
 import { hashPassword } from "../src/passwords.js";
+import { ADMIN_PERMISSIONS } from "@nyz-rag/processing";
 
 async function makeAdmins(options: { email?: string; password?: string; isSuper?: boolean; disabled?: boolean } = {}) {
   const email = options.email ?? "admin@example.com";
@@ -89,7 +90,7 @@ test("login with email succeeds and session contains AdminAccount; login with wr
     assert.equal(typeof session.admin.createdAt, "string");
     assert.equal(typeof session.admin.updatedAt, "string");
     assert.equal(Object.keys(session).sort().join(","), "admin,expiresAt,permissions,username");
-    assert.equal(session.permissions.length, 12, "super admin has every permission");
+    assert.deepEqual(session.permissions, [...ADMIN_PERMISSIONS], "super admin has every permission");
     assert.equal(session.admin.roleId, null);
   } finally { await app.close(); }
 });

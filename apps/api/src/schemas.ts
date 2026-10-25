@@ -95,6 +95,7 @@ const chatSourceSchema = {
   additionalProperties: false,
 } as const;
 
+const sessionFeedbackReasonsSchema = { type: "array", items: { type: "string", enum: ["missing-evidence", "incorrect-answer", "citation-mismatch", "outdated", "other"] } } as const;
 const chatSessionMessageSchema = {
   type: "object",
   properties: {
@@ -104,6 +105,7 @@ const chatSessionMessageSchema = {
     answerMode: { type: "string", enum: ["generated", "extractive"] },
     sources: { type: "array", items: chatSourceSchema },
     rating: { type: "string", nullable: true },
+    feedbackReasons: sessionFeedbackReasonsSchema,
     createdAt: { type: "string" },
   },
   required: ["id", "question", "answer", "answerMode", "sources", "createdAt"],
@@ -204,10 +206,12 @@ const chatStreamBodySchema = {
 
 // ─── Chat feedback ───────────────────────────────────────────────────────────
 
+const feedbackReasonsSchema = { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["missing-evidence", "incorrect-answer", "citation-mismatch", "outdated", "other"] } } as const;
 const chatFeedbackBodySchema = {
   type: "object",
   properties: {
-    rating: { type: "string", enum: ["positive", "negative"] },
+    rating: { type: "string", nullable: true, enum: ["positive", "negative", null] },
+    reasons: feedbackReasonsSchema,
   },
   required: ["rating"],
   additionalProperties: false,
@@ -659,8 +663,8 @@ const chatLogsQuerySchema = {
   type: "object",
   properties: {
     query: { type: "string" },
-    // Filters by whether feedback exists (see listChatMessages), not by the rating value.
-    rating: { type: "string", enum: ["rated", "unrated"] },
+    rating: { type: "string", enum: ["rated", "unrated", "positive", "negative"] },
+    status: { type: "string", enum: ["new", "investigating", "resolved", "dismissed"] },
     page: { type: "string", pattern: "^[1-9][0-9]*$" },
     pageSize: { type: "string", pattern: "^[1-9][0-9]*$" },
   },
@@ -707,6 +711,7 @@ const chatLogRecordSchema = {
     sources: { type: "array", items: chatSourceSchema },
     chunks: { type: "array", items: chatRetrievedChunkSchema },
     rating: { type: "string", nullable: true },
+    feedbackReasons: feedbackReasonsSchema,
     createdAt: { type: "string" },
   },
   required: ["id", "ownerType", "question", "answer", "answerMode", "sources", "chunks", "createdAt"],
@@ -725,6 +730,26 @@ const chatLogsListResponseSchema = {
   },
   ...errorResponses,
 } as const;
+
+const candidateSchema = {
+  type: "object", nullable: true,
+  properties: {
+    question: { type: "string", minLength: 1, maxLength: 2000 }, answer: { type: "string", maxLength: 20000 },
+    history: { type: "array", maxItems: 20, items: { type: "object", properties: { question: { type: "string", maxLength: 2000 }, answer: { type: "string", maxLength: 20000 } }, required: ["question", "answer"], additionalProperties: false } },
+    filters: { ...retrievalFiltersSchema, nullable: true },
+    type: { type: "string", enum: ["fact", "mechanism", "compare", "metadata", "term", "followup", "unanswerable"] },
+    split: { type: "string", enum: ["dev", "test"] }, answerable: { type: "boolean" },
+    labels: { type: "array", maxItems: 100, items: { type: "object", properties: { articleKey: { type: "string", pattern: "^[0-9]+$" }, relevance: { type: "integer", minimum: 0, maximum: 3 }, evidence: { type: "array", maxItems: 50, items: { type: "string", maxLength: 20000 } } }, required: ["articleKey", "relevance", "evidence"], additionalProperties: false } },
+  }, required: ["question", "history", "filters", "type", "split", "answerable", "labels"], additionalProperties: false,
+} as const;
+const reviewProperties = {
+  status: { type: "string", enum: ["new", "investigating", "resolved", "dismissed"] }, reasons: feedbackReasonsSchema,
+  notes: { type: "string", maxLength: 20000 }, correctedAnswer: { type: "string", maxLength: 20000 }, candidate: candidateSchema,
+} as const;
+const reviewInputSchema = { type: "object", properties: reviewProperties, required: ["status", "reasons", "notes", "correctedAnswer", "candidate"], additionalProperties: false } as const;
+const revisionSchema = { type: "integer", minimum: 0, maximum: 2147483646 } as const;
+const reviewParams = { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false } as const;
+const noContentResponse = { "204": { type: "object", additionalProperties: false }, ...errorResponses } as const;
 
 // ─── Search ───────────────────────────────────────────────────────────────────
 
@@ -1168,6 +1193,20 @@ export const routeSchemas: Record<string, RouteSchema> = {
   "GET /api/admin/chat-logs": {
     querystring: chatLogsQuerySchema,
     response: chatLogsListResponseSchema,
+  },
+  "GET /api/admin/chat-logs/:id/review": {
+    params: reviewParams,
+    response: { "200": { ...reviewInputSchema, properties: { ...reviewProperties, revision: revisionSchema, approvedRevision: { ...revisionSchema, nullable: true }, approvedAt: { type: "string", nullable: true } }, required: [...reviewInputSchema.required, "revision", "approvedRevision", "approvedAt"] }, ...errorResponses },
+  },
+  "PUT /api/admin/chat-logs/:id/review": {
+    params: reviewParams, body: { type: "object", properties: { revision: revisionSchema, review: reviewInputSchema }, required: ["revision", "review"], additionalProperties: false }, response: noContentResponse,
+  },
+  "POST /api/admin/chat-logs/:id/review/approve": {
+    params: reviewParams, body: { type: "object", properties: { revision: revisionSchema, confirmSanitized: { type: "boolean" } }, required: ["revision", "confirmSanitized"], additionalProperties: false }, response: noContentResponse,
+  },
+  "POST /api/admin/chat-logs/:id/review/export": {
+    params: reviewParams, body: { type: "object", properties: { revision: revisionSchema }, required: ["revision"], additionalProperties: false },
+    response: { "200": { type: "object", properties: { schemaVersion: { type: "integer" }, name: { type: "string" }, version: { type: "string" }, provenance: { type: "string" }, questions: { type: "array", items: { ...candidateSchema, nullable: false, properties: { ...candidateSchema.properties, id: { type: "string" }, source: { type: "string", enum: ["real"] } }, required: [...candidateSchema.required, "id", "source"] } } }, required: ["schemaVersion", "name", "version", "provenance", "questions"], additionalProperties: false }, ...errorResponses },
   },
 
   // ── Admin: documents ────────────────────────────────────────────────────────

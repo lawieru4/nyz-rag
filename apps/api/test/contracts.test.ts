@@ -722,7 +722,7 @@ test("GET /api/admin/chat-logs — invalid rating enum → 400", async () => {
   app.get("/api/admin/chat-logs", async () => ({ logs: [], total: 0 }));
   await app.ready();
 
-  const res = await app.inject({ method: "GET", url: "/api/admin/chat-logs?rating=positive" });
+  const res = await app.inject({ method: "GET", url: "/api/admin/chat-logs?rating=invalid" });
   assertError(res, 400);
 });
 
