@@ -480,6 +480,10 @@ export interface ArticleSourceSyncState {
   retryKeys?: string[];
   /** 最近一次同步时接口返回的文章总数。 */
   remoteTotal?: number;
+  /** 最近一次完整遍历列表的完成时间；不是远端删除/撤稿确认。 */
+  lastFullInspectionAt?: string;
+  /** 全量详情巡检的断点；页内已尝试的文章避免单次上限小于一页时重复刷新而无法前进。 */
+  fullInspection?: { page: number; completedKeys: string[] };
 }
 
 export interface KnowledgeStats {

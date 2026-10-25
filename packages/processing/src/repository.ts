@@ -97,14 +97,23 @@ export async function getTask(id: string, db: Executor = getDb()): Promise<Crawl
 /**
  * 创建同步任务及执行它的操作（同一事务，由 Worker 的投递器投递）。
  * 同一来源已有活动操作或等待中/运行中的任务时返回 null（两者都由部分唯一索引原子互斥）。
+ * 自动调度在来源行锁内重新检查启停与到期时间；手动任务也会重置自动调度周期。
  */
-export async function createTask(source: DataSourceRecord): Promise<CrawlTaskRecord | null> {
+export async function createTask(source: DataSourceRecord, options: { scheduled?: boolean } = {}): Promise<CrawlTaskRecord | null> {
   try {
     return await withTransaction(async (tx) => {
+      const [current] = await tx.select().from(dataSources).where(eq(dataSources.id, source.id)).for("update");
+      if (!current) return null;
+      if (options.scheduled) {
+        const [due] = await tx.select({ id: dataSources.id }).from(dataSources).where(and(eq(dataSources.id, source.id), sourceDue));
+        if (!due) return null;
+      }
+      // 不等待活动操作的唯一索引：完成事务按 operation → source 更新，避免与本行锁形成反向等待。
+      if (await activeOperation("source", source.id, tx)) return null;
       const operation = await insertOperation(tx, "sync-source", source.id);
       if (!operation) return null;
       const [row] = await tx.insert(crawlTasks)
-        .values({ id: randomUUID(), sourceId: source.id, sourceName: source.name, status: "等待中", operationId: operation.id })
+        .values({ id: randomUUID(), sourceId: source.id, sourceName: current.name, status: "等待中", operationId: operation.id })
         .returning();
       return toTask(row);
     });
@@ -112,6 +121,28 @@ export async function createTask(source: DataSourceRecord): Promise<CrawlTaskRec
     if (pgErrorCode(error) === "23505" && pgConstraint(error) === ACTIVE_TASK_INDEX) return null;
     throw error;
   }
+}
+
+// 只识别管理端提供的频率；空值、手动和未知频率均不自动执行。
+// 任务创建时间包含失败尝试，不以最近成功时间单独计时，避免凭据失效时每轮都创建失败任务。
+const sourceDue = sql`${dataSources.status} = '运行中' AND now() >=
+  coalesce(greatest(${dataSources.syncedAt}, (SELECT max(created_at) FROM ${crawlTasks}
+    WHERE source_id = ${outer("data_sources", "id")})), '-infinity'::timestamptz) +
+  CASE ${dataSources.frequency}
+    WHEN '每小时' THEN interval '1 hour'
+    WHEN '每 6 小时' THEN interval '6 hours'
+    WHEN '每天' THEN interval '1 day'
+    ELSE NULL END`;
+
+/** 每个 Worker 均可调用；到期判断和任务/outbox 写入在 createTask 内原子完成，重启不丢周期。 */
+export async function scheduleDueSources(limit = 100): Promise<number> {
+  const sources = await getDb().select(sourceColumns).from(dataSources).where(and(sourceDue,
+    sql`NOT EXISTS (SELECT 1 FROM ${crawlTasks} WHERE source_id = ${outer("data_sources", "id")} AND status IN ('等待中', '运行中'))`,
+    sql`NOT EXISTS (SELECT 1 FROM operations WHERE target_type = 'source' AND target_id = ${outer("data_sources", "id")} AND status IN ('pending', 'dispatched', 'running'))`,
+  )).orderBy(asc(dataSources.id)).limit(limit);
+  let created = 0;
+  for (const source of sources) if (await createTask(toSource(source), { scheduled: true })) created += 1;
+  return created;
 }
 
 /** 同步操作对应的任务。 */
