@@ -1,40 +1,77 @@
 /*
  * shadcn-vue 主题变量，由各应用在 `@import "tailwindcss"` 之后引入。
  * 配色沿用原有界面：深墨绿主色、浅橄榄强调色、暖灰边框；admin 在自己的样式表里覆盖少量变量。
+ * 文字与背景的组合按 WCAG AA（正文 4.5:1、焦点等非文本 3:1）选取，见 docs/design-preview/ui-typography-color-recommendations.md。
  */
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * 只自托管西文字体（拉丁字符子集，SIL OFL 1.1，见 fonts/OFL-*.txt），中文使用系统字体，不请求外部字体服务。
+ * DM Sans 的字符范围去掉了中文常用的弯引号、破折号与省略号（U+2014、U+2018–201F、U+2026），使其按中文字体显示。
+ */
+@font-face {
+  font-family: "DM Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./fonts/dm-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-2013, U+2015-2017, U+2020-2025, U+2027-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/dm-mono-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "DM Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/dm-mono-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --radius: 0.375rem;
-  --background: #f7f8f6;
-  --foreground: #222a27;
+  --background: #f6f7f4;
+  --foreground: #24312b;
   --card: #ffffff;
-  --card-foreground: #222a27;
+  --card-foreground: #24312b;
   --popover: #ffffff;
-  --popover-foreground: #222a27;
-  --primary: #28332d;
+  --popover-foreground: #24312b;
+  --primary: #24312b;
   --primary-foreground: #ffffff;
   --secondary: #f1f5e8;
   --secondary-foreground: #3f4b39;
   --muted: #f0f2ef;
-  --muted-foreground: #737d76;
+  --muted-foreground: #59675e;
   --accent: #eff3e8;
   --accent-foreground: #33451d;
-  --destructive: #a5473a;
-  --border: #e1e6dd;
-  --input: #dfe4dc;
-  --ring: #9aac79;
+  --destructive: #a13d35;
+  --destructive-soft: #f9eeeb;
+  --border: #dce2d8;
+  --input: #d6ddd2;
+  --ring: #425c3b;
   /* 品牌色（Logo 方块）与语义色 */
   --brand: #dff16e;
   --brand-foreground: #28311c;
   --brand-soft: #eff5d9;
-  --success: #628348;
-  --success-soft: #eef4e6;
-  --warning: #8a6a2f;
-  --warning-soft: #fbf3e6;
-  --link: #687a43;
-  /* web 侧栏与来源面板：比页面背景暗约 2%，靠明度差而不是边框分层 */
-  --panel: #f1f3ef;
+  --success: #326347;
+  --success-soft: #eaf3ed;
+  --warning: #855b1e;
+  --warning-soft: #fbf1df;
+  --link: #425c3b;
+  /* 长文正文（回答、文章、引用摘录），比标题墨色浅一级 */
+  --body: #36443c;
+  /* 小面积橄榄强调：图标、章节路径、列表符号、引用编号、选中态文字 */
+  --olive: #5d6b37;
+  /* 引用摘录底色 */
+  --quote: #f4f6ee;
+  /* web 侧栏与来源面板：比页面背景暗约 3%，靠明度差而不是边框分层 */
+  --panel: #eef1eb;
   /* admin 深色侧边栏 */
   --sidebar: #202a26;
   --sidebar-foreground: #aeb9b2;
@@ -46,8 +83,8 @@
 }
 
 @theme inline {
-  --font-sans: "DM Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "DM Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 2px);
@@ -67,6 +104,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-soft: var(--destructive-soft);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -78,6 +116,9 @@
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
   --color-link: var(--link);
+  --color-body: var(--body);
+  --color-olive: var(--olive);
+  --color-quote: var(--quote);
   --color-panel: var(--panel);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
@@ -90,7 +131,7 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
   }
   html {
     font-synthesis: none;

@@ -31,8 +31,8 @@ function handleSubmit() {
       <div class="mb-9 flex items-center gap-3">
         <img src="/logo.png" alt="能知" class="h-12 w-36 flex-none object-contain" />
         <div>
-          <span class="block font-mono text-[9px] font-medium text-muted-foreground">新能源知识助手</span>
-          <span class="block text-[10px] text-muted-foreground">管理后台</span>
+          <span class="block text-xs font-medium text-muted-foreground">新能源知识助手</span>
+          <span class="block text-xs text-muted-foreground">管理后台</span>
         </div>
       </div>
 

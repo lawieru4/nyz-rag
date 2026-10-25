@@ -19,15 +19,16 @@
 
 @layer components {
   .eyebrow {
-    font: 500 10px var(--font-mono);
-    letter-spacing: 1.2px;
-    color: #7e8c52;
+    /* 内容为中文，不用等宽字体 */
+    font: 500 12px var(--font-sans);
+    letter-spacing: 1px;
+    color: var(--olive);
   }
 
   /* 尚未收到文字（检索中）时的闪烁光标 */
   .streaming-cursor::after {
     content: "▍";
-    color: #788648;
+    color: var(--olive);
     animation: blink 1s steps(2) infinite;
   }
 
@@ -60,7 +61,7 @@
       margin-left: 0;
       vertical-align: baseline;
       background: none;
-      color: #788648;
+      color: var(--olive);
     }
   }
 
@@ -73,9 +74,9 @@
     margin: 0 1px;
     padding: 0 4px;
     border-radius: 4px;
-    background: #eef2e4;
-    color: #5d6b37;
-    font: 500 10px/1 var(--font-mono);
+    background: var(--accent);
+    color: var(--olive);
+    font: 500 11px/1 var(--font-mono);
     vertical-align: 0.2em;
     cursor: pointer;
     transition: background-color 0.15s, color 0.15s;
@@ -90,18 +91,18 @@
     outline-offset: 1px;
   }
 
-  /* 公开文章页的 Markdown 正文 */
+  /* 公开文章页的 Markdown 正文，字号与问答回答一致（16px，手机 15px） */
   .article-body {
     padding: 22px 0 8px;
-    color: #343d37;
-    font-size: 15px;
+    color: var(--body);
+    font-size: 16px;
     line-height: 1.95;
     overflow-wrap: anywhere;
     text-wrap: pretty;
   }
   .article-body .markdown-heading {
     margin: 30px 0 10px;
-    color: #29342e;
+    color: var(--foreground);
     font-size: 20px;
     font-weight: 600;
     line-height: 1.55;
@@ -138,8 +139,8 @@
     margin: 0 0 18px;
     padding: 14px;
     border-radius: 5px;
-    background: #f0f2ef;
-    font: 12px/1.7 var(--font-mono);
+    background: var(--muted);
+    font: 13px/1.7 var(--font-mono);
     white-space: pre;
   }
   .article-body .markdown-code code {
@@ -155,7 +156,7 @@
   .article-body table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: 14px;
   }
   .article-body th,
   .article-body td {
@@ -166,14 +167,14 @@
     vertical-align: top;
   }
   .article-body th {
-    background: #eff3e9;
-    color: #46533e;
+    background: var(--accent);
+    color: var(--secondary-foreground);
     font-weight: 600;
   }
 
   @media (max-width: 640px) {
     .article-body {
-      font-size: 14px;
+      font-size: 15px;
     }
     .article-body .markdown-heading {
       font-size: 18px;

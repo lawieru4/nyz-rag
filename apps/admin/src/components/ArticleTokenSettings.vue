@@ -85,12 +85,12 @@ async function clearToken() {
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">ARTICLE API TOKEN</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">ARTICLE API TOKEN</p>
         <DialogTitle>{{ tokenStatus?.configured ? '更换接口 Token' : '设置接口 Token' }}</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="saveToken">
         <div class="grid gap-2"><Label for="article-token">Token</Label><Input id="article-token" v-model="tokenValue" type="password" autocomplete="new-password" required maxlength="4096" pattern="\S+" placeholder="nyzdata 文章接口 token" /></div>
-        <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">Token 加密保存在数据库中，保存后不再显示；Worker 在每次同步时读取，无需重启。</p>
+        <p class="rounded-md bg-secondary p-2.5 text-xs leading-relaxed text-secondary-foreground">Token 加密保存在数据库中，保存后不再显示；Worker 在每次同步时读取，无需重启。</p>
         <DialogFooter>
           <Button type="button" variant="outline" :disabled="saving" @click="dialogOpen = false">取消</Button>
           <Button type="submit" :disabled="saving" :aria-busy="saving">{{ saving ? '保存中…' : '保存' }}</Button>

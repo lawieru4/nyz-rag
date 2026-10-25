@@ -66,7 +66,7 @@ async function save() {
         <p class="mt-1.5 mb-4 text-xs text-muted-foreground">{{ item.description || '未填写描述' }}</p>
         <dl class="flex flex-wrap gap-5">
           <div v-for="[label, value] in [['召回数量', item.topK], ['相似度阈值', item.similarityThreshold.toFixed(2)], ['最大上下文', `${item.maxContextLength.toLocaleString()} 字符`], ['模型', item.model]]" :key="label" class="grid gap-1">
-            <dt class="text-[11px] text-muted-foreground">{{ label }}</dt><dd class="font-mono text-xs">{{ value }}</dd>
+            <dt class="text-xs text-muted-foreground">{{ label }}</dt><dd class="font-mono text-xs">{{ value }}</dd>
           </div>
         </dl>
       </div>
@@ -78,7 +78,7 @@ async function save() {
   <Dialog v-model:open="open">
     <DialogContent class="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">KNOWLEDGE BASE</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">KNOWLEDGE BASE</p>
         <DialogTitle>{{ editingId ? '编辑知识库' : '新建知识库' }}</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="save">

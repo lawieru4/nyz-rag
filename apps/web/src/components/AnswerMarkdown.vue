@@ -22,7 +22,7 @@ const cite = (citation: number) => emit("cite", citation);
 </script>
 
 <template>
-  <div :class="['my-4 text-[13.5px] leading-[1.85] text-pretty text-[#3f4943]', streaming && 'answer-streaming']">
+  <div :class="['my-4 text-base leading-[1.85] text-pretty text-body max-sm:text-[15px]', streaming && 'answer-streaming']">
     <MarkdownBlocks v-slot="{ text }" :blocks="blocks" variant="answer">
       <AnswerInline :text="text" v-bind="inline" @cite="cite" />
     </MarkdownBlocks>

@@ -55,7 +55,7 @@ async function toggleUser(user: AdminUserRecord) {
     <Table class="min-w-[750px]">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">邮箱</TableHead><TableHead>状态</TableHead><TableHead>会话 / 问答</TableHead><TableHead>注册时间</TableHead><TableHead>最近登录</TableHead><TableHead /></TableRow></TableHeader>
       <TableBody>
-        <TableRow v-for="user in users" :key="user.id" class="text-xs text-muted-foreground">
+        <TableRow v-for="user in users" :key="user.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4 font-semibold text-foreground">{{ user.email }}</TableCell>
           <TableCell><StatusBadge :on="!user.disabled">{{ user.disabled ? '已停用' : '正常' }}</StatusBadge></TableCell>
           <TableCell class="tabular-nums">{{ user.sessionCount }} / {{ user.messageCount }}</TableCell>

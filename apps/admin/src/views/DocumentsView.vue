@@ -17,7 +17,7 @@ import { usePaginatedList } from "../composables/usePaginatedList";
 import { usePending } from "../composables/usePending";
 import { can, client, errorMessage, loadKnowledge, pageSize, refreshAfterWrite, sourceName, sources } from "../workspace";
 import DocumentDetailSheet from "./DocumentDetailSheet.vue";
-import { documentBusy, documentStatuses, embeddingStatuses, processingLabel } from "./documents";
+import { documentBusy, documentStatuses, embeddingStatuses, embeddingTone, processingLabel, processingTone } from "./documents";
 
 const sourceId = ref("");
 const status = ref("");
@@ -138,13 +138,13 @@ async function deleteDocument(document: DocumentSummary) {
     <Table class="min-w-[750px]">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">文档</TableHead><TableHead>数据源</TableHead><TableHead>状态</TableHead><TableHead>向量化</TableHead><TableHead>最后更新</TableHead><TableHead /></TableRow></TableHeader>
       <TableBody>
-        <TableRow v-for="document in documents" :key="document.id" class="text-xs text-muted-foreground">
+        <TableRow v-for="document in documents" :key="document.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4">
-            <button class="grid max-w-96 gap-1 text-left" @click="openDocument(document.id)"><b class="truncate text-xs text-foreground hover:underline">{{ document.title }}</b><small class="truncate text-[11px]">{{ document.url }}</small></button>
+            <button class="grid max-w-96 gap-1 text-left" @click="openDocument(document.id)"><b class="truncate text-sm text-foreground hover:underline">{{ document.title }}</b><small class="truncate text-xs">{{ document.url }}</small></button>
           </TableCell>
           <TableCell>{{ sourceName(document.sourceId) }}</TableCell>
-          <TableCell><StatusBadge :on="document.processingStatus === 'chunked'">{{ processingLabel(document) }}</StatusBadge></TableCell>
-          <TableCell><StatusBadge :on="document.embedding?.status === 'ready'" :title="document.embedding?.error">{{ embeddingStatuses[document.embedding?.status ?? 'pending'] }}</StatusBadge></TableCell>
+          <TableCell><StatusBadge :tone="processingTone(document)">{{ processingLabel(document) }}</StatusBadge></TableCell>
+          <TableCell><StatusBadge :tone="embeddingTone(document.embedding?.status)" :title="document.embedding?.error">{{ embeddingStatuses[document.embedding?.status ?? 'pending'] }}</StatusBadge></TableCell>
           <TableCell>{{ new Date(document.updatedAt).toLocaleString() }}</TableCell>
           <TableCell>
             <div class="flex justify-end gap-0.5">

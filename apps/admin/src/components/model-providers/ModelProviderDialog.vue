@@ -86,7 +86,7 @@ async function saveProvider() {
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">MODEL PROVIDER</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">MODEL PROVIDER</p>
         <DialogTitle>{{ provider ? '编辑供应商' : '添加供应商' }}</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="saveProvider">

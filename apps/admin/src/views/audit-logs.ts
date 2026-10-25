@@ -51,7 +51,7 @@ export const AUDIT_RESULTS: Array<{ value: AdminAuditResult; label: string }> = 
 ];
 
 export const auditResultLabel = (result: AdminAuditResult) => AUDIT_RESULTS.find((item) => item.value === result)!.label;
-export const auditResultVariant = (result: AdminAuditResult) => result === "success" ? "success" : result === "denied" ? "destructive" : "secondary";
+export const auditResultVariant = (result: AdminAuditResult) => result === "success" ? "success" : result === "denied" ? "warning" : "danger";
 
 export const auditOperator = (log: Pick<AdminAuditLogRecord, "adminId" | "adminNickname">) =>
   log.adminId ? log.adminNickname ?? "已删除的管理员" : "未登录";

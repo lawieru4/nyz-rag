@@ -117,7 +117,7 @@ async function saveSetting() {
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-lg" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">MODEL SETTING</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">MODEL SETTING</p>
         <DialogTitle>{{ capability.label }} 模型</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="saveSetting">

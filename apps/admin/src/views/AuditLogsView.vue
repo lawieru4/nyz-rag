@@ -42,13 +42,13 @@ const { items: logs, total, query, page, loading, load: loadAuditLogs, search, f
     <Table class="min-w-[820px]">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">时间</TableHead><TableHead>操作者</TableHead><TableHead>操作</TableHead><TableHead>资源 ID</TableHead><TableHead>结果</TableHead><TableHead>IP</TableHead></TableRow></TableHeader>
       <TableBody>
-        <TableRow v-for="log in logs" :key="log.id" class="text-xs text-muted-foreground">
+        <TableRow v-for="log in logs" :key="log.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4 whitespace-nowrap">{{ new Date(log.createdAt).toLocaleString() }}</TableCell>
           <TableCell>
-            <div class="grid gap-0.5"><b class="text-foreground">{{ auditOperator(log) }}</b><small v-if="log.adminEmail" class="text-[11px]">{{ log.adminEmail }}</small></div>
+            <div class="grid gap-0.5"><b class="text-foreground">{{ auditOperator(log) }}</b><small v-if="log.adminEmail" class="text-xs">{{ log.adminEmail }}</small></div>
           </TableCell>
           <TableCell>
-            <div class="grid gap-0.5" :title="`请求 ID：${log.requestId}`"><span class="text-foreground">{{ auditActionLabel(log) }}</span><small class="font-mono text-[10px]">{{ log.method }} {{ log.route }}</small></div>
+            <div class="grid gap-0.5" :title="`请求 ID：${log.requestId}`"><span class="text-foreground">{{ auditActionLabel(log) }}</span><small class="font-mono text-[11px]">{{ log.method }} {{ log.route }}</small></div>
           </TableCell>
           <TableCell class="max-w-40 truncate font-mono text-[11px]" :title="log.resourceId ?? undefined">{{ log.resourceId ?? '—' }}</TableCell>
           <TableCell><Badge :variant="auditResultVariant(log.result)">{{ auditResultLabel(log.result) }} · {{ log.statusCode }}</Badge></TableCell>

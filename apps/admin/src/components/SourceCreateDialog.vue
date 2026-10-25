@@ -49,7 +49,7 @@ async function addSource() {
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">NEW CONNECTION</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">NEW CONNECTION</p>
         <DialogTitle>添加数据源</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="addSource">
@@ -59,7 +59,7 @@ async function addSource() {
           <Label for="source-frequency">同步频率</Label>
           <Select v-model="form.frequency"><SelectTrigger id="source-frequency" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="frequency in ['每小时', '每 6 小时', '每天', '手动']" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent></Select>
         </div>
-        <p class="rounded-md bg-secondary p-2.5 text-[11px] leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权后再启动。来源地址填写 nyzdata 文章列表接口（不含 token），token 在本页「nyzdata 接口 Token」中配置。</p>
+        <p class="rounded-md bg-secondary p-2.5 text-xs leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权后再启动。来源地址填写 nyzdata 文章列表接口（不含 token），token 在本页「nyzdata 接口 Token」中配置。</p>
         <DialogFooter>
           <Button type="button" variant="outline" :disabled="saving" @click="open = false">取消</Button>
           <Button type="submit" :disabled="saving" :aria-busy="saving">{{ saving ? '添加中…' : '添加来源' }}</Button>
