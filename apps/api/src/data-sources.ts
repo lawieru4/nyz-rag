@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
-import { createSource, updateSourceStatus } from "@nyz-rag/processing";
-import type { CreateSourceRequest, UpdateSourceStatusRequest } from "@nyz-rag/types";
+import { createSource, updateSource } from "@nyz-rag/processing";
+import type { CreateSourceRequest, UpdateSourceRequest } from "@nyz-rag/types";
 import { requires } from "./admin-auth.js";
 
 export const dataSourceRoutes: FastifyPluginAsync = async (app) => {
@@ -15,8 +15,10 @@ export const dataSourceRoutes: FastifyPluginAsync = async (app) => {
     return createSource({ name: name.trim(), url: url.trim(), kind, frequency: frequency ?? "" });
   });
 
-  app.patch<{ Params: { id: string }; Body: UpdateSourceStatusRequest }>("/api/admin/sources/:id", requires("sources:manage"), async (request, reply) => {
-    const updated = await updateSourceStatus(request.params.id, request.body.status);
+  // 修改频率后按新周期判断到期（仍从最近同步或任务创建时间起算），不立即触发同步。
+  app.patch<{ Params: { id: string }; Body: UpdateSourceRequest }>("/api/admin/sources/:id", requires("sources:manage"), async (request, reply) => {
+    const { status, frequency } = request.body;
+    const updated = await updateSource(request.params.id, { status, frequency });
     if (!updated) return reply.code(404).send({ error: "source not found" });
     return updated;
   });

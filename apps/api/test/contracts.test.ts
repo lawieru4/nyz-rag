@@ -715,6 +715,21 @@ test("PATCH /api/admin/sources/:id — valid status → 200", async () => {
   assertOk(res);
 });
 
+test("PATCH /api/admin/sources/:id — frequency must be a known value and body non-empty", async () => {
+  const app = buildTestApp();
+  app.patch("/api/admin/sources/:id", async () => ({
+    id: UUID, name: "src", url: "https://example.com", kind: "文章 API",
+    frequency: "每 6 小时", status: "已暂停", documentCount: 0, remoteTotal: null, backfillDone: false, failedCount: 0, updatedAt: null,
+  }));
+  await app.ready();
+
+  const patch = (payload: object) => app.inject({ method: "PATCH", url: `/api/admin/sources/${UUID}`, payload });
+  assertOk(await patch({ frequency: "每 6 小时" }), (body) => assert.equal((body as { frequency: string }).frequency, "每 6 小时"));
+  assertError(await patch({ frequency: "daily" }), 400);
+  assertError(await patch({ frequency: "" }), 400);
+  assertError(await patch({}), 400);
+});
+
 // ─── Admin: chat logs ────────────────────────────────────────────────────────
 
 test("GET /api/admin/chat-logs — invalid rating enum → 400", async () => {

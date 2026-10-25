@@ -1,5 +1,5 @@
 import { ref } from "vue";
-import type { AdminPermission, KnowledgeOverview } from "@nyz-rag/types";
+import type { AdminPermission, KnowledgeOverview, SourceFrequency } from "@nyz-rag/types";
 import { toast } from "@nyz-rag/ui/lib/toast";
 import { AdminApiClient, ApiError } from "./adminClient";
 import { createKnowledgeOverview } from "./knowledge-overview";
@@ -10,6 +10,10 @@ export { errorMessage } from "@nyz-rag/api-client";
 
 export const client = new AdminApiClient(import.meta.env.VITE_API_URL ?? "http://localhost:3000");
 export const pageSize = 10;
+
+/** 数据源可选的同步频率（与 API 的校验一致）；其他值（含历史数据的空值）都按手动处理。 */
+export const sourceFrequencies: readonly SourceFrequency[] = ["每小时", "每 6 小时", "每天", "手动"];
+export const isSourceFrequency = (value: string): value is SourceFrequency => (sourceFrequencies as readonly string[]).includes(value);
 
 /**
  * 当前管理员生效的权限（超级管理员为全部），随会话设置与清空。

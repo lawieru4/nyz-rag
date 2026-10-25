@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
 import { Check, Clock, Database, FileText, Info, LoaderCircle, Pause, Play, Plus, RefreshCw, TriangleAlert } from "@lucide/vue";
-import type { UpdateSourceStatusRequest } from "@nyz-rag/types";
+import type { SourceFrequency, UpdateSourceRequest } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { Progress } from "@nyz-rag/ui/components/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@nyz-rag/ui/components/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@nyz-rag/ui/components/table";
 import { toast } from "@nyz-rag/ui/lib/toast";
 import ArticleTokenSettings from "../components/ArticleTokenSettings.vue";
@@ -13,7 +14,7 @@ import PageHeading from "../components/PageHeading.vue";
 import SourceCreateDialog from "../components/SourceCreateDialog.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { usePending } from "../composables/usePending";
-import { can, client, errorMessage, loadKnowledge, refreshAfterWrite, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
+import { can, client, errorMessage, isSourceFrequency, loadKnowledge, refreshAfterWrite, sourceFrequencies, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
 
 defineProps<{ title: string }>();
 
@@ -96,13 +97,31 @@ function toggleSource(source: Source) {
   return run(source.id, async () => {
     const status = source.status === "运行中" ? "已暂停" : "运行中";
     try {
-      await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status } satisfies UpdateSourceStatusRequest) });
+      await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status } satisfies UpdateSourceRequest) });
     } catch {
       toast.error("数据源状态更新失败，请检查 API 服务");
       return;
     }
     source.status = status;
     toast.success(status === "运行中" ? "数据源已启用" : "数据源已暂停");
+  });
+}
+
+/** 空值和无法识别的频率不会自动同步，下拉框显示占位文字。 */
+const frequencyValue = (source: Source) => isSourceFrequency(source.frequency) ? source.frequency : "";
+const frequencyLabel = (source: Source) => frequencyValue(source) || "未设置（手动）";
+
+function changeFrequency(source: Source, frequency: SourceFrequency) {
+  if (frequency === source.frequency) return;
+  return run(source.id, async () => {
+    try {
+      await client.request(`/api/admin/sources/${source.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ frequency } satisfies UpdateSourceRequest) });
+    } catch (err) {
+      toast.error(`同步频率更新失败：${errorMessage(err, "请检查 API 服务")}`);
+      return;
+    }
+    source.frequency = frequency;
+    toast.success(frequency === "手动" ? "已改为手动同步" : `同步频率已改为${frequency}`);
   });
 }
 
@@ -150,7 +169,13 @@ function startCrawl(source: Source) {
                 <span class="grid gap-1"><b class="text-sm font-semibold text-foreground">{{ source.name }}</b><small class="max-w-80 truncate text-xs">{{ source.url }}</small></span>
               </div>
             </TableCell>
-            <TableCell>{{ source.frequency }}</TableCell>
+            <TableCell>
+              <Select v-if="can('sources:manage')" :model-value="frequencyValue(source)" :disabled="isPending(source.id)" @update:model-value="(value) => changeFrequency(source, value as SourceFrequency)">
+                <SelectTrigger size="sm" class="w-36" aria-label="同步频率"><SelectValue placeholder="未设置（手动）" /></SelectTrigger>
+                <SelectContent><SelectItem v-for="frequency in sourceFrequencies" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent>
+              </Select>
+              <template v-else>{{ frequencyLabel(source) }}</template>
+            </TableCell>
             <TableCell>
               <div class="grid w-52 gap-1.5">
                 <span class="tabular-nums"><b class="font-semibold text-foreground">{{ source.pages.toLocaleString() }}</b> / {{ source.remoteTotal?.toLocaleString() ?? "—" }}<span v-if="coverage.percent !== null" class="ml-1.5 text-xs">{{ coverage.percent }}%</span></span>
@@ -182,11 +207,19 @@ function startCrawl(source: Source) {
             <small class="text-xs tabular-nums">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
           </div>
           <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span>{{ source.frequency }} · 最近同步 {{ source.updated }}</span>
+            <span v-if="can('sources:manage')">最近同步 {{ source.updated }}</span>
+            <span v-else>{{ frequencyLabel(source) }} · 最近同步 {{ source.updated }}</span>
             <div v-if="can('sources:manage')" class="flex gap-1.5">
               <Button variant="outline" size="sm" :disabled="syncingSources.has(source.id) || isPending(source.id)" @click="startCrawl(source)"><RefreshCw :class="syncingSources.has(source.id) && 'animate-spin'" />{{ syncingSources.has(source.id) ? '同步中' : '立即同步' }}</Button>
               <Button variant="outline" size="sm" :disabled="isPending(source.id)" @click="toggleSource(source)"><template v-if="source.status === '运行中'"><Pause />暂停</template><template v-else><Play />启用</template></Button>
             </div>
+          </div>
+          <div v-if="can('sources:manage')" class="flex items-center justify-between gap-2 text-xs">
+            <span>同步频率</span>
+            <Select :model-value="frequencyValue(source)" :disabled="isPending(source.id)" @update:model-value="(value) => changeFrequency(source, value as SourceFrequency)">
+              <SelectTrigger size="sm" class="w-36" aria-label="同步频率"><SelectValue placeholder="未设置（手动）" /></SelectTrigger>
+              <SelectContent><SelectItem v-for="frequency in sourceFrequencies" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent>
+            </Select>
           </div>
         </li>
       </ul>
@@ -213,7 +246,7 @@ function startCrawl(source: Source) {
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>
   </section>
-  <footer class="flex items-center gap-2 px-0.5 py-3 text-xs text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，单次同步有篇数上限，首次全量同步需多次执行；接口总数取自最近一次同步，无正文（如 VIP）的文章会计入失败。</footer>
+  <footer class="flex items-center gap-2 px-0.5 py-3 text-xs text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，启用后按同步频率自动执行（手动或未设置时只在点击「立即同步」时执行），单次同步有篇数上限，首次全量同步需多次执行；接口总数取自最近一次同步，无正文（如 VIP）的文章会计入失败。</footer>
 
   <SourceCreateDialog v-model:open="dialogOpen" :refresh-sources="loadKnowledge" />
 </template>
