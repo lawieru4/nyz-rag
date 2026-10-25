@@ -15,7 +15,7 @@ import PageHeading from "../components/PageHeading.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { can, client, errorMessage, refreshAfterWrite } from "../workspace";
 
-const emptyForm = (): SaveKnowledgeBaseRequest => ({ name: "", description: "", topK: 5, similarityThreshold: 0.35, rerankEnabled: false, maxContextLength: 6000, prompt: "请依据提供的知识库内容回答问题；若资料不足，请明确说明。", model: "默认模型" });
+const emptyForm = (): SaveKnowledgeBaseRequest => ({ name: "", description: "", topK: 5, similarityThreshold: 0.35, rerankEnabled: false, citationCheck: true, maxContextLength: 6000, prompt: "请依据提供的知识库内容回答问题；若资料不足，请明确说明。", model: "默认模型" });
 const knowledgeBases = ref<KnowledgeBaseRecord[]>([]);
 const dialogOpen = ref(false);
 const editingId = ref("");
@@ -32,7 +32,7 @@ onMounted(() => fetchKnowledgeBases().catch(() => { toast.error("知识库列表
 function edit(item?: KnowledgeBaseRecord) {
   if (saving.value) return;
   editingId.value = item?.id ?? "";
-  form.value = item ? { name: item.name, description: item.description, topK: item.topK, similarityThreshold: item.similarityThreshold, rerankEnabled: item.rerankEnabled, maxContextLength: item.maxContextLength, prompt: item.prompt, model: item.model } : emptyForm();
+  form.value = item ? { name: item.name, description: item.description, topK: item.topK, similarityThreshold: item.similarityThreshold, rerankEnabled: item.rerankEnabled, citationCheck: item.citationCheck, maxContextLength: item.maxContextLength, prompt: item.prompt, model: item.model } : emptyForm();
   dialogOpen.value = true;
 }
 
@@ -62,7 +62,7 @@ async function save() {
     <div class="px-5 py-4"><h2 class="text-sm font-semibold">知识库配置</h2><p class="mt-1 text-xs text-muted-foreground">{{ knowledgeBases.length }} 个知识库</p></div>
     <article v-for="item in knowledgeBases" :key="item.id" class="flex items-start justify-between gap-5 border-t p-5 max-sm:flex-col max-sm:gap-4 max-sm:px-4">
       <div class="min-w-0 flex-1 max-sm:w-full">
-        <div class="flex flex-wrap items-center gap-3"><h3 class="min-w-0 text-sm font-semibold break-words">{{ item.name }}</h3><StatusBadge :on="item.rerankEnabled">{{ item.rerankEnabled ? '重排序开启' : '重排序关闭' }}</StatusBadge></div>
+        <div class="flex flex-wrap items-center gap-3"><h3 class="min-w-0 text-sm font-semibold break-words">{{ item.name }}</h3><StatusBadge :on="item.rerankEnabled">{{ item.rerankEnabled ? '重排序开启' : '重排序关闭' }}</StatusBadge><StatusBadge :on="item.citationCheck">{{ item.citationCheck ? '引用校验开启' : '引用校验关闭' }}</StatusBadge></div>
         <p class="mt-1.5 mb-4 text-xs break-words text-muted-foreground">{{ item.description || '未填写描述' }}</p>
         <dl class="flex flex-wrap gap-5">
           <div v-for="[label, value] in [['召回数量', item.topK], ['相似度阈值', item.similarityThreshold.toFixed(2)], ['最大上下文', `${item.maxContextLength.toLocaleString()} 字符`], ['模型', item.model]]" :key="label" class="grid gap-1">
@@ -91,6 +91,10 @@ async function save() {
           <div class="grid gap-2"><Label for="kb-model">模型</Label><Input id="kb-model" v-model="form.model" required maxlength="100" /></div>
         </div>
         <Label class="font-normal"><Switch v-model="form.rerankEnabled" />启用重排序</Label>
+        <div class="grid gap-1.5">
+          <Label class="font-normal"><Switch v-model="form.citationCheck" />启用引用校验</Label>
+          <p class="text-xs text-muted-foreground">开启：要求每个结论标注引用，资料不足时固定拒答，没有引用或引用编号无效的回答改为展示原文片段。关闭：使用宽松的回答要求，模型回答非空即采用。</p>
+        </div>
         <div class="grid gap-2"><Label for="kb-prompt">回答提示词</Label><Textarea id="kb-prompt" v-model="form.prompt" rows="5" maxlength="10000" /></div>
         <DialogFooter>
           <Button type="button" variant="outline" :disabled="saving" @click="open = false">取消</Button>

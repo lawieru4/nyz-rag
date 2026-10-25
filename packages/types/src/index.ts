@@ -532,6 +532,8 @@ export interface KnowledgeBaseRecord {
   topK: number;
   similarityThreshold: number;
   rerankEnabled: boolean;
+  /** 开启时使用严格引用提示词，并拒收无引用（固定拒答除外）或含越界编号的生成回答。 */
+  citationCheck: boolean;
   maxContextLength: number;
   prompt: string;
   model: string;

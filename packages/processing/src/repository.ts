@@ -787,7 +787,7 @@ export async function getKnowledgeBase(id: string, db: Executor = getDb()): Prom
 // 只取可保存的字段，忽略请求体中的 id、时间戳等多余字段。
 const knowledgeBaseValues = (input: SaveKnowledgeBaseRequest) => ({
   name: input.name, description: input.description, topK: input.topK, similarityThreshold: input.similarityThreshold,
-  rerankEnabled: input.rerankEnabled, maxContextLength: input.maxContextLength, prompt: input.prompt, model: input.model,
+  rerankEnabled: input.rerankEnabled, citationCheck: input.citationCheck, maxContextLength: input.maxContextLength, prompt: input.prompt, model: input.model,
 });
 
 export async function createKnowledgeBase(input: SaveKnowledgeBaseRequest, db: Executor = getDb()): Promise<KnowledgeBaseRecord> {

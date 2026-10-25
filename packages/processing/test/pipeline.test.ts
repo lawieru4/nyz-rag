@@ -222,7 +222,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
 
     // Exercise the extracted configuration domains through their real request/response schemas.
     const jsonHeaders = { "content-type": "application/json" };
-    const knowledgeInput = { name: " Test knowledge ", description: "test", topK: 5, similarityThreshold: 0.3, rerankEnabled: false, maxContextLength: 6000, prompt: "", model: "" };
+    const knowledgeInput = { name: " Test knowledge ", description: "test", topK: 5, similarityThreshold: 0.3, rerankEnabled: false, citationCheck: true, maxContextLength: 6000, prompt: "", model: "" };
     const knowledgeCreated = await fetch(`${apiBase}/api/admin/knowledge-bases`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(knowledgeInput) });
     assert.equal(knowledgeCreated.status, 201);
     const knowledge = await knowledgeCreated.json();

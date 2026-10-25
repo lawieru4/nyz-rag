@@ -4,6 +4,7 @@ import { setImmediate } from "node:timers/promises";
 import { mock, test } from "node:test";
 import * as processing from "@nyz-rag/processing";
 import type { ChatChunk, ChatMessage, ChatModel } from "@nyz-rag/processing";
+import type { KnowledgeBaseRecord } from "@nyz-rag/types";
 
 const sessionId = "00000000-0000-4000-8000-000000000001";
 const hit: processing.ChunkHit = {
@@ -20,6 +21,7 @@ let hits = [hit];
 let configured = true;
 let stream: ChatModel["streamChat"];
 let prompt: ChatMessage[] = [];
+let knowledgeBases: KnowledgeBaseRecord[] = [];
 
 // Keep the real retrieval/context/prompt/citation functions; replace only storage
 // and the external model boundary. Both production route handlers run unchanged.
@@ -27,7 +29,7 @@ mock.module("@nyz-rag/processing", { namedExports: {
   ...processing,
   getModelSelections: async () => ({ chat: configured ? selection : null, embedding: null, rerank: null }),
   keywordSearchChunks: async () => hits,
-  listKnowledgeBases: async () => [],
+  listKnowledgeBases: async () => knowledgeBases,
   getChatSession: async () => ({ id: sessionId, title: "Test", messageCount: 0, createdAt: "", updatedAt: "" }),
   listSessionMessages: async () => [],
   createChatMessage: async (value: Saved) => { saved.push(value); },
@@ -43,6 +45,7 @@ function makeApp() {
   saved.length = 0;
   hits = [hit];
   configured = true;
+  knowledgeBases = [];
   return buildTestApp({ userAuth, userAuthStore: memoryAuthStore(), users: memoryUsers().repository, mailer: null });
 }
 
@@ -156,6 +159,37 @@ test("an out-of-range citation stops generation before it is streamed", async ()
     assert.equal(saved[0].answerMode, "extractive");
     assert.equal(events(response.body).find((event) => event.event === "done")!.data.answer, saved[0].answer);
   } finally { await app.close(); }
+});
+
+test("with citation check off, non-empty answers are accepted as before and streamed in full", async (t) => {
+  const knowledgeBase: KnowledgeBaseRecord = {
+    id: "kb-1", name: "KB", description: "", topK: 5, similarityThreshold: 0.3, rerankEnabled: false, citationCheck: false,
+    maxContextLength: 6000, prompt: "", model: "", createdAt: "", updatedAt: "",
+  };
+  for (const [label, text, accepted] of [
+    ["no citation", "Plain answer", true],
+    ["out-of-range citation", "Answer [3] more", true],
+    ["empty", "  ", false],
+  ] as const) for (const sse of [false, true]) await t.test(`${label}, SSE=${sse}`, async () => {
+    const app = makeApp();
+    knowledgeBases = [knowledgeBase];
+    stream = async function* () {
+      yield { type: "token", text: text.slice(0, 8) };
+      yield { type: "token", text: text.slice(8) };
+      yield { type: "usage", promptTokens: 20, completionTokens: 10 };
+    };
+    try {
+      const response = await send(app, sse);
+      const result = sse ? events(response.body).find((event) => event.event === "done")!.data : response.json();
+      const context = processing.buildAnswerContext([{ ...hit, keywordScore: 1 }], 6000);
+      assert.equal(result.answerMode, accepted ? "generated" : "extractive");
+      assert.equal(result.answer, accepted ? text : processing.extractiveAnswer(context, false));
+      assert.match(processing.extractiveAnswer(context, false), /未经模型生成/);
+      assert.equal(saved[0].promptTokens, 20, "the provider stream is read to the end");
+      assert.ok(!prompt[0].content.includes(processing.INSUFFICIENT_EVIDENCE_ANSWER), "lenient prompt has no fixed refusal");
+      if (sse) assert.equal(tokens(response.body), text);
+    } finally { await app.close(); }
+  });
 });
 
 test("no context or no configured model keeps the extractive path without calling the provider", async () => {

@@ -52,6 +52,8 @@ interface AnswerRun {
   corpus: CorpusSnapshot;
   settings: {
     knowledgeBase: { id: string; name: string } | null; retrieval: RetrievalSettings; prompt: string; context: ContextMode; variant: AnswerVariant; schema: string | null;
+    /** 知识库的引用校验开关，决定回答要求用严格还是宽松版本（本命令不做生成后的引用校验）；引入开关之前的运行没有该字段。 */
+    citationCheck?: boolean;
   };
   models: { embedding: ModelInfo | null; rerank: ModelInfo | null; chat: ModelInfo; judge: ModelInfo };
 }
@@ -157,7 +159,7 @@ async function run() {
     version: ANSWER_EVAL_VERSION, name, createdAt: new Date().toISOString(),
     dataset: { name: dataset.name, version: dataset.version, path: relative(repoRoot, datasetPath).replaceAll("\\", "/"), split: split ?? "all" },
     corpus: snapshot,
-    settings: { knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, prompt: knowledgeBase?.prompt ?? "", context: contextMode, variant, schema },
+    settings: { knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, prompt: knowledgeBase?.prompt ?? "", context: contextMode, variant, schema, citationCheck: knowledgeBase?.citationCheck ?? true },
     models: {
       embedding: modelInfo(embeddingSelection), rerank: reranker ? modelInfo(rerankSelection!) : null, chat: modelInfo(chatSelection, true), judge: modelInfo(judgeSelection, true),
     },
@@ -231,7 +233,7 @@ async function run() {
       };
       if (!context.chunks.length) return save({ ...item, answerMode: "no-context", answer: NO_MATCH_ANSWER });
       try {
-        const generated = await complete(chat, buildChatMessages(current.settings.prompt, question.question, context));
+        const generated = await complete(chat, buildChatMessages(current.settings.prompt, question.question, context, [], current.settings.citationCheck));
         item.answerMode = "generated";
         item.answer = generated.text;
         item.generation = { model: chat.model, firstTokenMs: generated.firstTokenMs, totalMs: generated.totalMs, promptTokens: generated.promptTokens, completionTokens: generated.completionTokens };
@@ -358,7 +360,7 @@ async function compare() {
     console.log(JSON.stringify({ a: a.run, b: b.run, warnings, comparison }, null, 2));
     return;
   }
-  const setup = ({ settings, models }: AnswerRun) => `${settings.variant}，上下文 ${settings.context}/${settings.retrieval.maxContextLength} 字（topK=${settings.retrieval.topK}），Chat ${models.chat.model}，索引 ${settings.schema ?? "业务库"}`;
+  const setup = ({ settings, models }: AnswerRun) => `${settings.variant}，上下文 ${settings.context}/${settings.retrieval.maxContextLength} 字（topK=${settings.retrieval.topK}），Chat ${models.chat.model}，索引 ${settings.schema ?? "业务库"}${settings.citationCheck === undefined ? "" : `，引用校验${settings.citationCheck ? "开启" : "关闭"}`}`;
   console.info(`A：${a.run.name}（${setup(a.run)}）`);
   console.info(`B：${b.run.name}（${setup(b.run)}）`);
   for (const warning of warnings) console.warn(`注意：${warning}`);

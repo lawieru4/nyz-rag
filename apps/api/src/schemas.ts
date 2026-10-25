@@ -467,13 +467,14 @@ const knowledgeBaseRecordSchema = {
     topK: { type: "number" },
     similarityThreshold: { type: "number" },
     rerankEnabled: { type: "boolean" },
+    citationCheck: { type: "boolean" },
     maxContextLength: { type: "number" },
     prompt: { type: "string" },
     model: { type: "string" },
     createdAt: { type: "string" },
     updatedAt: { type: "string" },
   },
-  required: ["id", "name", "description", "topK", "similarityThreshold", "rerankEnabled", "maxContextLength", "prompt", "model", "createdAt", "updatedAt"],
+  required: ["id", "name", "description", "topK", "similarityThreshold", "rerankEnabled", "citationCheck", "maxContextLength", "prompt", "model", "createdAt", "updatedAt"],
   additionalProperties: false,
 } as const;
 
@@ -485,11 +486,12 @@ const saveKnowledgeBaseBodySchema = {
     topK: { type: "integer", minimum: 1, maximum: 100 },
     similarityThreshold: { type: "number", minimum: 0, maximum: 1 },
     rerankEnabled: { type: "boolean" },
+    citationCheck: { type: "boolean" },
     maxContextLength: { type: "integer", minimum: 256 },
     prompt: { type: "string" },
     model: { type: "string" },
   },
-  required: ["name", "topK", "similarityThreshold", "rerankEnabled", "maxContextLength", "prompt", "model"],
+  required: ["name", "topK", "similarityThreshold", "rerankEnabled", "citationCheck", "maxContextLength", "prompt", "model"],
   additionalProperties: false,
 } as const;
 

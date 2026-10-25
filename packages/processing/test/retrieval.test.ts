@@ -200,6 +200,15 @@ test("answer context groups citations by article and respects the length limit",
   assert.match(extractiveAnswer(context), /\[1\] 《文章一》：甲+/);
   assert.match(extractiveAnswer(context), /未验证其是否足以回答问题，也不代表已核实的答案/);
   assert.equal(extractiveAnswer({ chunks: [], sources: [] }), NO_MATCH_ANSWER);
+
+  // 引用校验关闭：宽松的回答要求与原文片段说明。
+  const [lenient] = buildChatMessages("", "如何提升寿命？", context, [], false);
+  assert.match(lenient.content, /资料不足以回答时明确说明/);
+  assert.match(lenient.content, /\[1\] 或 \[1\]\[2\]/);
+  assert.ok(!lenient.content.includes(INSUFFICIENT_EVIDENCE_ANSWER), "no fixed refusal sentence");
+  for (const rule of ["至少有一个引用", "请求用户澄清", "只输出固定句子"]) assert.ok(!lenient.content.includes(rule), rule);
+  assert.match(extractiveAnswer(context, false), /^以下是知识库中最相关的原文片段（未经模型生成）：\n\n\[1\] 《文章一》：甲+/);
+  assert.equal(extractiveAnswer({ chunks: [], sources: [] }, false), NO_MATCH_ANSWER);
   assert.deepEqual(retrievedChunkRecords(context)[0], { chunkId: "a", documentId: "doc-1", citation: 1, title: "文章一", sectionPath: ["结论"], excerpt: "甲".repeat(40), score: 0 });
 });
 

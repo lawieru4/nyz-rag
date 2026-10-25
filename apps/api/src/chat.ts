@@ -52,6 +52,7 @@ async function resolveKnowledgeBase(id: string | undefined) {
  * 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用业务模型配置中的 Chat 模型回答；Embedding、Rerank 同样取各自配置的供应商与模型。
  * 未配置 Chat 模型、密钥不可用或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
  * 限流拒绝与限流服务故障不降级，返回错误且不保存回答。
+ * 知识库开启引用校验（默认）时，无引用（固定拒答除外）或含越界编号的生成回答同样降级为摘录；关闭时非空回答即采用。
  * signal 中止（客户端断开）时直接返回，由调用方丢弃结果。
  */
 async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
@@ -83,10 +84,11 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   const context = buildAnswerContext(chunks, settings.maxContextLength);
   options.onSources?.(context.sources);
 
-  let answer = extractiveAnswer(context);
+  const citationCheck = knowledgeBase?.citationCheck ?? true;
+  let answer = extractiveAnswer(context, citationCheck);
   let answerMode: ChatAnswerMode = "extractive";
   const usage: AnswerResult["usage"] = {};
-  // 模型输出边生成边发送（token 事件），done 事件中的回答为准：未通过引用门控的输出由 done 替换为摘录。
+  // 模型输出边生成边发送（token 事件），done 事件中的回答为准：未被采用的输出由 done 替换为摘录。
   let text = "";
   let sent = 0;
   const emit = (end: number) => {
@@ -98,13 +100,13 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   if (context.chunks.length && chatModel && !options.signal?.aborted) {
     const chat = createChatModel(chatModel);
     try {
-      for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context, options.history), { signal: options.signal })) {
+      for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context, options.history, citationCheck), { signal: options.signal })) {
         if (options.signal?.aborted) break;
         if (chunk.type === "token") {
           text += chunk.text;
-          // 末尾未闭合的疑似引用（如 "[1、"）暂不发送；出现越界编号时立即停止生成，越界编号本身不会发给客户端。
-          const end = text.length - (PARTIAL_CITATION.exec(text)?.[0].length ?? 0);
-          if (validateCitations(text.slice(sent, end), context.sources.length).invalid.length) break;
+          // 引用校验开启时，末尾未闭合的疑似引用（如 "[1、"）暂不发送；出现越界编号时立即停止生成，越界编号本身不会发给客户端。
+          const end = citationCheck ? text.length - (PARTIAL_CITATION.exec(text)?.[0].length ?? 0) : text.length;
+          if (citationCheck && validateCitations(text.slice(sent, end), context.sources.length).invalid.length) break;
           emit(end);
         } else {
           usage.promptTokens = chunk.promptTokens;
@@ -113,13 +115,18 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
       }
       const candidate = text.trim();
       const citations = validateCitations(candidate, context.sources.length);
-      if (candidate === INSUFFICIENT_EVIDENCE_ANSWER || (citations.cited.length > 0 && citations.invalid.length === 0)) {
+      const accepted = citationCheck
+        ? candidate === INSUFFICIENT_EVIDENCE_ANSWER || (citations.cited.length > 0 && citations.invalid.length === 0)
+        : candidate.length > 0;
+      if (accepted) {
         answer = candidate;
         answerMode = "generated";
         usage.model = chat.model;
         emit(text.length);
-      } else {
+      } else if (citationCheck) {
         log.warn({ cited: citations.cited, invalid: citations.invalid }, "Chat answer rejected by citation presence/ID gate; using extractive evidence");
+      } else {
+        log.warn("Chat model returned an empty answer; using extractive answer");
       }
     } catch (error) {
       if (error instanceof AdmissionError) throw error;

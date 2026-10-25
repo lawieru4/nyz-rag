@@ -1,0 +1,1 @@
+ALTER TABLE "knowledge_bases" ADD COLUMN "citation_check" boolean DEFAULT true NOT NULL;

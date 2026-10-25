@@ -169,6 +169,13 @@
       "when": 1792917540576,
       "tag": "0023_flashy_lightspeed",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1792926822883,
+      "tag": "0024_same_red_shift",
+      "breakpoints": true
     }
   ]
 }

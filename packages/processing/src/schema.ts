@@ -218,6 +218,8 @@ export const knowledgeBases = pgTable("knowledge_bases", {
   topK: integer().notNull(),
   similarityThreshold: doublePrecision().notNull(),
   rerankEnabled: boolean().notNull().default(false),
+  // 引用校验：开启时使用严格引用提示词并在生成后校验引用编号，关闭时为宽松提示词、非空回答即采用。
+  citationCheck: boolean().notNull().default(true),
   maxContextLength: integer().notNull(),
   prompt: text().notNull().default(""),
   model: text().notNull().default(""),
