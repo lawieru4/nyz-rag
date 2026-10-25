@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { RetrievalFilters } from "@nyz-rag/types";
+import { parseRetrievalFilters } from "./retrieval-filters.js";
 
 export const QUESTION_TYPES = ["fact", "mechanism", "compare", "metadata", "term", "followup", "unanswerable"] as const;
 export const QUESTION_SOURCES = ["synthetic", "real", "real-silver", "expert"] as const;
@@ -148,6 +149,9 @@ export function validateEvaluationDataset(input: AnyEvaluationDataset, options: 
     if (item.specificity !== undefined && !includes(SPECIFICITIES, item.specificity)) errors.push(`${at}: specificity must be high or low`);
     if (typeof item.answerable !== "boolean") errors.push(`${at}: answerable must be a boolean`);
     if (!Array.isArray(item.history)) errors.push(`${at}: history must be an array`);
+    else if (item.history.some((turn) => !turn || typeof turn.question !== "string" || !turn.question.trim() || typeof turn.answer !== "string")) errors.push(`${at}: history turns require question and answer strings`);
+    try { if (item.filters !== null) parseRetrievalFilters(item.filters); }
+    catch (error) { errors.push(`${at}: ${(error as Error).message}`); }
     if (!item.labels?.length && item.answerable !== false) errors.push(`questions[${index}] has no relevance labels`);
     const labelIds = new Set<string>();
     for (const label of item.labels ?? []) {
@@ -180,6 +184,13 @@ export function validateEvaluationDataset(input: AnyEvaluationDataset, options: 
 
 export const filterSplit = (dataset: EvaluationDataset, split?: Split): EvaluationDataset =>
   split ? { ...dataset, questions: dataset.questions.filter((item) => item.split === split) } : dataset;
+
+/** Current evaluation runners are single-turn/unfiltered, not faithful replay engines. */
+export function assertSupportedEvaluationInputs(questions: EvaluationQuestion[]): void {
+  for (const question of questions) {
+    if (question.history.length || (question.filters && Object.keys(question.filters).length)) throw new Error(`${question.id}: evaluation runner does not support history or filters; refusing to silently ignore supplied inputs`);
+  }
+}
 
 /** 按文章确定 dev / test（约 2:1）：同一篇文章的题目始终在同一侧，扩充时已有文章的划分不变。 */
 export function splitForArticle(articleKey: string): Split {

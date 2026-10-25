@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import pg from "pg";
 import { closeDatabase, getPool, migrate, withDocumentWork, withTransaction } from "../src/db.js";
-import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, saveModelSetting, upsertDocument } from "../src/repository.js";
+import { createModelProvider, createSource, getDocumentSummary, replaceDocumentChunks, saveModelSetting, updateSourceStatus, upsertDocument } from "../src/repository.js";
 import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 test("API + queue + worker persist vectors, retry failures and clean stale rows", { skip: process.env.NYZ_INTEGRATION_TEST !== "1", timeout: 120000 }, async () => {
@@ -201,8 +201,13 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     await getPool().query("UPDATE documents SET embedding_status = 'queued' WHERE id = $1", [documentId]);
     await getPool().query(`INSERT INTO operations (id, kind, target_type, target_id, status, dispatched_at)
       VALUES (gen_random_uuid()::text, 'embed-document', 'document', $1, 'dispatched', now() - interval '1 hour')`, [documentId]);
+    // 两个真实 Worker 启动时都会调度；未配置 token 的失败尝试也必须消耗周期。
+    const automaticSource = await createSource({ name: "Automatic", url: `http://127.0.0.1:${mockPort}/nyz/article?tagKey=1`, kind: "文章 API", frequency: "每小时" });
+    await updateSourceStatus(automaticSource.id, "运行中");
     const workers = [start("apps/worker/src/index.ts"), start("apps/worker/src/index.ts")];
     await waitEmbedding("ready");
+    await until(async () => (await getPool().query("SELECT 1 FROM crawl_tasks WHERE source_id = $1 AND status = '失败'", [automaticSource.id])).rowCount === 1);
+    assert.equal((await getPool().query("SELECT count(*)::int AS count FROM crawl_tasks WHERE source_id = $1", [automaticSource.id])).rows[0].count, 1);
     assert.match(output, /has no queued job; dispatching again/);
     start("apps/api/src/index.ts");
     await until(async () => { try { return (await fetch(`${apiBase}/health`)).ok; } catch { return false; } });
@@ -217,7 +222,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
 
     // Exercise the extracted configuration domains through their real request/response schemas.
     const jsonHeaders = { "content-type": "application/json" };
-    const knowledgeInput = { name: " Test knowledge ", description: "test", topK: 5, similarityThreshold: 0.3, rerankEnabled: false, maxContextLength: 6000, prompt: "", model: "" };
+    const knowledgeInput = { name: " Test knowledge ", description: "test", topK: 5, similarityThreshold: 0.3, rerankEnabled: false, citationCheck: true, maxContextLength: 6000, prompt: "", model: "" };
     const knowledgeCreated = await fetch(`${apiBase}/api/admin/knowledge-bases`, { method: "POST", headers: jsonHeaders, body: JSON.stringify(knowledgeInput) });
     assert.equal(knowledgeCreated.status, 201);
     const knowledge = await knowledgeCreated.json();
@@ -456,7 +461,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}`, { method: "DELETE" })).status, 204);
     assert.equal((await fetch(`${apiBase}/api/chat/sessions/${session.id}/messages`)).status, 404);
     const overview = await (await fetch(`${apiBase}/api/admin/knowledge`)).json();
-    assert.equal(overview.sources[0].documentCount, 1);
+    assert.equal(overview.sources.find((item: { id: string }) => item.id === source.id).documentCount, 1);
     assert.equal(overview.stats.documents, 1);
 
     assert.equal((await fetch(`${apiBase}/api/admin/documents/${documentId}`, { method: "DELETE" })).status, 204);
@@ -566,6 +571,17 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     mode = "ok";
     await failingSync;
     await until(async () => (await getDocumentSummary(synced[1].id))?.embedding?.status === "ready");
+    // 全量巡检刷新没有列表 updateTime 的已知文章，并保持文章身份；走真实 Worker 入库与向量化路径。
+    articles.set("a2", article("a2", "文章二（无更新时间修订）", 300));
+    await getPool().query("UPDATE data_sources SET sync_state = jsonb_set(sync_state, '{lastFullInspectionAt}', to_jsonb('2020-01-01T00:00:00Z'::text)) WHERE id = $1", [articleSource.id]);
+    const noTimestampArticle = articles.get("a2")!;
+    // mock 列表和详情均从同一对象读取；模拟上游不再提供 updateTime。
+    Reflect.deleteProperty(noTimestampArticle, "updateTime");
+    articleRequests.length = 0;
+    await syncArticles();
+    assert.equal((await getDocumentSummary(synced[1].id))!.title, "文章二（无更新时间修订）");
+    assert.equal(articleRequests.filter((path) => path.endsWith("/articleDetail")).length, 2, "full inspection refreshes unchanged and timestamp-less articles");
+    await until(async () => (await articleDocuments()).every((row) => row.embedding_status === "ready"));
     // 只接受文章接口来源。
     assert.equal((await fetch(`${apiBase}/api/admin/sources`, { method: "POST", headers: json, body: JSON.stringify({ name: "Site", url: "https://example.test", kind: "网页站点", frequency: "" }) })).status, 400);
     // 正文相同的文章：后处理的一篇标记为重复，不切片、不向量化；删除主文档后由重复文档接替。
@@ -592,6 +608,7 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     assert.equal(promoted.duplicateOf, undefined);
 
     assert.equal((await getPool().query("SELECT 1 FROM operations WHERE status IN ('pending', 'dispatched', 'running')")).rowCount, 0, "no operation is left behind");
+    assert.equal((await getPool().query("SELECT count(*)::int AS count FROM crawl_tasks WHERE source_id = $1", [automaticSource.id])).rows[0].count, 1, "worker restarts and periodic scheduling do not recreate failed tasks before cadence");
     for (const secret of [articleToken, secretKey, "integration-test-key", "disabled-secret", "do-not-leak-provider-body"]) assert.doesNotMatch(output, new RegExp(secret));
     assert.doesNotMatch(output, new RegExp(adminPassword));
     assert.doesNotMatch(output, /integration password/);

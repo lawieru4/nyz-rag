@@ -5,6 +5,8 @@ export { secretKeyConfigured, SecretKeyError } from "./secrets.js";
 export { ADMIN_PERMISSIONS, isAdminPermission, normalizeAdminPermissions } from "./admin-permissions.js";
 export * from "./models.js";
 export * from "./rag.js";
+export * from "./citations.js";
+export * from "./chat-review.js";
 export { parseRetrievalFilters } from "./retrieval-filters.js";
 export { normalizeSearchText, searchTerms } from "./search-terms.js";
 export * from "./chunking.js";

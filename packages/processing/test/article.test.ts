@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ArticleSourceSyncState } from "@nyz-rag/types";
 import { ArticleApiError, createArticleClient, type ArticleListItem } from "../src/article/client.js";
 import { PARSER_VERSION, parseArticle, type ArticleDetail } from "../src/article/parse.js";
 import { syncArticles } from "../src/article/sync.js";
@@ -280,7 +281,7 @@ test("article client builds URLs, keeps the token out of errors and stops on inv
   assert.equal(calls[1].pathname, "/api/article/articleDetail");
   assert.equal(calls[1].searchParams.get("tagKey"), null);
   await assert.rejects(client.detail("x"), (error: unknown) => error instanceof ArticleApiError && !error.fatal && !error.message.includes(token));
-  assert.equal(client.articleUrl("42"), "https://x.test/ArticleDetail?id=42");
+  assert.equal(client.articleUrl("42"), "https://nyz.nenghe.com/article-detail?id=42");
 });
 
 function listClient(pages: ArticleListItem[][], total = pages.flat().length) {
@@ -290,22 +291,24 @@ function listClient(pages: ArticleListItem[][], total = pages.flat().length) {
 const items = (from: number, count: number, updateTime = 1): ArticleListItem[] => Array.from({ length: count }, (_, index) => ({ _key: String(from + index), updateTime }));
 
 test("syncArticles skips unchanged pinned items, stops after quiet pages and resumes backfill", async () => {
+  const now = () => new Date("2026-10-25T00:00:00Z");
+  const completed = { backfillDone: true, lastFullInspectionAt: now().toISOString() };
   const pages = [[{ _key: "pinned", updateTime: 1, top: 1 }, ...items(1, 2)], items(3, 3), items(6, 3), items(9, 3), items(12, 3)];
   const known = new Map<string, number | null>([["pinned", 1], ...items(1, 14).map((item) => [item._key, 1] as [string, number])]);
   const processed: string[] = [];
-  const base = { known, limit: 100, overlapPages: 2, pause: async () => {}, process: async (item: ArticleListItem) => { processed.push(item._key); } };
+  const base = { known, now, limit: 100, overlapPages: 2, pause: async () => {}, process: async (item: ArticleListItem) => { processed.push(item._key); } };
 
   // 回填已完成：只扫描到连续 2 页无变化为止。
   let saved = {};
   let run = listClient(pages);
-  await syncArticles({ ...base, client: run.client, state: { backfillDone: true }, saveState: async (state) => { saved = state; } });
+  await syncArticles({ ...base, client: run.client, state: completed, saveState: async (state) => { saved = state; } });
   assert.deepEqual(run.requested, [1, 2]);
   assert.deepEqual(processed, []);
 
   // 更新时间变化的已知文章会重新处理，即使出现在置顶之后。
   known.set("4", 0);
   run = listClient(pages);
-  await syncArticles({ ...base, client: run.client, state: { backfillDone: true }, saveState: async (state) => { saved = state; } });
+  await syncArticles({ ...base, client: run.client, state: completed, saveState: async (state) => { saved = state; } });
   assert.deepEqual(processed, ["4"]);
   assert.deepEqual(run.requested, [1, 2, 3, 4]);
   known.set("4", 1);
@@ -333,8 +336,8 @@ test("syncArticles skips unchanged pinned items, stops after quiet pages and res
   result = await syncArticles({ ...base, known: fresh, limit: 100, process, client: run.client, state, saveState: async (next) => { state = next; } });
   assert.equal(result.limitReached, false);
   assert.deepEqual(processed, ["pinned", "1", "3", "4", "5", "2", "6", "7", "8", "9", "10", "11", "12", "13", "14"]);
-  assert.deepEqual(state, { backfillDone: true, remoteTotal: 15 });
-  assert.deepEqual(saved, { backfillDone: true, remoteTotal: 15 });
+  assert.deepEqual(state, { ...completed, remoteTotal: 15 });
+  assert.deepEqual(saved, { ...completed, remoteTotal: 15 });
 });
 
 test("syncArticles aborts on fatal API errors and still saves progress", async () => {
@@ -345,5 +348,67 @@ test("syncArticles aborts on fatal API errors and still saves progress", async (
     process: async (item) => { if (item._key === "2") throw new ArticleApiError("token 无效", true); },
     saveState: async (next) => { state = next; },
   }), /token 无效/);
-  assert.deepEqual(state, { remoteTotal: 3 });
+  assert.deepEqual(state, { remoteTotal: 3, retryKeys: ["2"] });
+});
+
+test("full inspection bypasses quiet pages, refreshes every detail and resumes within a page", async () => {
+  const now = () => new Date("2026-10-25T00:00:00Z");
+  const pages = [items(1, 3), [{ _key: "4" }, { _key: "5" }], items(6, 2)];
+  const known = new Map<string, number | null>(pages.flat().map((item) => [item._key, item.updateTime ?? null]));
+  let state: ArticleSourceSyncState = { backfillDone: true, lastFullInspectionAt: "2026-10-18T00:00:00Z" };
+  const processed: string[] = [];
+  const requested: number[] = [];
+  const base = {
+    known, now, limit: 2, overlapPages: 1, pause: async () => {},
+    process: async (item: ArticleListItem) => { processed.push(item._key); },
+    saveState: async (next: ArticleSourceSyncState) => { state = structuredClone(next); },
+  };
+  for (let index = 0; index < 4; index += 1) {
+    const run = listClient(pages);
+    const result = await syncArticles({ ...base, client: run.client, state });
+    requested.push(...run.requested);
+    if (!index) {
+      assert.equal(result.limitReached, true);
+      assert.deepEqual(state.fullInspection, { page: 1, completedKeys: ["1", "2"] });
+      assert.equal(state.lastFullInspectionAt, "2026-10-18T00:00:00Z", "partial inspection is not completed");
+    }
+  }
+  assert.deepEqual(processed, ["1", "2", "3", "4", "5", "6", "7"]);
+  assert.ok(requested.includes(3), "deep known pages are inspected despite quiet head pages");
+  assert.equal(state.fullInspection, undefined);
+  assert.equal(state.lastFullInspectionAt, now().toISOString());
+  const run = listClient(pages);
+  await syncArticles({ ...base, client: run.client, state });
+  assert.deepEqual(run.requested, [1], "between full inspections incremental quiet stopping still applies");
+  assert.equal(processed.length, 7);
+});
+
+test("full inspection preserves checkpoints and retry keys through detail/list errors without invalidation", async () => {
+  const now = () => new Date("2026-10-25T00:00:00Z");
+  const known = new Map<string, number | null>([["1", 1], ["2", null], ["absent", 1]]);
+  let state: ArticleSourceSyncState = { backfillDone: true, retryKeys: ["old-failure"] };
+  const snapshots: ArticleSourceSyncState[] = [];
+  const base = {
+    known, now, limit: 1, overlapPages: 1, pause: async () => {},
+    saveState: async (next: ArticleSourceSyncState) => { state = structuredClone(next); snapshots.push(state); },
+  };
+  const run = listClient([[{ _key: "1", updateTime: 1 }, { _key: "2" }]]);
+  await syncArticles({ ...base, client: run.client, state, process: async () => { throw new ArticleApiError("HTTP 404", false); } });
+  assert.deepEqual(state.fullInspection, { page: 1, completedKeys: ["1"] });
+  assert.deepEqual(state.retryKeys, ["1", "old-failure"]);
+  assert.ok(snapshots.some((snapshot) => snapshot.fullInspection?.completedKeys.includes("1") && snapshot.retryKeys?.includes("1")), "failure and page progress are checkpointed together");
+  const beforeFatal = structuredClone(state);
+  await assert.rejects(syncArticles({ ...base, client: run.client, state, process: async () => { throw new ArticleApiError("permission denied", true); } }), /permission denied/);
+  assert.deepEqual(state.fullInspection, beforeFatal.fullInspection, "fatal details are not skipped on resume");
+  assert.ok(state.retryKeys?.includes("2"));
+  await assert.rejects(syncArticles({ ...base, state, client: { list: async () => { throw new Error("HTTP 503"); } }, process: async () => assert.fail("no detail") }), /HTTP 503/);
+  assert.equal(state.lastFullInspectionAt, undefined);
+  assert.deepEqual(state.fullInspection, beforeFatal.fullInspection);
+  const refreshed: string[] = [];
+  await syncArticles({ ...base, client: run.client, state, process: async (item) => { refreshed.push(item._key); } });
+  assert.deepEqual(refreshed, ["2"], "pending retries do not starve full inspection progress");
+  assert.equal(state.lastFullInspectionAt, now().toISOString());
+  assert.deepEqual(state.retryKeys, ["1", "old-failure"]);
+  assert.equal(known.has("absent"), true, "absence does not remove local knowledge");
+  assert.equal(known.size, 3, "404, permissions and errors do not invalidate known articles");
 });

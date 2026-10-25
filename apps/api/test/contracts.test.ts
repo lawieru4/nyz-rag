@@ -437,7 +437,7 @@ test("GET /api/admin/documents/:id — non-UUID → 400", async () => {
 test("POST /api/admin/knowledge-bases — missing required fields → 400", async () => {
   const app = buildTestApp();
   app.post("/api/admin/knowledge-bases", async (_req, reply) =>
-    reply.code(201).send({ id: UUID, name: "k", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, maxContextLength: 4096, prompt: "", model: "", createdAt: "", updatedAt: "" }));
+    reply.code(201).send({ id: UUID, name: "k", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, citationCheck: true, maxContextLength: 4096, prompt: "", model: "", createdAt: "", updatedAt: "" }));
   await app.ready();
 
   const res = await app.inject({
@@ -452,7 +452,7 @@ test("POST /api/admin/knowledge-bases — blank name or out-of-range settings �
   app.post("/api/admin/knowledge-bases", async () => { throw new Error("handler must not run"); });
   await app.ready();
 
-  const valid = { name: "kb", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, maxContextLength: 4096, prompt: "", model: "" };
+  const valid = { name: "kb", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, citationCheck: true, maxContextLength: 4096, prompt: "", model: "" };
   for (const invalid of [{ name: "   " }, { topK: 0 }, { topK: 101 }, { topK: 2.5 }, { similarityThreshold: 1.5 }, { maxContextLength: 255 }, { maxContextLength: 300.5 }]) {
     const res = await app.inject({ method: "POST", url: "/api/admin/knowledge-bases", payload: { ...valid, ...invalid } });
     assertError(res, 400);
@@ -464,13 +464,13 @@ test("POST /api/admin/knowledge-bases — valid body → 201", async () => {
   app.post("/api/admin/knowledge-bases", async (_req, reply) =>
     reply.code(201).send({
       id: UUID, name: "kb", description: "", topK: 5, similarityThreshold: 0.7,
-      rerankEnabled: false, maxContextLength: 4096, prompt: "", model: "", createdAt: "2026-01-01", updatedAt: "2026-01-01",
+      rerankEnabled: false, citationCheck: true, maxContextLength: 4096, prompt: "", model: "", createdAt: "2026-01-01", updatedAt: "2026-01-01",
     }));
   await app.ready();
 
   const res = await app.inject({
     method: "POST", url: "/api/admin/knowledge-bases",
-    payload: { name: "kb", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, maxContextLength: 4096, prompt: "", model: "" },
+    payload: { name: "kb", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, citationCheck: true, maxContextLength: 4096, prompt: "", model: "" },
   });
   assert.equal(res.statusCode, 201);
   const body = res.json() as Record<string, unknown>;
@@ -485,7 +485,7 @@ test("PATCH /api/admin/knowledge-bases/:id — non-UUID → 400", async () => {
 
   const res = await app.inject({
     method: "PATCH", url: `/api/admin/knowledge-bases/${BAD_ID}`,
-    payload: { name: "x", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, maxContextLength: 4096, prompt: "", model: "" },
+    payload: { name: "x", description: "", topK: 5, similarityThreshold: 0.7, rerankEnabled: false, citationCheck: true, maxContextLength: 4096, prompt: "", model: "" },
   });
   assertError(res, 400);
 });
@@ -722,7 +722,7 @@ test("GET /api/admin/chat-logs — invalid rating enum → 400", async () => {
   app.get("/api/admin/chat-logs", async () => ({ logs: [], total: 0 }));
   await app.ready();
 
-  const res = await app.inject({ method: "GET", url: "/api/admin/chat-logs?rating=positive" });
+  const res = await app.inject({ method: "GET", url: "/api/admin/chat-logs?rating=invalid" });
   assertError(res, 400);
 });
 

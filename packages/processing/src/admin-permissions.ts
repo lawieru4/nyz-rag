@@ -6,7 +6,7 @@ export const ADMIN_PERMISSIONS = [
   "sources:view", "sources:manage",
   "documents:view", "documents:manage",
   "knowledge-bases:view", "knowledge-bases:manage",
-  "chat-logs:view",
+  "chat-logs:view", "chat-logs:manage",
   "users:view", "users:manage",
   "models:view", "models:manage",
   "audit-logs:view",

@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { ArrowUpRight, KeyRound, LogOut, Menu, SlidersHorizontal, Square, SquarePen, X } from "@lucide/vue";
 import type {
-  ChatFeedbackRating, ChatFeedbackRequest, KnowledgeStats,
+  ChatFeedbackRating, ChatFeedbackReason, ChatFeedbackRequest, KnowledgeStats,
   RetrievalFilters, UserAccount, UserSessionResponse,
 } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
@@ -223,12 +223,13 @@ async function copy(turn: ChatTurnState) {
   copyTimers.set(turn, setTimeout(() => { turn.copied = false; }, 2500));
 }
 
-async function sendFeedback(turn: ChatTurnState, rating: ChatFeedbackRating) {
-  if (!turn.id || turn.feedbackBusy || turn.rating) return;
+async function sendFeedback(turn: ChatTurnState, rating: ChatFeedbackRating | null, reasons: ChatFeedbackReason[] = []) {
+  if (!turn.id || turn.feedbackBusy) return;
   turn.feedbackBusy = true;
   try {
-    await api(`/api/messages/${turn.id}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating } satisfies ChatFeedbackRequest) });
+    await api(`/api/messages/${turn.id}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rating, reasons } satisfies ChatFeedbackRequest) });
     turn.rating = rating;
+    turn.feedbackReasons = rating === null ? [] : reasons;
   } catch {
     toast.error("评价提交失败，请稍后重试。");
   } finally {
@@ -302,7 +303,7 @@ function useSuggestion(text: string) {
               v-for="(turn, index) in turns" :key="turn.id ?? `pending-${index}`"
               :turn="turn" :is-last="index === turns.length - 1" :busy="busy"
               :active-citation="citing?.turn === index ? citing.citation : null"
-              @copy="copy(turn)" @retry="regenerate" @feedback="(rating) => sendFeedback(turn, rating)"
+              @copy="copy(turn)" @retry="regenerate" @feedback="(rating, reasons) => sendFeedback(turn, rating, reasons)"
               @source="(citation) => openSources(index, citation)"
             />
           </div>

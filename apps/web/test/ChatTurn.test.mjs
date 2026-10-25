@@ -73,7 +73,7 @@ function mount(t, overrides = {}) {
     },
     isLast: true, busy: false, activeCitation: 1,
     onCopy: () => events.push(["copy"]), onRetry: () => events.push(["retry"]),
-    onFeedback: (rating) => events.push(["feedback", rating]), onSource: (citation) => events.push(["source", citation]),
+    onFeedback: (...args) => events.push(["feedback", ...args]), onSource: (citation) => events.push(["source", citation]),
     ...overrides,
   });
   const root = node("root");
@@ -114,8 +114,39 @@ test("retry, copy and feedback reflect parent-controlled status", async (t) => {
   view.props.turn.rating = "positive";
   await nextTick();
   assert.ok(text(view.root).includes("感谢反馈"));
-  assert.equal(view.button("有帮助").props.disabled, true);
-  assert.equal(view.button("需要改进").props.disabled, true);
+  assert.equal(view.button("撤销有帮助").props.disabled, false);
+  assert.equal(view.button("撤销有帮助").props["aria-pressed"], true);
+  assert.equal(view.button("需要改进").props.disabled, false);
+  assert.equal(view.button("需要改进").props["aria-pressed"], false);
+  view.button("撤销有帮助").props.onClick();
+  view.button("需要改进").props.onClick();
+  assert.deepEqual(view.events, [["feedback", null], ["feedback", "negative"]]);
+  assert.equal(view.props.turn.rating, "positive", "actions wait for parent-controlled persistence");
+});
+
+test("negative feedback supports reversal, switching and reason toggles without mutating saved reasons", async (t) => {
+  const view = mount(t);
+  view.props.turn.rating = "negative";
+  view.props.turn.feedbackReasons = ["outdated"];
+  await nextTick();
+  assert.equal(view.button("撤销需要改进").props["aria-pressed"], true);
+  assert.equal(view.button("内容过时").props["aria-pressed"], true);
+  assert.equal(view.button("答案错误").props["aria-pressed"], false);
+  view.button("内容过时").props.onClick();
+  view.button("答案错误").props.onClick();
+  view.button("撤销需要改进").props.onClick();
+  view.button("有帮助").props.onClick();
+  assert.deepEqual(view.events, [["feedback", "negative", []], ["feedback", "negative", ["outdated", "incorrect-answer"]], ["feedback", null], ["feedback", "positive"]]);
+  assert.deepEqual(view.props.turn.feedbackReasons, ["outdated"]);
+  view.props.turn.feedbackBusy = true;
+  await nextTick();
+  for (const label of ["撤销需要改进", "有帮助", "资料未召回", "答案错误", "引用不符", "内容过时", "其他"]) assert.equal(view.button(label).props.disabled, true);
+  view.props.turn.feedbackBusy = false;
+  view.props.turn.rating = null;
+  view.props.turn.feedbackReasons = [];
+  await nextTick();
+  assert.equal(view.button("内容过时"), undefined);
+  assert.equal(view.button("需要改进").props["aria-pressed"], false);
 });
 
 test("streaming placeholder, stopped notice and unsaved actions retain their visibility rules", async (t) => {

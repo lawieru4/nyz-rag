@@ -5,7 +5,7 @@ export const PERMISSION_MODULES = [
   { module: "sources", label: "数据源", view: "数据源、同步任务与 token 状态", manage: "新建、同步、暂停数据源，设置文章 token" },
   { module: "documents", label: "文档管理", view: "文档、正文与切片", manage: "重新处理、向量化、删除文档" },
   { module: "knowledge-bases", label: "知识库", view: "检索参数", manage: "新建与编辑知识库" },
-  { module: "chat-logs", label: "问答记录", view: "问答记录与召回片段" },
+  { module: "chat-logs", label: "问答记录", view: "问答记录与召回片段", manage: "处理反馈、标注、人工审核与导出回归题" },
   { module: "users", label: "用户管理", view: "用户账号", manage: "停用与启用用户" },
   { module: "models", label: "模型配置", view: "供应商与业务模型", manage: "修改供应商、API Key 与业务模型" },
   { module: "audit-logs", label: "操作日志", view: "管理端操作、登录尝试与被拒绝的访问" },

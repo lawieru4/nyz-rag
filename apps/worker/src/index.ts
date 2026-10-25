@@ -8,7 +8,7 @@ import {
   embedChunks, embeddingInput, embeddingRetryDelay, embeddingRetryDelays, failOperation, getModelSelection, getSource, getSourceSyncState, getSummaryInput, getTaskByOperation,
   LeaseLostError, listArticleVersions, listDocumentChunks, listDueOperations, listMissingSummaryEmbeddings, listStaleDispatched, lockDocument, lockEmbeddingTarget, markDispatched, markSourceSynced, migrate,
   modelAdmissionConfig, normalizeUrl, operationJobId, processDocument, pruneOperations, readSecretSetting, recoverExpiredOperations, reindexChunkSearchTerms, reindexDocumentMetadataTerms,
-  renewLease, requeueOperation, requireEmbeddingModel, saveDocumentEmbeddings, saveOwnedSyncState, saveSummaryEmbedding, scheduleEmbeddings, setEmbeddingState, startTask, syncArticles,
+   renewLease, requeueOperation, requireEmbeddingModel, saveDocumentEmbeddings, saveOwnedSyncState, saveSummaryEmbedding, scheduleDueSources, scheduleEmbeddings, setEmbeddingState, startTask, syncArticles,
   touchDispatched, updateTask, upsertDocument, withDocumentWork, withTransaction, type ClaimedOperation, type Database, type Executor, type OperationRef,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
@@ -30,6 +30,7 @@ const MAX_OPERATION_ATTEMPTS = 3;
 const DISPATCH_INTERVAL_MS = 1000;
 const sweepIntervalMs = Math.max(DISPATCH_INTERVAL_MS, leaseMs / 4);
 const PRUNE_INTERVAL_MS = 60 * 60_000;
+const SOURCE_SCHEDULE_INTERVAL_MS = 30_000;
 const owner = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 
 const queueName = process.env.DOCUMENT_QUEUE_NAME ?? "document-processing";
@@ -336,6 +337,7 @@ worker.on("completed", (job) => console.info(`Job ${job.id} completed`));
 worker.on("failed", (job, error) => console.error(`Job ${job?.id} failed`, error.message));
 
 every(DISPATCH_INTERVAL_MS, "Operation dispatch", dispatchDue);
+every(SOURCE_SCHEDULE_INTERVAL_MS, "Source scheduling", () => scheduleDueSources());
 every(sweepIntervalMs, "Operation sweep", sweep);
 every(PRUNE_INTERVAL_MS, "Operation pruning", () => pruneOperations(10, 30 * 24 * 60 * 60_000));
 

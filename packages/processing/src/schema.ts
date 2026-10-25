@@ -2,6 +2,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
+  ChatFeedbackReason, ChatReviewInput,
   AdminAuditResult, ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
 } from "@nyz-rag/types";
 
@@ -217,6 +218,8 @@ export const knowledgeBases = pgTable("knowledge_bases", {
   topK: integer().notNull(),
   similarityThreshold: doublePrecision().notNull(),
   rerankEnabled: boolean().notNull().default(false),
+  // 引用校验：开启时使用严格引用提示词并在生成后校验引用编号，关闭时为宽松提示词、非空回答即采用。
+  citationCheck: boolean().notNull().default(true),
   maxContextLength: integer().notNull(),
   prompt: text().notNull().default(""),
   model: text().notNull().default(""),
@@ -368,6 +371,12 @@ export const chatMessages = pgTable("chat_messages", {
   promptTokens: integer(),
   completionTokens: integer(),
   rating: text().$type<ChatFeedbackRating>(),
+  feedbackReasons: jsonb().$type<ChatFeedbackReason[]>().notNull().default([]),
+  review: jsonb().$type<ChatReviewInput>(),
+  reviewRevision: integer().notNull().default(0),
+  approvedRevision: integer(),
+  approvedBy: text(),
+  approvedAt: timestamptz(),
   createdAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
   index("chat_messages_created_at_idx").on(table.createdAt.desc()),

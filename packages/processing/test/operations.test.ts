@@ -9,7 +9,9 @@ import {
   markDispatched, operationJobId, pruneOperations, recoverExpiredOperations, renewLease, requeueOperation, saveOwnedSyncState, touchDispatched,
 } from "../src/operations.js";
 import { processDocument } from "../src/process.js";
-import { createSource, createTask, deleteDocument, requestDocumentOperation, scheduleEmbeddings, upsertDocument } from "../src/repository.js";
+import { createSource, createTask, deleteDocument, getSourceSyncState, markSourceSynced, requestDocumentOperation, scheduleDueSources, scheduleEmbeddings, updateSourceStatus, updateTask, upsertDocument } from "../src/repository.js";
+import { syncArticles } from "../src/article/sync.js";
+import { ArticleApiError } from "../src/article/client.js";
 import { ARTICLE_LIST_URL, articleDocument } from "./article-fixtures.js";
 
 const LEASE = 60_000;
@@ -122,6 +124,93 @@ test("operations: outbox writes, dispatch, claims, leases, retries, recovery and
     await withTransaction((tx) => scheduleEmbeddings(tx, [other]));
     assert.equal((await row("SELECT count(*)::int AS count FROM operations WHERE target_id = $1 AND status = 'pending'", [other])).count, 1);
     assert.equal((await row("SELECT embedding_status FROM documents WHERE id = $1", [other])).embedding_status, "queued");
+
+    // 调度只运行已启用且频率可识别的来源；并发 Worker 与手动同步复用同一个事务/outbox。
+    const scheduled = await createSource({ name: "Scheduled", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "每小时" });
+    const paused = await createSource({ name: "Paused", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "每天" });
+    const manual = await createSource({ name: "Manual", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "手动" });
+    const blank = await createSource({ name: "Blank", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "" });
+    const unknown = await createSource({ name: "Unknown", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "daily" });
+    for (const item of [scheduled, manual, blank, unknown]) await updateSourceStatus(item.id, "运行中");
+    assert.deepEqual(await Promise.all([scheduleDueSources(), scheduleDueSources()]).then((counts) => counts.sort()), [0, 1]);
+    const taskCount = async (id: string) => (await row("SELECT count(*)::int AS count FROM crawl_tasks WHERE source_id = $1", [id])).count;
+    assert.equal(await taskCount(scheduled.id), 1);
+    for (const item of [paused, manual, blank, unknown]) assert.equal(await taskCount(item.id), 0);
+    assert.equal(await scheduleDueSources(), 0, "active work is not duplicated");
+    const finishScheduled = async (failure: boolean) => {
+      const ref = (await activeOperation("source", scheduled.id))!;
+      const claimed = (await claimOperation(ref.id, ref.step, "scheduler-test", LEASE))!;
+      await withTransaction(async (tx) => {
+        if (failure) await failOperation(tx, claimed, "token invalid");
+        else {
+          await completeOperation(tx, claimed);
+          await markSourceSynced(scheduled.id, tx);
+          const current = await row("SELECT id FROM crawl_tasks WHERE operation_id = $1", [ref.id]);
+          await updateTask(current.id, { status: "已完成" }, tx);
+        }
+      });
+    };
+    await finishScheduled(true);
+    assert.equal(await scheduleDueSources(), 0, "a failed task consumes its cadence, even with no successful sync");
+    const ageTasks = (hours: number) => getPool().query("UPDATE crawl_tasks SET created_at = now() - $2 * interval '1 hour' WHERE source_id = $1", [scheduled.id, hours]);
+    for (const [frequency, hours] of [["每小时", 1], ["每 6 小时", 6], ["每天", 24]] as const) {
+      await getPool().query("UPDATE data_sources SET frequency = $2 WHERE id = $1", [scheduled.id, frequency]);
+      await ageTasks(hours - 0.01);
+      assert.equal(await scheduleDueSources(), 0, `${frequency}: not yet due`);
+      await ageTasks(hours + 0.01);
+      assert.equal(await scheduleDueSources(), 1, `${frequency}: due after a failure`);
+      await finishScheduled(true);
+      assert.equal(await scheduleDueSources(), 0, "repeated scheduler ticks do not create endless failed tasks");
+    }
+    await ageTasks(25);
+    await updateSourceStatus(scheduled.id, "已暂停");
+    assert.equal(await createTask(scheduled, { scheduled: true }), null, "stale scheduler candidates recheck pause under lock");
+    await updateSourceStatus(scheduled.id, "运行中");
+    const beforeRace = await taskCount(scheduled.id);
+    const race = await Promise.all([scheduleDueSources(), createTask(scheduled), scheduleDueSources()]);
+    assert.equal(await taskCount(scheduled.id), beforeRace + 1, "manual and scheduled races create one task/outbox pair");
+    assert.ok(race.some(Boolean));
+    await finishScheduled(false);
+    await ageTasks(25);
+    assert.equal(await scheduleDueSources(), 0, "successful completion anchors the next interval for long tasks");
+    await getPool().query("UPDATE data_sources SET synced_at = now() - interval '25 hours' WHERE id = $1", [scheduled.id]);
+    assert.equal(await scheduleDueSources(), 1, "durable database times remain due across scheduler invocations");
+    await finishScheduled(true);
+    await ageTasks(25);
+    await getPool().query("UPDATE data_sources SET frequency = '手动' WHERE id = $1", [scheduled.id]);
+    assert.equal(await createTask(scheduled, { scheduled: true }), null, "stale candidates recheck frequency");
+    assert.equal(await scheduleDueSources(), 0);
+    assert.ok(await createTask(scheduled), "manual sources still accept explicit sync");
+    await finishScheduled(true);
+
+    // 完整列表遍历也不是删除确认：缺席、404 和权限错误均保留现有正文与切片。
+    const safe = await createSource({ name: "Safety", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "手动" });
+    await withTransaction(async (tx) => {
+      for (const key of ["absent", "404", "permission"]) {
+        const id = await upsertDocument(tx, articleDocument(safe.id, key, key, `${key}的历史内容。`));
+        await processDocument(tx, id);
+      }
+    });
+    const snapshot = async () => (await getPool().query("SELECT d.*, (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM document_chunks c WHERE c.document_id = d.id) AS chunks FROM documents d WHERE d.source_id = $1 ORDER BY d.id", [safe.id])).rows;
+    const original = await snapshot();
+    const safeTask = (await createTask(safe))!;
+    const safeRef = (await activeOperation("source", safe.id))!;
+    const safeClaim = (await claimOperation(safeRef.id, 0, "safety-test", LEASE))!;
+    await assert.rejects(syncArticles({
+      state: { backfillDone: true }, known: new Map(), limit: 10, overlapPages: 1,
+      client: { list: async () => ({ items: [{ _key: "404" }, { _key: "permission" }] }) }, pause: async () => {},
+      process: async (item) => { throw new ArticleApiError(item._key === "404" ? "HTTP 404" : "permission denied", item._key !== "404"); },
+      saveState: (state) => saveOwnedSyncState(safeClaim, safe.id, state),
+    }), /permission denied/);
+    assert.deepEqual((await getSourceSyncState(safe.id)).retryKeys, ["404", "permission"]);
+    await syncArticles({
+      state: await getSourceSyncState(safe.id), known: new Map(), limit: 10, overlapPages: 1,
+      client: { list: async () => ({ items: [] }) }, pause: async () => {}, process: async () => assert.fail("no details"),
+      saveState: (state) => saveOwnedSyncState(safeClaim, safe.id, state),
+    });
+    assert.ok((await getSourceSyncState(safe.id)).lastFullInspectionAt);
+    assert.deepEqual(await snapshot(), original, "even a complete traversal with missing articles leaves all local data intact");
+    await withTransaction(async (tx) => { await completeOperation(tx, safeClaim); await updateTask(safeTask.id, { status: "已完成" }, tx); });
 
     // 已投递但队列中没有 job（Redis 数据丢失）的操作由投递器确认后重新投递。
     const lost = (await activeOperation("document", other))!;

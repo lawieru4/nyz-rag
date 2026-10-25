@@ -7,6 +7,7 @@ import { summaryEmbeddingInput } from "../src/chunking.js";
 import { buildAnswerContext, buildChatMessages, buildSectionContext, extractiveAnswer, NO_MATCH_ANSWER, retrieve, retrievedChunkRecords, SUMMARY_RECALL_LIMIT, type ChunkHit, type SectionContext } from "../src/rag.js";
 import { metadataScore, metadataSearchFields, metadataSearchTerms, metadataTermWeights, searchTerms, termCounts } from "../src/search-terms.js";
 import { noopLimiter } from "./admission-helpers.js";
+import { INSUFFICIENT_EVIDENCE_ANSWER } from "../src/citations.js";
 
 const hit = (chunkId: string, score: number, overrides: Partial<ChunkHit> = {}): ChunkHit => ({
   chunkId, documentId: `doc-${chunkId}`, title: `标题${chunkId}`, url: `https://example.test/${chunkId}`, content: `正文${chunkId}`, context: `文章：标题${chunkId}`,
@@ -182,6 +183,8 @@ test("answer context groups citations by article and respects the length limit",
   const [system, user] = buildChatMessages("", "如何提升寿命？", context);
   assert.equal(system.role, "system");
   assert.match(system.content, /\[1\]/);
+  assert.ok(system.content.includes(INSUFFICIENT_EVIDENCE_ANSWER));
+  for (const rule of ["至少有一个引用", "禁止引用不存在的编号", "仅回答有依据的部分", "无法回答的部分", "请求用户澄清", "只输出固定句子"]) assert.ok(system.content.includes(rule), rule);
   assert.match(user.content, /^参考资料：\n\n\[1\] 《文章一》 章节：结论\n甲+/);
   assert.match(user.content, /问题：如何提升寿命？$/);
   assert.doesNotMatch(system.content, /之前的对话/);
@@ -195,7 +198,17 @@ test("answer context groups citations by article and respects the length limit",
   assert.match(withHistory[0].content, /之前的对话/);
   assert.match(withHistory[7].content, /^参考资料：[\s\S]*问题：它的寿命呢？$/);
   assert.match(extractiveAnswer(context), /\[1\] 《文章一》：甲+/);
+  assert.match(extractiveAnswer(context), /未验证其是否足以回答问题，也不代表已核实的答案/);
   assert.equal(extractiveAnswer({ chunks: [], sources: [] }), NO_MATCH_ANSWER);
+
+  // 引用校验关闭：宽松的回答要求与原文片段说明。
+  const [lenient] = buildChatMessages("", "如何提升寿命？", context, [], false);
+  assert.match(lenient.content, /资料不足以回答时明确说明/);
+  assert.match(lenient.content, /\[1\] 或 \[1\]\[2\]/);
+  assert.ok(!lenient.content.includes(INSUFFICIENT_EVIDENCE_ANSWER), "no fixed refusal sentence");
+  for (const rule of ["至少有一个引用", "请求用户澄清", "只输出固定句子"]) assert.ok(!lenient.content.includes(rule), rule);
+  assert.match(extractiveAnswer(context, false), /^以下是知识库中最相关的原文片段（未经模型生成）：\n\n\[1\] 《文章一》：甲+/);
+  assert.equal(extractiveAnswer({ chunks: [], sources: [] }, false), NO_MATCH_ANSWER);
   assert.deepEqual(retrievedChunkRecords(context)[0], { chunkId: "a", documentId: "doc-1", citation: 1, title: "文章一", sectionPath: ["结论"], excerpt: "甲".repeat(40), score: 0 });
 });
 

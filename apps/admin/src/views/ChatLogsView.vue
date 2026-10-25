@@ -18,11 +18,13 @@ import ChatLogSheet from "./ChatLogSheet.vue";
 import { chatLogOwner, ratingLabel } from "./chat-logs";
 
 const rating = ref("");
+const status = ref("");
 const selected = ref<ChatLogRecord | null>(null);
 const { items: logs, total, query, page, loading, load: loadChatLogs, search, filter } = usePaginatedList<ChatLogRecord>({
   pageSize,
   async fetch(params, signal) {
     if (rating.value) params.set("rating", rating.value);
+    if (status.value) params.set("status", status.value);
     const data = await client.request<ChatLogListResponse>(`/api/admin/chat-logs?${params}`, { signal });
     return { items: data.logs, total: data.total };
   },
@@ -40,7 +42,8 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
         <Search class="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
         <Input v-model="query" class="pl-8" placeholder="搜索问题、回答、来源或用户邮箱" aria-label="搜索问答记录" @input="search" />
       </label>
-      <FilterSelect v-model="rating" label="筛选评价" all-label="全部评价" :options="[{ value: 'rated', label: '已评价' }, { value: 'unrated', label: '未评价' }]" @update:model-value="filter" />
+      <FilterSelect v-model="rating" label="筛选评价" all-label="全部评价" :options="[{ value: 'positive', label: '好评' }, { value: 'negative', label: '差评' }, { value: 'rated', label: '已评价' }, { value: 'unrated', label: '未评价' }]" @update:model-value="filter" />
+      <FilterSelect v-model="status" label="筛选处理状态" all-label="全部处理状态" :options="[{ value: 'new', label: '待处理' }, { value: 'investigating', label: '核查中' }, { value: 'resolved', label: '已解决' }, { value: 'dismissed', label: '不处理' }]" @update:model-value="filter" />
     </div>
     <!-- 手机端（<768px）用下方的摘要列表，完整问答与引用在详情抽屉 -->
     <Table class="min-w-[750px]" container-class="max-md:hidden">
@@ -76,5 +79,5 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
     <EmptyState v-else-if="!logs.length">没有符合条件的问答记录</EmptyState>
     <ListPager v-model:page="page" :total="total" unit="条" :disabled="loading" class="mt-auto" @update:page="loadChatLogs" />
   </Card>
-  <ChatLogSheet :log="selected" @close="selected = null" />
+  <ChatLogSheet :log="selected" @close="selected = null" @saved="loadChatLogs" />
 </template>

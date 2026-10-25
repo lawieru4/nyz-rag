@@ -9,7 +9,7 @@ const record: ChatSessionRecord = { id: "session-1", title: "History", messageCo
 const saved: ChatSessionMessage = {
   id: "message-1", question: "Question", answer: "Original answer", answerMode: "generated",
   sources: [{ documentId: "doc-1", title: "Article", url: "https://example.com", excerpts: [{ sectionPath: ["Section"], text: "Evidence" }] }],
-  rating: "positive", createdAt: "2026-10-24",
+  rating: "negative", feedbackReasons: ["outdated", "citation-mismatch"], createdAt: "2026-10-24",
 };
 
 function apiError(status: number) {
@@ -137,14 +137,17 @@ test("stop leaves an unsaved turn, blocks session changes while streaming, and n
   assert.equal(h.chat.turns.value[0].question, "Second");
 });
 
-for (const failure of ["error", "incomplete", "abort"] as const) {
-  test(`regeneration restores the saved answer, sources and rating after ${failure}`, async (t) => {
+for (const failure of ["error", "incomplete", "abort"] as const) for (const legacy of [false, true]) {
+  test(`regeneration restores saved answer, sources, rating and ${legacy ? 'legacy empty' : 'selected'} reasons after ${failure}`, async (t) => {
     const h = await setup();
     t.after(() => h.scope.stop());
     await h.chat.openSession(record.id);
+    if (legacy) delete h.chat.turns.value[0].feedbackReasons;
+    const previous = structuredClone({ ...saved, feedbackReasons: legacy ? [] : saved.feedbackReasons });
     h.setStream(async (_, callbacks) => {
       assert.equal(h.chat.turns.value[0].answer, "");
       assert.equal(h.chat.turns.value[0].rating, null);
+      assert.deepEqual(h.chat.turns.value[0].feedbackReasons, [], "old reasons are hidden during replacement generation");
       callbacks.onEvent({ event: "token", data: { content: "Replacement" } });
       if (failure === "error") callbacks.onEvent({ event: "error", data: { error: "Model failed" } });
       else if (failure === "incomplete") callbacks.onIncomplete("Disconnected");
@@ -153,21 +156,29 @@ for (const failure of ["error", "incomplete", "abort"] as const) {
     await h.chat.regenerate();
     assert.deepEqual(JSON.parse(String(h.streams[0].init.body)), { regenerate: saved.id });
     assert.deepEqual(h.chat.turns.value[0], {
-      ...saved, streaming: false, copied: false, notice: "重新生成未完成，已保留原回答。",
+      ...previous, streaming: false, copied: false, notice: "重新生成未完成，已保留原回答。",
     });
+    assert.deepEqual(saved.feedbackReasons, ["outdated", "citation-mismatch"], "snapshot and reset do not mutate saved reasons");
     assert.equal(h.chat.busy.value, false);
   });
 }
 
-test("successful regeneration replaces the saved turn and clears its feedback", async (t) => {
+for (const suppliedReasons of [false, true]) test(`successful regeneration clears old feedback when done ${suppliedReasons ? 'supplies' : 'omits'} empty reasons`, async (t) => {
   const h = await setup();
   t.after(() => h.scope.stop());
   await h.chat.openSession(record.id);
-  const replacement = { ...saved, id: "message-2", answer: "New answer", rating: null };
-  h.setStream(async (_, callbacks) => { callbacks.onEvent({ event: "done", data: replacement }); });
+  assert.deepEqual(h.chat.turns.value[0].feedbackReasons, ["outdated", "citation-mismatch"]);
+  const replacement: ChatSessionMessage = { ...saved, id: "message-2", answer: "New answer", rating: null, feedbackReasons: [] };
+  if (!suppliedReasons) delete replacement.feedbackReasons;
+  h.setStream(async (_, callbacks) => {
+    assert.equal(h.chat.turns.value[0].rating, null);
+    assert.deepEqual(h.chat.turns.value[0].feedbackReasons, []);
+    callbacks.onEvent({ event: "done", data: replacement });
+  });
   await h.chat.regenerate();
   assert.equal(h.chat.turns.value.length, 1);
-  assert.deepEqual(h.chat.turns.value[0], { ...replacement, streaming: false, copied: false, notice: undefined });
+  assert.deepEqual(h.chat.turns.value[0], { ...replacement, feedbackReasons: [], streaming: false, copied: false, notice: undefined });
+  assert.deepEqual(saved.feedbackReasons, ["outdated", "citation-mismatch"]);
 });
 
 test("unsaved turns retry as a question and incomplete streams retain their notice", async (t) => {

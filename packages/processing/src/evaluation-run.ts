@@ -1,5 +1,6 @@
 // 检索评估运行（hybrid 模式）：按变体裁剪 retrieve() 的依赖，得到文章排名与回答上下文，计算第七节的指标，并对比两次运行。方案见 docs/evaluation-plan.md 第七、八节。
 import type { CorpusSnapshot, EvaluationLabel, EvaluationQuestion, QuestionType, Specificity, Split } from "./evaluation.js";
+import { assertSupportedEvaluationInputs } from "./evaluation.js";
 import type { RunAdjudication } from "./evaluation-adjudication.js";
 import { buildAnswerContext, buildSectionContext, CANDIDATE_LIMIT, retrieve, type AnswerContext, type RetrievalDependencies, type RetrievalSettings, type SectionContext } from "./rag.js";
 
@@ -186,9 +187,10 @@ export async function runVariant(...args: Parameters<typeof runVariantWithContex
 
 /** 同 runVariant，另返回组装好的回答上下文，供回答层评估送入 Chat 模型。 */
 export async function runVariantWithContext(
-  question: Pick<EvaluationQuestion, "question" | "type" | "labels">, variant: RetrievalVariant, settings: RetrievalSettings,
+  question: Pick<EvaluationQuestion, "question" | "type" | "labels"> & Partial<Pick<EvaluationQuestion, "id" | "history" | "filters">>, variant: RetrievalVariant, settings: RetrievalSettings,
   dependencies: RetrievalDependencies, articleKeyOf: (documentId: string) => string, context: ContextOptions = { mode: "topk" },
 ): Promise<{ result: VariantResult; context: AnswerContext }> {
+  assertSupportedEvaluationInputs([{ ...question, id: question.id ?? "question", history: question.history ?? [], filters: question.filters ?? null } as EvaluationQuestion]);
   const started = performance.now();
   const { chunks, warnings } = await retrieve(question.question, { ...settings, topK: RANKING_DEPTH, rerankEnabled: variant === "rerank" }, variantDependencies(variant, dependencies));
   const retrievalMs = round(performance.now() - started, 1);

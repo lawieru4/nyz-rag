@@ -13,6 +13,9 @@ export interface ArticleSyncOptions {
   limit: number;
   overlapPages: number;
   perPage?: number;
+  /** 完成回填后默认每 7 天全量刷新详情；用完成时间而不是任务次数计算。 */
+  fullInspectionIntervalMs?: number;
+  now?: () => Date;
   /** 获取详情并入库；抛出非 fatal 错误时记录失败并继续。 */
   process: (item: ArticleListItem) => Promise<void>;
   saveState: (state: ArticleSourceSyncState) => Promise<void>;
@@ -37,9 +40,24 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
   const { client, known, limit, overlapPages } = options;
   const perPage = options.perPage ?? 10;
   const state: ArticleSourceSyncState = { ...options.state };
+  const now = options.now ?? (() => new Date());
+  const fullInterval = options.fullInspectionIntervalMs ?? 7 * 24 * 60 * 60_000;
+  if (state.backfillDone && !state.fullInspection &&
+      (!state.lastFullInspectionAt || now().getTime() - Date.parse(state.lastFullInspectionAt) >= fullInterval)) {
+    state.fullInspection = { page: 1, completedKeys: [] };
+  } else if (state.fullInspection) {
+    state.fullInspection = { ...state.fullInspection, completedKeys: [...state.fullInspection.completedKeys] };
+  }
   const result: ArticleSyncResult = { processed: 0, failures: [], pages: 0, limitReached: false };
   const failedKeys = new Set<string>();
   const done = new Set<string>();
+  const previousRetries = state.retryKeys ?? [];
+  const checkpoint = async () => {
+    const retry = [...failedKeys, ...previousRetries.filter((key) => !done.has(key))];
+    if (retry.length) state.retryKeys = [...new Set(retry)].slice(0, MAX_RETRY_KEYS);
+    else delete state.retryKeys;
+    await options.saveState(state);
+  };
   // 列表与详情请求之间统一限速，第一次请求不等待。
   let requests = 0;
   const paced = async <T>(run: () => Promise<T>) => { if (requests++ > 0) await options.pause(); return run(); };
@@ -53,7 +71,7 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
       await paced(() => options.process(item));
       result.processed += 1;
     } catch (error) {
-      if (error instanceof ArticleApiError && error.fatal) throw error;
+      if (error instanceof ArticleApiError && error.fatal) { failedKeys.add(item._key); throw error; }
       result.failures.push({ articleKey: item._key, error: errorText(error) });
       failedKeys.add(item._key);
     }
@@ -63,8 +81,34 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
   const changed = (item: ArticleListItem) => !known.has(item._key) || (item.updateTime !== undefined && known.get(item._key) !== item.updateTime);
 
   try {
-    // 上次失败的文章先重试。
-    for (const key of state.retryKeys ?? []) if (!await handle({ _key: key })) return result;
+    if (state.fullInspection) {
+      // 全量巡检不使用 quietPages，也不依赖 updateTime。只刷新成功取得的详情，不推断删除。
+      const cursor = state.fullInspection;
+      // 巡检优先前进，避免失败重试耗尽每次预算、永久饿死历史页扫描。
+      await checkpoint();
+      while (true) {
+        const { items, total } = await paced(() => client.list(cursor.page, perPage));
+        result.pages += 1;
+        if (cursor.page === 1 && total !== undefined) state.remoteTotal = total;
+        if (!items.length) {
+          delete state.fullInspection;
+          state.lastFullInspectionAt = now().toISOString();
+          return result;
+        }
+        for (const item of items) {
+          if (cursor.completedKeys.includes(item._key)) continue;
+          if (!await handle(item)) return result;
+          cursor.completedKeys.push(item._key);
+          await checkpoint();
+        }
+        cursor.page += 1;
+        cursor.completedKeys = [];
+        await checkpoint();
+      }
+    }
+
+    // 增量同步优先重试；巡检中的失败保留到后续同步，不影响完整列表遍历。
+    for (const key of previousRetries) if (!await handle({ _key: key })) return result;
 
     let page = 1;
     let quietPages = 0;
@@ -74,7 +118,12 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
       result.pages += 1;
       // 第 1 页的总数代表接口当前的文章规模，供管理端对比已入库数量。
       if (page === 1 && total !== undefined) state.remoteTotal = total;
-      if (!items.length) { state.backfillDone = true; delete state.backfillPage; break; }
+      if (!items.length) {
+        if (!state.backfillDone) state.lastFullInspectionAt = now().toISOString();
+        state.backfillDone = true;
+        delete state.backfillPage;
+        break;
+      }
       let pageChanged = false;
       for (const item of items) {
         if (!changed(item)) continue;
@@ -98,9 +147,6 @@ export async function syncArticles(options: ArticleSyncOptions): Promise<Article
     }
     return result;
   } finally {
-    const retry = [...failedKeys, ...(state.retryKeys ?? []).filter((key) => !done.has(key))];
-    if (retry.length) state.retryKeys = [...new Set(retry)].slice(0, MAX_RETRY_KEYS);
-    else delete state.retryKeys;
-    await options.saveState(state);
+    await checkpoint();
   }
 }

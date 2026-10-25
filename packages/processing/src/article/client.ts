@@ -23,6 +23,9 @@ export interface ArticleClient {
   articleUrl(articleKey: string): string;
 }
 
+/** 文章在能知站点上的页面（「打开原文」与问答引用的链接），与接口域名无关。 */
+export const ARTICLE_PAGE_URL = "https://nyz.nenghe.com/article-detail";
+
 /** fatal 表示继续请求也不会成功（如 token 失效），应中止整次同步。 */
 export class ArticleApiError extends Error {
   constructor(message: string, readonly fatal = false) {
@@ -81,7 +84,7 @@ export function createArticleClient(options: { listUrl: string; token: string; t
       return data;
     },
     articleUrl(articleKey) {
-      return new URL(`/ArticleDetail?id=${encodeURIComponent(articleKey)}`, listUrl.origin).toString();
+      return `${ARTICLE_PAGE_URL}?id=${encodeURIComponent(articleKey)}`;
     },
   };
 }

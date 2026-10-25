@@ -37,9 +37,9 @@ export interface UpdateAdminRequest {
   roleId?: string | null;
 }
 
-/** 管理端权限：模块 × 查看/管理，管理包含查看。问答记录与操作日志只读。 */
+/** 管理端权限：模块 × 查看/管理，管理包含查看。操作日志只读。 */
 export type AdminPermissionModule = "sources" | "documents" | "knowledge-bases" | "chat-logs" | "users" | "models" | "audit-logs";
-type ViewOnlyModule = "chat-logs" | "audit-logs";
+type ViewOnlyModule = "audit-logs";
 export type AdminPermission = `${Exclude<AdminPermissionModule, ViewOnlyModule>}:${"view" | "manage"}` | `${ViewOnlyModule}:view`;
 
 /** 管理端操作日志的结果：成功、被拒绝（未登录或无权限）、失败（其他错误）。 */
@@ -232,6 +232,7 @@ export interface ChatSessionMessage {
   answerMode: ChatAnswerMode;
   sources: ChatSource[];
   rating: ChatFeedbackRating | null;
+  feedbackReasons?: ChatFeedbackReason[];
   createdAt: string;
 }
 
@@ -480,6 +481,10 @@ export interface ArticleSourceSyncState {
   retryKeys?: string[];
   /** 最近一次同步时接口返回的文章总数。 */
   remoteTotal?: number;
+  /** 最近一次完整遍历列表的完成时间；不是远端删除/撤稿确认。 */
+  lastFullInspectionAt?: string;
+  /** 全量详情巡检的断点；页内已尝试的文章避免单次上限小于一页时重复刷新而无法前进。 */
+  fullInspection?: { page: number; completedKeys: string[] };
 }
 
 export interface KnowledgeStats {
@@ -527,6 +532,8 @@ export interface KnowledgeBaseRecord {
   topK: number;
   similarityThreshold: number;
   rerankEnabled: boolean;
+  /** 开启时使用严格引用提示词，并拒收无引用（固定拒答除外）或含越界编号的生成回答。 */
+  citationCheck: boolean;
   maxContextLength: number;
   prompt: string;
   model: string;
@@ -537,6 +544,34 @@ export interface KnowledgeBaseRecord {
 export type SaveKnowledgeBaseRequest = Omit<KnowledgeBaseRecord, "id" | "createdAt" | "updatedAt">;
 
 export type ChatFeedbackRating = "positive" | "negative";
+export type ChatFeedbackReason = "missing-evidence" | "incorrect-answer" | "citation-mismatch" | "outdated" | "other";
+export type ChatTriageStatus = "new" | "investigating" | "resolved" | "dismissed";
+
+/** Independent, manually sanitized annotation; never an automatic replay of a log. */
+export interface EvaluationCandidate {
+  question: string;
+  answer?: string;
+  history: Array<{ question: string; answer: string }>;
+  filters: RetrievalFilters | null;
+  type: "fact" | "mechanism" | "compare" | "metadata" | "term" | "followup" | "unanswerable";
+  split: "dev" | "test";
+  answerable: boolean;
+  labels: Array<{ articleKey: string; relevance: 0 | 1 | 2 | 3; evidence: string[] }>;
+}
+
+export interface ChatReviewInput {
+  status: ChatTriageStatus;
+  reasons: ChatFeedbackReason[];
+  notes: string;
+  correctedAnswer: string;
+  candidate: EvaluationCandidate | null;
+}
+
+export interface ChatReviewRecord extends ChatReviewInput {
+  revision: number;
+  approvedRevision: number | null;
+  approvedAt: string | null;
+}
 
 /** 送入模型的召回片段及各路得分。 */
 export interface ChatRetrievedChunk {
@@ -580,6 +615,7 @@ export interface ChatLogRecord {
   sources: ChatSource[];
   chunks: ChatRetrievedChunk[];
   rating: ChatFeedbackRating | null;
+  feedbackReasons?: ChatFeedbackReason[];
   createdAt: string;
 }
 
@@ -589,7 +625,8 @@ export interface ChatLogListResponse {
 }
 
 export interface ChatFeedbackRequest {
-  rating: ChatFeedbackRating;
+  rating: ChatFeedbackRating | null;
+  reasons?: ChatFeedbackReason[];
 }
 
 /** 模型供应商只描述连接（地址与密钥），具体使用哪个模型在业务模型配置（ModelSettingRecord）中选择。 */
