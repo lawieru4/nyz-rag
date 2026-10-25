@@ -280,7 +280,7 @@ test("article client builds URLs, keeps the token out of errors and stops on inv
   assert.equal(calls[1].pathname, "/api/article/articleDetail");
   assert.equal(calls[1].searchParams.get("tagKey"), null);
   await assert.rejects(client.detail("x"), (error: unknown) => error instanceof ArticleApiError && !error.fatal && !error.message.includes(token));
-  assert.equal(client.articleUrl("42"), "https://x.test/ArticleDetail?id=42");
+  assert.equal(client.articleUrl("42"), "https://nyz.nenghe.com/article-detail?id=42");
 });
 
 function listClient(pages: ArticleListItem[][], total = pages.flat().length) {
