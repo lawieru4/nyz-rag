@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>能知 · 字体与色彩提案</title>
+  <style>
+    :root {
+      --canvas: #f6f7f4; --surface: #fff; --panel: #eef1eb;
+      --ink: #24312b; --body: #36443c; --muted: #59675e;
+      --line: #dce2d8; --primary: #425c3b; --lime: #dff16e;
+      --soft: #edf2e5; --success: #326347; --warning: #855b1e; --danger: #a13d35;
+      --sans: "DM Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "DM Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--sans); font-size: 14px; -webkit-font-smoothing: antialiased; }
+    button, input, textarea { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { cursor: pointer; }
+    button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+    a { color: inherit; }
+    h1, h2, h3, p { margin: 0; }
+    svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .mono, .eyebrow { font-family: var(--mono); }
+    .eyebrow { font-size: 11px; letter-spacing: .13em; color: var(--muted); }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .between { justify-content: space-between; }
+    .btn { border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); min-height: 38px; padding: 8px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }
+    .btn.primary { background: var(--primary); border-color: var(--primary); color: white; }
+    .btn.ink { background: var(--ink); border-color: var(--ink); color: white; }
+    .tag { display: inline-flex; align-items: center; gap: 6px; border-radius: 4px; padding: 4px 8px; background: var(--soft); color: var(--primary); font-size: 12px; white-space: nowrap; }
+    .tag.success { color: var(--success); background: #eaf3ed; }
+    .tag.warning { color: var(--warning); background: #fbf1df; }
+    .tag.danger { color: var(--danger); background: #f9eeeb; }
+    .dot { width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
+    .logo { width: 115px; height: 39px; object-fit: contain; }
+    .toolbar { height: 52px; padding: 0 32px; display: flex; align-items: center; justify-content: space-between; background: #24312b; color: #fff; gap: 16px; }
+    .toolbar .label { font-size: 12px; color: #d5ddd5; }
+    .tabs { display: flex; gap: 6px; }
+    .tabs a { padding: 7px 13px; border-radius: 5px; text-decoration: none; font-size: 12px; color: #d5ddd5; }
+    .tabs a[aria-current="page"] { background: #dff16e; color: #24312b; }
+    .view { display: none; }
+    body[data-view="guide"] #guide, body[data-view="client"] #client, body[data-view="admin"] #admin { display: block; }
+    .guide { max-width: 1440px; margin: auto; padding: 38px 48px 28px; }
+    .guide-heading { display: flex; justify-content: space-between; gap: 30px; align-items: flex-end; margin-bottom: 26px; }
+    .guide h1 { font-size: 36px; font-weight: 600; letter-spacing: -.025em; margin: 10px 0; }
+    .guide-lead { color: var(--muted); font-size: 14px; line-height: 1.8; }
+    .edition { text-align: right; color: var(--muted); font-size: 12px; line-height: 1.9; white-space: nowrap; }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .sample { padding: 25px 28px; background: white; border: 1px solid var(--line); border-radius: 10px; }
+    .sample.old { background: #f7f8f6; }
+    .sample.new { border-top: 3px solid var(--primary); padding-top: 23px; }
+    .sample-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .sample-header strong { font-weight: 500; font-size: 14px; }
+    .sample h2 { font-size: 23px; line-height: 1.5; font-weight: 600; margin-bottom: 12px; }
+    .sample p { max-width: 510px; }
+    .sample.old .copy { font-size: 13.5px; line-height: 1.85; color: #3f4943; }
+    .sample.new .copy { font-size: 16px; line-height: 1.85; color: var(--body); }
+    .sample .caption { margin: 15px 0 22px; }
+    .sample.old .caption { font-size: 11px; color: #737d76; }
+    .sample.new .caption { font-size: 12px; color: var(--muted); }
+    .sample.old .btn.primary { background: #6f8357; border-color: #6f8357; font-size: 12px; }
+    .sample .sample-footer { display: flex; gap: 18px; align-items: center; margin-top: 22px; padding-top: 15px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+    .sample-footer b { color: var(--ink); font-weight: 600; }
+    .guide-bottom { display: grid; grid-template-columns: 1.12fr 1fr; gap: 30px; margin-top: 28px; }
+    .section-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+    .swatches { display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; }
+    .swatch .chip { height: 52px; border-radius: 6px; border: 1px solid #0000000c; margin-bottom: 9px; }
+    .swatch strong { display: block; font-size: 12px; font-weight: 500; }
+    .swatch code { display: block; margin-top: 5px; font-size: 11px; color: var(--muted); }
+    .semantic { margin-top: 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .type-list { border-top: 1px solid var(--line); }
+    .type-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .type-item span:last-child { font-size: 12px; color: var(--muted); text-align: right; }
+    .type-item .reading { font-size: 16px; }
+    .note { margin-top: 25px; padding-top: 17px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.8; }
+    .app-header { height: 65px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; background: #fff; border-bottom: 1px solid var(--line); }
+    .app-header .divider { height: 20px; width: 1px; background: var(--line); }
+    .web-shell { display: grid; grid-template-columns: 236px minmax(0,1fr) 308px; min-height: 818px; }
+    .sessions { background: var(--panel); padding: 27px 18px; display: flex; flex-direction: column; }
+    .sessions .btn { width: 100%; justify-content: flex-start; margin-bottom: 32px; }
+    .session-group { font-size: 12px; color: var(--muted); padding: 0 12px; margin-bottom: 10px; }
+    .session { padding: 12px; border-radius: 6px; font-size: 13px; color: var(--muted); margin-bottom: 6px; line-height: 1.6; }
+    .session.active { background: #fff; color: var(--ink); font-weight: 500; }
+    .session-bottom { margin-top: auto; border-top: 1px solid #d4dcd0; padding: 20px 12px 0; font-size: 12px; line-height: 1.9; color: var(--muted); }
+    .session-bottom strong { display: block; color: var(--ink); font-size: 13px; margin-bottom: 5px; }
+    .conversation { padding: 28px 42px 22px; min-width: 0; }
+    .conversation-top { margin-bottom: 28px; }
+    .question { margin-left: auto; width: fit-content; max-width: 90%; background: var(--ink); color: white; font-size: 15px; line-height: 1.75; padding: 14px 20px; border-radius: 10px 10px 3px 10px; margin-bottom: 26px; }
+    .answer { background: #fff; border: 1px solid #e7ebe3; padding: 26px 28px 20px; border-radius: 10px; }
+    .answer-heading { margin-bottom: 18px; }
+    .spark { background: var(--lime); width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
+    .answer h1 { font-size: 21px; font-weight: 600; margin-bottom: 13px; line-height: 1.5; }
+    .answer .prose { color: var(--body); font-size: 16px; line-height: 1.85; }
+    .answer h2 { color: var(--ink); font-size: 16px; line-height: 1.6; font-weight: 600; margin: 20px 0 7px; }
+    .cite { display: inline-flex; background: var(--soft); color: var(--primary); font: 11px var(--mono); padding: 2px 5px; border-radius: 3px; vertical-align: 2px; margin-left: 4px; }
+    .callout { padding: 12px 16px; border-left: 2px solid #84945b; background: #f4f6ee; margin-top: 20px; color: var(--body); font-size: 14px; line-height: 1.8; }
+    .answer-actions { margin-top: 22px; padding-top: 15px; border-top: 1px solid #edf0e9; font-size: 12px; color: var(--muted); display: flex; align-items: center; flex-wrap: wrap; gap: 18px; }
+    .answer-actions span { display: flex; align-items: center; gap: 6px; }
+    .answer-actions svg { width: 15px; height: 15px; }
+    .composer { margin-top: 28px; background: #fff; border: 1px solid #abb9a3; border-radius: 10px; box-shadow: 0 4px 18px #24312b06; padding: 16px 18px 12px; }
+    .composer .placeholder { color: var(--muted); font-size: 15px; margin-bottom: 24px; }
+    .composer .scope { font-size: 12px; color: var(--muted); }
+    .disclaimer { text-align: center; font-size: 12px; color: var(--muted); margin-top: 12px; }
+    .sources { background: var(--panel); padding: 29px 20px; }
+    .sources-heading { margin-bottom: 22px; }
+    .source { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 17px; margin-bottom: 14px; }
+    .source.selected { border-color: #84945b; }
+    .source .index { font: 11px var(--mono); color: var(--primary); background: var(--soft); border-radius: 4px; padding: 4px 6px; }
+    .source h3 { font-size: 14px; font-weight: 600; line-height: 1.7; margin: 12px 0 8px; }
+    .source .excerpt { margin: 13px 0; font-size: 13px; line-height: 1.8; color: var(--body); padding: 12px; border-radius: 5px; background: #f5f7f0; }
+    .source .link { color: var(--primary); font-size: 12px; font-weight: 500; }
+    .source-note { padding: 6px 3px; color: var(--muted); font-size: 12px; line-height: 1.9; }
+    .admin-shell { display: grid; grid-template-columns: 218px minmax(0,1fr); min-height: 883px; }
+    .admin-sidebar { background: #202c26; color: #c5cfc6; padding: 24px 16px; display: flex; flex-direction: column; }
+    .admin-brand { padding: 0 10px 27px; display: flex; gap: 10px; align-items: center; }
+    .brand-mark { width: 32px; height: 32px; background: var(--lime); display: flex; align-items: center; justify-content: center; border-radius: 6px; color: #24312b; }
+    .admin-brand strong { font-size: 21px; color: #fff; font-weight: 600; letter-spacing: .06em; }
+    .admin-brand .small { color: #c5cfc6; font-size: 11px; }
+    .nav-label { font-size: 11px; color: #a4b1a6; padding: 14px 14px 10px; }
+    .nav-item { display: flex; align-items: center; gap: 11px; padding: 12px 14px; margin: 3px 0; border-radius: 6px; font-size: 13px; }
+    .nav-item.active { background: #34473a; color: #fff; }
+    .nav-item.active svg { color: var(--lime); }
+    .admin-sidebar-footer { margin-top: auto; padding: 20px 10px 0; border-top: 1px solid #3d4c40; font-size: 12px; }
+    .avatar { width: 30px; height: 30px; background: #3d4c40; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; }
+    .admin-body { min-width: 0; }
+    .admin-top { height: 58px; padding: 0 36px; display: flex; justify-content: space-between; align-items: center; background: white; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .admin-content { max-width: 1320px; margin: auto; padding: 32px 36px; }
+    .page-heading { margin-bottom: 26px; }
+    .page-heading h1 { font-size: 26px; font-weight: 600; margin: 8px 0; }
+    .page-heading p { font-size: 13px; color: var(--muted); }
+    .stats { display: grid; grid-template-columns: repeat(4,1fr); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 22px 0; margin-bottom: 22px; }
+    .stat { padding: 0 25px; border-right: 1px solid var(--line); }
+    .stat:last-child { border: 0; }
+    .stat-label { font-size: 12px; color: var(--muted); }
+    .stat-value { font-size: 30px; line-height: 1.3; font-weight: 600; font-variant-numeric: tabular-nums; margin: 10px 0 6px; letter-spacing: -.025em; }
+    .stat-value small { font-size: 14px; font-weight: 400; margin-left: 5px; }
+    .stat-note { font-size: 12px; color: var(--muted); }
+    .token-box { padding: 17px 22px; background: #edf2e8; border: 1px solid #d7e1ce; border-radius: 8px; margin-bottom: 22px; }
+    .token-box h2 { font-size: 14px; font-weight: 600; margin-bottom: 5px; }
+    .token-box p { font-size: 12px; color: var(--muted); }
+    .panel { border: 1px solid var(--line); background: white; border-radius: 8px; overflow: hidden; margin-bottom: 22px; }
+    .panel-heading { padding: 19px 22px; border-bottom: 1px solid var(--line); }
+    .panel-heading h2 { font-size: 15px; font-weight: 600; }
+    .table-scroll { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; text-align: left; white-space: nowrap; }
+    th { font-size: 12px; font-weight: 500; color: var(--muted); background: #fafbf8; padding: 12px 22px; }
+    td { padding: 17px 22px; font-size: 13px; border-top: 1px solid #edf0e9; font-variant-numeric: tabular-nums; }
+    td strong { font-size: 14px; font-weight: 500; }
+    td .sub { font-size: 12px; color: var(--muted); margin-top: 5px; }
+    .progress { height: 4px; width: 105px; border-radius: 3px; background: #e9eee4; margin-top: 9px; }
+    .progress span { display: block; height: 100%; border-radius: inherit; background: #6f8357; }
+    .table-action { color: var(--primary); font-weight: 500; }
+    .task-row { padding: 17px 22px; display: grid; grid-template-columns: 1fr 160px 100px; align-items: center; gap: 20px; border-top: 1px solid #edf0e9; font-size: 13px; }
+    .task-row:first-of-type { border-top: 0; }
+    .task-row p { font-size: 12px; color: var(--muted); margin-top: 5px; }
+    .bottom-note { color: var(--muted); font-size: 12px; line-height: 1.8; }
+    .mobile-only { display: none; }
+    .preview-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 20px; border-radius: 8px; background: #24312b; color: white; box-shadow: 0 4px 20px #0002; z-index: 5; max-width: 90vw; }
+    @media (min-width: 1650px) { .conversation { padding-left: 64px; padding-right: 64px; } }
+    @media (max-width: 1200px) {
+      .web-shell { grid-template-columns: 210px minmax(0,1fr); }
+      .sources { display: none; }
+      .conversation { padding: 28px; }
+      .admin-shell { grid-template-columns: 185px minmax(0,1fr); }
+      .admin-content { padding: 28px 24px; }
+      .stat { padding: 0 16px; }
+    }
+    @media (max-width: 700px) {
+      .toolbar { height: auto; min-height: 72px; padding: 10px 16px; align-items: flex-start; flex-direction: column; gap: 8px; }
+      .toolbar .label { font-size: 11px; }
+      .tabs a { padding: 5px 10px; }
+      .guide { padding: 26px 18px; }
+      .guide-heading { display: block; }
+      .guide h1 { font-size: 28px; }
+      .edition { display: none; }
+      .compare, .guide-bottom { grid-template-columns: 1fr; }
+      .sample { padding: 22px; }
+      .sample.new { padding-top: 20px; }
+      .swatches { gap: 7px; }
+      .swatch code { font-size: 9px; }
+      .app-header { padding: 0 16px; height: 58px; }
+      .app-header .logo { width: 84px; }
+      .app-header .desktop-only { display: none; }
+      .app-header .row { gap: 8px; }
+      .web-shell { display: block; min-height: 0; }
+      .sessions { display: none; }
+      .conversation { padding: 22px 16px; }
+      .conversation-top { margin-bottom: 22px; }
+      .question { font-size: 14px; padding: 12px 15px; }
+      .answer { padding: 20px 18px; }
+      .answer h1 { font-size: 19px; }
+      .answer .prose { font-size: 15px; }
+      .answer-heading .small { font-size: 11px; }
+      .composer { margin-top: 22px; }
+      .disclaimer { font-size: 11px; line-height: 1.8; }
+      .admin-shell { display: block; min-height: 0; }
+      .admin-sidebar { display: none; }
+      .admin-top { padding: 0 18px; }
+      .admin-content { padding: 24px 16px; }
+      .page-heading { flex-wrap: wrap; gap: 16px; }
+      .page-heading h1 { font-size: 24px; }
+      .stats { grid-template-columns: 1fr 1fr; padding: 4px 0; }
+      .stat { padding: 17px 20px; }
+      .stat:nth-child(2) { border-right: 0; }
+      .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .stat-value { font-size: 27px; }
+      .token-box { padding: 16px; flex-wrap: wrap; }
+      .token-box p { line-height: 1.8; }
+      .panel-heading { padding: 16px; }
+      .task-row { padding: 16px; grid-template-columns: 1fr auto; gap: 12px; }
+      .task-row > .small { display: none; }
+      .mobile-only { display: inline; }
+      .type-item { gap: 8px; }
+    }
+  </style>
+</head>
+<body data-view="guide">
+  <svg style="display:none" aria-hidden="true"><defs>
+    <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="book" viewBox="0 0 24 24"><path d="M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15"/></symbol>
+    <symbol id="grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="file" viewBox="0 0 24 24"><path d="M14 3H5v18h14V8l-5-5Zm0 0v5h5M8 12h8M8 16h6"/></symbol>
+    <symbol id="chat" viewBox="0 0 24 24"><path d="M21 4H3v14h4v4l5-4h9V4ZM7 9h10M7 13h6"/></symbol>
+    <symbol id="users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M17 5a3 3 0 0 1 0 6m1 3a5 5 0 0 1 3 5v2"/></symbol>
+    <symbol id="sliders" viewBox="0 0 24 24"><path d="M4 6h16M4 18h16M8 3v6M16 15v6M4 12h16M14 9v6"/></symbol>
+    <symbol id="shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6"/></symbol>
+    <symbol id="spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></symbol>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></symbol>
+    <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 1 0-1 7M20 3v7h-7"/></symbol>
+  </defs></svg>
+  <nav class="toolbar" aria-label="设计提案导航">
+    <div class="label">能知 / 视觉优化提案 <span class="desktop-only"> · 独立概念稿，非线上页面</span></div>
+    <div class="tabs"><a href="?view=guide" data-tab="guide">01 字体与配色</a><a href="?view=client" data-tab="client">02 客户端</a><a href="?view=admin" data-tab="admin">03 管理端</a></div>
+  </nav>
+
+  <main id="guide" class="view guide">
+    <header class="guide-heading">
+      <div><div class="eyebrow">NYZ / VISUAL REFINEMENT / 2026.10</div><h1>让知识更易读，让操作更明确。</h1><p class="guide-lead">保留能知的橄榄绿品牌基因，用更好的字阶、对比度与色彩分工，建立专业感。</p></div>
+      <div class="edition">推荐方向<br><strong style="color:var(--ink);font-size:15px">墨绿 × 纸白 × 克制的青柠</strong></div>
+    </header>
+    <section class="compare" aria-label="现有参数与推荐参数对比">
+      <article class="sample old">
+        <div class="sample-header"><strong>现有参数 · 重排示意</strong><span class="eyebrow">CURRENT</span></div>
+        <h2>从文章中，找到有据可查的答案。</h2>
+        <p class="copy">储能系统的长期价值，不只取决于初始效率，还需要结合运行工况、循环寿命与维护成本进行判断。每一项结论，都应回到原文核实。</p>
+        <p class="caption">资料来源 · 文章知识库　 /　最近同步于 12 分钟前</p>
+        <div class="row"><button class="btn primary" type="button">添加数据源</button><span class="tag">已完成</span><span class="small" style="color:#737d76">辅助说明</span></div>
+        <div class="sample-footer"><span>正文 <b>13.5 px</b></span><span>辅助文字 <b>11 px</b></span><span>按钮对比度 <b id="old-contrast"></b></span></div>
+      </article>
+      <article class="sample new">
+        <div class="sample-header"><strong>推荐参数 · 阅读优先</strong><span class="tag">保留品牌，提升清晰度</span></div>
+        <h2>从文章中，找到有据可查的答案。</h2>
+        <p class="copy">储能系统的长期价值，不只取决于初始效率，还需要结合运行工况、循环寿命与维护成本进行判断。每一项结论，都应回到原文核实。</p>
+        <p class="caption">资料来源 · 文章知识库　 /　最近同步于 12 分钟前</p>
+        <div class="row"><button class="btn primary" type="button">添加数据源</button><span class="tag success"><i class="dot"></i>已完成</span><span class="small muted">辅助说明</span></div>
+        <div class="sample-footer"><span>正文 <b>16 px</b></span><span>辅助文字 <b>12 px</b></span><span>按钮对比度 <b id="new-contrast"></b></span></div>
+      </article>
+    </section>
+    <div class="guide-bottom">
+      <section><h2 class="section-title">01 / 色彩有分工，而不是到处都用绿</h2><div class="swatches">
+        <div class="swatch"><div class="chip" style="background:#24312b"></div><strong>标题 / 客户端按钮</strong><code>#24312B</code></div>
+        <div class="swatch"><div class="chip" style="background:#425c3b"></div><strong>操作 / 链接 / 焦点</strong><code>#425C3B</code></div>
+        <div class="swatch"><div class="chip" style="background:#59675e"></div><strong>辅助文字</strong><code>#59675E</code></div>
+        <div class="swatch"><div class="chip" style="background:#f6f7f4"></div><strong>页面底色</strong><code>#F6F7F4</code></div>
+        <div class="swatch"><div class="chip" style="background:#dff16e"></div><strong>小面积品牌点缀</strong><code>#DFF16E</code></div>
+      </div><div class="semantic"><span class="small muted">状态单独编码</span><span class="tag success"><i class="dot"></i>已完成</span><span class="tag warning"><i class="dot"></i>等待中</span><span class="tag danger"><i class="dot"></i>处理失败</span></div>
+      <p class="small muted" style="line-height:1.9;margin-top:17px">大面积使用白与暖灰；绿色只承担品牌、交互和少量强调。<br>统计数字回归墨色，不让每一个数值都争夺注意力。</p></section>
+      <section><h2 class="section-title">02 / 一套字体，两种使用密度</h2><div class="type-list">
+        <div class="type-item"><span style="font-size:21px;font-weight:600">能知 · 专业知识助手</span><span>中文 Noto Sans SC<br>标题 24–32 / 600</span></div>
+        <div class="type-item"><span class="reading">长答案要舒展，表格要利落。</span><span>客户端 16 / 1.85<br>管理端 13–14 / 1.5</span></div>
+        <div class="type-item"><span style="font-size:24px;font-weight:600;font-variant-numeric:tabular-nums">12,846 <span style="font-size:12px;font-weight:400">篇文章</span></span><span>西文与数字 DM Sans<br>等宽数字，单位降一级</span></div>
+        <div class="type-item"><span class="mono" style="font-size:12px">DOC-00842 / 1536</span><span>DM Mono 仅用于 ID / 维度<br>不用于中文正文与说明</span></div>
+      </div></section>
+    </div>
+    <footer class="note">说明：左侧依据代码中的字号与色值重排，并非线上截图；右侧与后续页面为推荐概念稿，内容及统计均为示例。预览无外部字体请求，未安装指定字体时使用本机中文字体，因此字形不作为最终字体验收依据。对比度按 WCAG sRGB 公式计算。</footer>
+  </main>
+
+  <main id="client" class="view">
+    <header class="app-header"><div class="row"><img class="logo" src="../../apps/web/public/logo.png" alt="能知"><span class="divider"></span><span style="font-size:14px">知识助手</span></div><div class="row"><span class="small muted desktop-only">基于文章 · 回答有据可查</span><button class="btn" type="button">登录 / 注册</button></div></header>
+    <div class="web-shell">
+      <aside class="sessions"><button class="btn" type="button"><svg><use href="#plus"/></svg>新建会话</button><div class="session-group">今天</div><div class="session active">储能技术路线与应用场景</div><div class="session">固态电池有哪些关键进展？</div><div class="session-group" style="margin-top:25px">近 7 天</div><div class="session">光伏产业的近期研究主题</div><div class="session">比较两篇文章的核心观点</div><div class="session-bottom"><strong>文章知识库</strong>12,846 篇文章 · 3 个数据源<br>最近更新于 12 分钟前<br><br>未登录：会话仅保存在当前浏览器。<br><span class="small">以上会话与数据均为设计示例</span></div></aside>
+      <section class="conversation" aria-label="问答示例"><div class="conversation-top row between"><span class="eyebrow">KNOWLEDGE / CONVERSATION</span><span class="tag">示例内容</span></div>
+        <div class="question">评估储能技术路线时，应该关注哪些关键因素？</div>
+        <article class="answer"><div class="answer-heading row"><span class="spark"><svg><use href="#spark"/></svg></span><span class="small muted">依据知识库整理 · 引用 2 篇文章</span></div><h1>先看应用场景，再比较技术指标</h1><div class="prose"><p>判断一种储能技术是否合适，需要把性能指标放回具体场景，而不是只比较某一项参数。可以从以下三个维度展开。</p><h2>1. 运行工况与响应需求</h2><p>明确储能时长、充放电频次与响应速度。不同场景对功率、容量和系统灵活性的要求并不相同。<span class="cite">1</span></p><h2>2. 全生命周期成本</h2><p>除了初始投入，还要综合考虑效率损耗、衰减、更换及维护成本，避免将购置成本等同于实际使用成本。<span class="cite">2</span></p><h2>3. 安全与工程可实施性</h2><p>结合部署环境，评估热管理、系统集成与运维条件，再确定技术路线的适用边界。<span class="cite">1</span></p></div><div class="callout"><strong>阅读提示</strong>　对比文章结论时，先核实其测试条件、时间范围与应用假设。</div><div class="answer-actions"><span><svg><use href="#book"/></svg>查看原文片段</span><span><svg><use href="#copy"/></svg>复制</span><span><svg><use href="#refresh"/></svg>重新生成</span></div></article>
+        <div class="composer"><p class="placeholder">继续追问，让问题更深入…</p><div class="row between"><span class="scope">检索范围：全部知识库</span><button class="btn ink" type="button">提问<svg><use href="#arrow"/></svg></button></div></div><p class="disclaimer">回答由知识库内容生成，请结合原文核实重要信息。</p>
+      </section>
+      <aside class="sources"><div class="sources-heading row between"><strong style="font-size:14px">引用来源</strong><span class="small muted">2 篇文章</span></div><article class="source selected"><div class="row between"><span class="index">01</span><span class="small muted">文章 · 示例</span></div><h3>储能技术的应用场景与系统评价</h3><p class="small muted">能知文章库 · 2026-10-20</p><div class="excerpt">技术评价需要结合实际运行工况，重点关注储能时长、功率需求与系统运行条件。</div><span class="link">阅读全文 ↗</span></article><article class="source"><div class="row between"><span class="index">02</span><span class="small muted">文章 · 示例</span></div><h3>如何理解储能全生命周期成本</h3><p class="small muted">能知文章库 · 2026-10-18</p><div class="excerpt">全生命周期分析应覆盖初始投资、运行维护与性能衰减，而非仅比较购置价格。</div><span class="link">阅读全文 ↗</span></article><p class="source-note">每个引用编号对应原文片段。<br>重要信息请回到完整文章核实。</p></aside>
+    </div>
+  </main>
+
+  <main id="admin" class="view"><div class="admin-shell">
+    <aside class="admin-sidebar"><div class="admin-brand"><span class="brand-mark"><svg><use href="#book"/></svg></span><div><strong>能知</strong><div class="small">知识管理后台</div></div></div><div class="nav-label">知识运营</div><div class="nav-item active"><svg><use href="#grid"/></svg>数据源</div><div class="nav-item"><svg><use href="#file"/></svg>文档管理</div><div class="nav-item"><svg><use href="#book"/></svg>知识库</div><div class="nav-item"><svg><use href="#chat"/></svg>问答记录</div><div class="nav-label" style="margin-top:16px">系统管理</div><div class="nav-item"><svg><use href="#users"/></svg>用户管理</div><div class="nav-item"><svg><use href="#sliders"/></svg>模型配置</div><div class="nav-item"><svg><use href="#shield"/></svg>管理员管理</div><div class="nav-item"><svg><use href="#users"/></svg>角色管理</div><div class="nav-item"><svg><use href="#file"/></svg>操作日志</div><div class="admin-sidebar-footer row"><span class="avatar">管</span><div>系统管理员<div style="font-size:11px;color:#a4b1a6;margin-top:3px">概念稿 / 示例身份</div></div></div></aside>
+    <div class="admin-body"><header class="admin-top"><div class="row"><span class="muted">管理后台</span><span class="muted">/</span><strong style="font-weight:500">数据源</strong></div><span class="tag">设计预览 · 示例数据</span></header>
+      <section class="admin-content"><div class="page-heading row between"><div><div class="eyebrow">KNOWLEDGE OPERATIONS</div><h1>数据源</h1><p>管理内容来源与自动同步任务</p></div><button class="btn primary" type="button"><svg><use href="#plus"/></svg>添加数据源</button></div>
+        <div class="stats"><div class="stat"><div class="stat-label">数据源</div><div class="stat-value">3</div><div class="stat-note">已配置来源</div></div><div class="stat"><div class="stat-label">已入库文章</div><div class="stat-value">12,846</div><div class="stat-note">接口共 13,120 篇</div></div><div class="stat"><div class="stat-label">执行中任务</div><div class="stat-value">1</div><div class="stat-note">队列与抓取进度</div></div><div class="stat"><div class="stat-label">最近同步</div><div class="stat-value">12<small>分钟前</small></div><div class="stat-note">新能源产业文章</div></div></div>
+        <div class="token-box row between"><div class="row"><svg style="color:var(--primary);width:22px;height:22px"><use href="#shield"/></svg><div><h2>nyzdata 接口 Token <span class="tag success" style="margin-left:7px">已配置</span></h2><p>凭证仅用于文章同步；已保存的密钥不会回显。</p></div></div><button class="btn" type="button">更新 Token</button></div>
+        <section class="panel"><div class="panel-heading row between"><h2>已配置来源 <span class="small muted" style="font-weight:400;margin-left:8px">3 个</span></h2><span class="small muted">文章 API</span></div><div class="table-scroll"><table><thead><tr><th>名称</th><th>同步频率</th><th>已入库 / 接口总数</th><th>状态</th><th>最近同步</th><th>操作</th></tr></thead><tbody>
+          <tr><td><strong>新能源产业文章</strong><div class="sub">nyzdata · 文章 API</div></td><td>每 6 小时</td><td>8,640 <span class="muted">/ 8,640</span><div class="progress"><span style="width:100%"></span></div></td><td><span class="tag success"><i class="dot"></i>运行中</span></td><td>12 分钟前</td><td class="table-action">立即同步</td></tr>
+          <tr><td><strong>储能技术研究</strong><div class="sub">nyzdata · 文章 API</div></td><td>每 12 小时</td><td>3,286 <span class="muted">/ 3,560</span><div class="progress"><span style="width:92.3%"></span></div></td><td><span class="tag success"><i class="dot"></i>运行中</span></td><td>34 分钟前</td><td class="table-action">查看进度</td></tr>
+          <tr><td><strong>产业政策观察</strong><div class="sub">nyzdata · 文章 API</div></td><td>每天</td><td>920 <span class="muted">/ 920</span><div class="progress"><span style="width:100%;background:#a5afa0"></span></div></td><td><span class="tag" style="background:#f0f2ef;color:#59675e">已暂停</span></td><td>昨天 18:30</td><td class="table-action">恢复同步</td></tr>
+        </tbody></table></div></section>
+        <section class="panel"><div class="panel-heading row between"><h2>抓取任务</h2><span class="small muted">最近执行记录</span></div><div class="task-row"><div>储能技术研究<p>已同步 3,286 / 3,560 篇 · 正在读取文章内容</p></div><span class="small muted">今天 09:46</span><span class="tag success"><i class="dot"></i>运行中</span></div><div class="task-row"><div>新能源产业文章<p>新增 24 篇 · 内容已入库</p></div><span class="small muted">今天 09:32</span><span class="tag success"><i class="dot"></i>已完成</span></div><div class="task-row"><div>产业政策观察<p>上次请求超时 · 请检查接口后重试</p></div><span class="small muted">昨天 18:35</span><span class="tag danger"><i class="dot"></i>失败</span></div></section>
+        <p class="bottom-note">文章入库后由后台任务完成清洗、切片与向量化，可在「文档管理」中查看处理状态。<br>本页名称、计数、时间及任务记录均为设计示例，不代表实际业务数据。</p>
+      </section>
+    </div>
+  </div></main>
+  <script>
+    const requestedView = new URLSearchParams(location.search).get('view');
+    const view = ['guide', 'client', 'admin'].includes(requestedView) ? requestedView : 'guide';
+    document.body.dataset.view = view;
+    document.querySelector(`[data-tab="${view}"]`).setAttribute('aria-current', 'page');
+    function luminance(hex) {
+      const rgb = hex.match(/[0-9a-f]{2}/gi).map(value => parseInt(value, 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+      return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+    }
+    for (const [id, color] of [['old-contrast', '6f8357'], ['new-contrast', '425c3b']]) {
+      document.getElementById(id).textContent = `${(1.05 / (luminance(color) + .05)).toFixed(2)}:1`;
+    }
+    let toastTimer;
+    document.querySelectorAll('button').forEach(button => button.addEventListener('click', () => {
+      document.querySelector('.preview-toast')?.remove();
+      clearTimeout(toastTimer);
+      const toast = document.createElement('div');
+      toast.className = 'preview-toast';
+      toast.setAttribute('role', 'status');
+      toast.textContent = '此为视觉概念稿，不连接业务接口。';
+      document.body.append(toast);
+      toastTimer = setTimeout(() => toast.remove(), 3000);
+    }));
+    window.addEventListener('load', () => {
+      document.documentElement.dataset.horizontalOverflow = String(document.documentElement.scrollWidth > innerWidth);
+      document.documentElement.dataset.previewView = view;
+    });
+  </script>
+</body>
+</html>

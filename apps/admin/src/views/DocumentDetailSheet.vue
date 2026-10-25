@@ -21,7 +21,7 @@ const emit = defineEmits<{
   <Sheet :open="!!document" @update:open="(open) => { if (!open) emit('close'); }">
     <SheetContent v-if="document" class="w-full gap-0 sm:max-w-2xl" :aria-describedby="undefined">
       <SheetHeader class="border-b">
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">DOCUMENT DETAIL</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">DOCUMENT DETAIL</p>
         <SheetTitle class="pr-6 text-lg break-words">{{ document.title }}</SheetTitle>
       </SheetHeader>
       <div class="min-h-0 flex-1 overflow-y-auto px-4">
@@ -64,7 +64,7 @@ const emit = defineEmits<{
         <DetailSection v-if="document.chunks.length" :title="`查看切片（${document.chunks.length}）`">
           <div class="grid gap-2">
             <article v-for="chunk in document.chunks" :key="chunk.id" class="rounded-md border bg-muted/40 p-3">
-              <small class="text-[11px] text-muted-foreground">#{{ chunk.index + 1 }} · {{ chunk.sectionPath?.length ? chunk.sectionPath.join(' > ') : '无章节' }} · 约 {{ chunk.tokenEstimate }} tokens{{ chunk.contentType === 'table' ? ' · 表格' : '' }}</small>
+              <small class="text-xs text-muted-foreground">#{{ chunk.index + 1 }} · {{ chunk.sectionPath?.length ? chunk.sectionPath.join(' > ') : '无章节' }} · 约 {{ chunk.tokenEstimate }} tokens{{ chunk.contentType === 'table' ? ' · 表格' : '' }}</small>
               <p class="mt-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words">{{ chunk.content }}</p>
             </article>
           </div>

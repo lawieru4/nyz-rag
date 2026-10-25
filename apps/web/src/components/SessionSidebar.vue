@@ -48,15 +48,15 @@ const statsNote = computed(() => {
 <template>
   <div class="flex h-full flex-col">
     <div class="p-3">
-      <Button variant="ghost" class="w-full justify-start gap-2 text-xs hover:bg-card" :disabled="busy" @click="emit('new')"><SquarePen />新对话</Button>
+      <Button variant="ghost" class="w-full justify-start gap-2 text-[13px] hover:bg-card" :disabled="busy" @click="emit('new')"><SquarePen />新对话</Button>
     </div>
 
     <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-3" aria-label="历史会话">
       <section v-for="group in groups" :key="group.label" class="mt-2 first:mt-0">
-        <h2 class="px-2 py-1.5 text-[10px] font-medium text-muted-foreground/80">{{ group.label }}</h2>
+        <h2 class="px-2 py-1.5 text-xs font-medium text-muted-foreground">{{ group.label }}</h2>
         <div v-for="session in group.sessions" :key="session.id" :class="['group flex items-center rounded-md transition-colors hover:bg-card/60', session.id === sessionId && 'bg-card hover:bg-card']">
           <button
-            class="min-w-0 flex-1 px-2 py-2 text-left text-xs text-[#3e4842] disabled:cursor-default disabled:opacity-60"
+            class="min-w-0 flex-1 px-2 py-2 text-left text-[13px] text-body disabled:cursor-default disabled:opacity-60"
             :disabled="busy" :title="session.title" :aria-current="session.id === sessionId ? 'page' : undefined"
             @click="emit('open', session.id)"
           >
@@ -64,28 +64,28 @@ const statsNote = computed(() => {
           </button>
           <IconButton
             label="删除会话" size="icon-sm"
-            class="mr-0.5 text-muted-foreground/70 opacity-0 group-hover:opacity-100 hover:bg-transparent hover:text-destructive focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+            class="mr-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-transparent hover:text-destructive focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
             :disabled="busy" @click="emit('remove', session.id)"
           ><X /></IconButton>
         </div>
       </section>
-      <p v-if="!sessions.length" class="px-2 py-1.5 text-[11px] text-muted-foreground/80">{{ sessionError || '暂无会话' }}</p>
+      <p v-if="!sessions.length" class="px-2 py-1.5 text-xs text-muted-foreground">{{ sessionError || '暂无会话' }}</p>
     </nav>
 
-    <p v-if="!user" class="mx-3 mb-3 rounded-md bg-secondary px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">
-      未登录：会话仅保存在当前浏览器。<Button variant="link" class="h-auto p-0 text-[10px] text-link" @click="emit('login')">登录</Button>后可跨设备查看。
+    <p v-if="!user" class="mx-3 mb-3 rounded-md bg-secondary px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+      未登录：会话仅保存在当前浏览器。<Button variant="link" class="h-auto p-0 text-xs text-link" @click="emit('login')">登录</Button>后可跨设备查看。
     </p>
 
     <div class="px-4 py-3.5" aria-label="知识库状态">
       <div class="flex items-center gap-2 text-xs font-semibold">
-        <span :class="['size-1.75 rounded-full', statsError ? 'bg-destructive' : stats ? 'bg-[#82ad55]' : 'bg-muted-foreground/40']" />文章知识库
+        <span :class="['size-1.75 rounded-full', statsError ? 'bg-destructive' : stats ? 'bg-success' : 'bg-muted-foreground/40']" />文章知识库
       </div>
-      <p class="mt-1.5 text-[11px] text-muted-foreground">
+      <p class="mt-1.5 text-xs text-muted-foreground">
         <b class="font-mono font-medium text-foreground">{{ stats?.documents ?? '—' }}</b> 篇文章
         <i class="mx-1 not-italic">·</i>
         <b class="font-mono font-medium text-foreground">{{ stats?.sources ?? '—' }}</b> 个数据源
       </p>
-      <p class="mt-1 text-[10px] text-muted-foreground/80">{{ statsNote }}</p>
+      <p class="mt-1 text-xs text-muted-foreground">{{ statsNote }}</p>
     </div>
   </div>
 </template>

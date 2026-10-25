@@ -45,9 +45,9 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
     <Table class="min-w-[750px]">
       <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">用户提问</TableHead><TableHead>提问人</TableHead><TableHead>引用来源</TableHead><TableHead>评价</TableHead><TableHead>时间</TableHead><TableHead /></TableRow></TableHeader>
       <TableBody>
-        <TableRow v-for="log in logs" :key="log.id" class="text-xs text-muted-foreground">
+        <TableRow v-for="log in logs" :key="log.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4">
-            <button class="grid max-w-96 gap-1 text-left" @click="selected = log"><b class="truncate text-xs text-foreground hover:underline">{{ log.question }}</b><small class="truncate text-[11px]">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small></button>
+            <button class="grid max-w-96 gap-1 text-left" @click="selected = log"><b class="truncate text-sm text-foreground hover:underline">{{ log.question }}</b><small class="truncate text-xs">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small></button>
           </TableCell>
           <TableCell>{{ chatLogOwner(log) }}</TableCell>
           <TableCell class="max-w-64 truncate">{{ log.sources.length ? log.sources.map((source) => source.title).join('、') : '无引用' }}</TableCell>

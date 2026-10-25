@@ -14,3 +14,19 @@ export function processingLabel(document: DocumentSummary) {
     default: return "待处理";
   }
 }
+
+type StatusTone = "success" | "muted" | "warning" | "danger";
+
+/** 列表中状态标签的颜色：完成为成功色，进行中为等待色，失败为错误色。 */
+export function processingTone(document: DocumentSummary): StatusTone {
+  switch (document.processingStatus) {
+    case "chunked": return "success";
+    case "cleaning": return "warning";
+    case "failed": return "danger";
+    default: return "muted";
+  }
+}
+
+export function embeddingTone(status: keyof typeof embeddingStatuses = "pending"): StatusTone {
+  return status === "ready" ? "success" : status === "failed" ? "danger" : status === "pending" ? "muted" : "warning";
+}

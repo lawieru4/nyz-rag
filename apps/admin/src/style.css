@@ -4,20 +4,18 @@
 
 @source "../../../packages/ui/src";
 
-/* 管理端背景略冷，主按钮使用橄榄绿。 */
+/* 管理端背景略冷，主按钮使用深橄榄绿（白字 7.4:1）。 */
 :root {
   --background: #f4f6f3;
-  --foreground: #27312c;
-  --primary: #6f8357;
+  --primary: #425c3b;
   --primary-foreground: #ffffff;
-  --ring: #90a572;
 }
 
 @layer components {
   /* 文档正文、Markdown、原始 HTML 等长文本 */
   .document-text {
     margin: 0;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.8;
     white-space: pre-wrap;
     overflow-wrap: anywhere;

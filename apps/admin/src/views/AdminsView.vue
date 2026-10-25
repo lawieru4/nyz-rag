@@ -141,11 +141,11 @@ async function toggleAdmin(admin: AdminAccount) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        <TableRow v-for="admin in admins" :key="admin.id" class="text-xs text-muted-foreground">
+        <TableRow v-for="admin in admins" :key="admin.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4 font-semibold text-foreground">{{ admin.nickname }}</TableCell>
           <TableCell>{{ admin.email }}</TableCell>
           <TableCell>
-            <span v-if="admin.isSuper" class="rounded-sm bg-sidebar-primary/15 px-1.5 py-0.5 font-mono text-[10px] font-medium text-sidebar-primary">超级管理员</span>
+            <span v-if="admin.isSuper" class="rounded-sm bg-brand-soft px-1.5 py-0.5 text-[11px] font-medium text-accent-foreground">超级管理员</span>
             <Select v-else :model-value="admin.roleId ?? NO_ROLE" :disabled="updating.has(admin.id)" @update:model-value="changeRole(admin, String($event))">
               <SelectTrigger size="sm" class="min-w-32 text-xs" :aria-label="`${admin.nickname} 的角色`"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -171,7 +171,7 @@ async function toggleAdmin(admin: AdminAccount) {
               >
                 {{ admin.disabled ? '启用' : '停用' }}
               </Button>
-              <span v-else class="pr-2 text-[11px] text-muted-foreground/50">不可停用</span>
+              <span v-else class="pr-2 text-xs text-muted-foreground">不可停用</span>
             </div>
           </TableCell>
         </TableRow>
@@ -184,7 +184,7 @@ async function toggleAdmin(admin: AdminAccount) {
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-md" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">ADMINISTRATOR</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">ADMINISTRATOR</p>
         <DialogTitle>添加管理员</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" novalidate @submit.prevent="createAdmin">

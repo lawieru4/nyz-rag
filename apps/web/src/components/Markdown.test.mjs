@@ -91,7 +91,7 @@ test("shared inline rendering keeps safe links, formatting and literal HTML", (t
     assert.equal(all(root, "img").length, 0);
     assert.equal(all(root, "button").length, 0);
     assert.ok(text(root).includes("[bad](javascript:alert) <img src=x> [1]"));
-    assert.equal(all(root, "strong")[0].props.class, component === AnswerInline ? "font-semibold text-[#29342e]" : "");
+    assert.equal(all(root, "strong")[0].props.class, component === AnswerInline ? "font-semibold text-foreground" : "");
   }
 });
 
@@ -139,11 +139,11 @@ test("answer blocks keep direct-child styling, inline tables and citation forwar
   const root = mount(t, AnswerMarkdown, { text: markdown, sourceCount: 1, activeCitation: 1, onCite: (value) => cited.push(value) });
   const wrapper = elements(root)[0];
   assert.deepEqual(elements(wrapper).map((child) => child.type), ["h1", "p", "ol", "ul", "pre", "div"]);
-  assert.ok(all(root, "h1")[0].props.class.includes("text-[15px]"));
+  assert.ok(all(root, "h1")[0].props.class.includes("text-lg"));
   assert.equal(all(root, "ol")[0].props.start, 3);
   assert.equal(all(root, "li")[0].props.class, "pl-1");
   const table = all(root, "table")[0];
-  assert.equal(table.props.class, "w-full border-collapse text-xs");
+  assert.equal(table.props.class, "w-full border-collapse text-sm");
   assert.equal(text(all(table, "strong")[0]), "header");
   assert.equal(text(all(table, "code")[0]), "cell");
   assert.equal(all(table, "a")[0].props.href, "https://example.test/table");

@@ -151,7 +151,7 @@ const credentialLabel = (provider: ModelProvider) => provider.hasApiKey ? "已�
         </div>
         <p class="mt-1.5 mb-4 text-xs break-words text-muted-foreground">{{ provider.provider }}<span v-if="provider.baseUrl"> · {{ provider.baseUrl }}</span></p>
         <dl class="flex flex-wrap gap-5">
-          <div class="grid min-w-22 gap-1"><dt class="text-[11px] text-muted-foreground">API 密钥</dt><dd class="font-mono text-xs break-words">{{ credentialLabel(provider) }}</dd></div>
+          <div class="grid min-w-22 gap-1"><dt class="text-xs text-muted-foreground">API 密钥</dt><dd class="font-mono text-xs break-words">{{ credentialLabel(provider) }}</dd></div>
         </dl>
       </div>
       <div v-if="can('models:manage')" class="flex flex-wrap gap-1.5">

@@ -35,9 +35,9 @@ const roleLabel = computed(() => props.session.admin.isSuper ? "超级管理员"
     <RouterLink class="flex items-center gap-1 px-2 text-sm font-bold text-sidebar-accent-foreground max-md:px-1" :to="homePath(session)" aria-label="能知管理后台">
       <img src="/logo_t.png" alt="能知" class="h-10 w-30 flex-none object-contain max-lg:w-24 max-md:hidden" />
       <img src="/favicon_t.png" alt="" class="hidden size-7 flex-none object-contain max-md:block" />
-      <span class="font-mono text-[9px] font-medium text-sidebar-foreground/70 max-md:hidden">管理后台</span>
+      <span class="text-[11px] font-medium text-sidebar-foreground max-md:hidden">管理后台</span>
     </RouterLink>
-    <div class="mx-2.5 mt-11 mb-3 font-mono text-[10px] font-medium text-sidebar-foreground/70 uppercase max-md:hidden">工作空间</div>
+    <div class="mx-2.5 mt-11 mb-3 text-[11px] font-medium tracking-wider text-sidebar-foreground max-md:hidden">工作空间</div>
     <nav class="grid gap-1 max-md:mt-9" aria-label="管理模块">
       <RouterLink
         v-for="item in modules"
@@ -61,10 +61,10 @@ const roleLabel = computed(() => props.session.admin.isSuper ? "超级管理员"
         :to="{ name: PROFILE_MODULE }"
         @click="emit('select', $event, PROFILE_MODULE)"
       >
-        <span class="grid size-7.5 flex-none place-items-center rounded-full bg-[#53634f] font-mono text-[11px] text-[#e5edda]"><User class="size-3.5" /></span>
-        <span class="grid min-w-0 gap-0.5 text-[11px] max-md:hidden">
+        <span class="grid size-7.5 flex-none place-items-center rounded-full bg-sidebar-accent font-mono text-[11px] text-sidebar-accent-foreground"><User class="size-3.5" /></span>
+        <span class="grid min-w-0 gap-0.5 text-xs max-md:hidden">
           <b class="truncate text-sidebar-accent-foreground">{{ session.admin.nickname }}</b>
-          <small class="text-[10px] text-sidebar-foreground/70">{{ roleLabel }}</small>
+          <small class="text-xs text-sidebar-foreground">{{ roleLabel }}</small>
         </span>
       </RouterLink>
       <Button variant="ghost" size="icon-sm" class="ml-auto flex-none text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:ml-0" title="退出登录" aria-label="退出登录" @click="emit('logout')"><LogOut /></Button>

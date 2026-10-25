@@ -278,7 +278,7 @@ function useSuggestion(text: string) {
         <section :class="['mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-200 flex-col px-8 max-sm:px-4', turns.length ? 'pt-8' : 'justify-center pt-12 pb-[12vh] max-sm:pt-8']">
           <div v-if="!turns.length" class="mb-7">
             <p class="eyebrow mb-4">能知 · 新能源知识助手</p>
-            <h1 class="text-[34px] leading-[1.35] font-semibold max-sm:text-[28px]">从文章中，<span class="text-[#788648]">找到有据可查的答案。</span></h1>
+            <h1 class="text-[34px] leading-[1.35] font-semibold max-sm:text-[28px]">从文章中，<span class="text-olive">找到有据可查的答案。</span></h1>
             <p class="mt-3 text-sm text-muted-foreground">向知识库提问，回答将基于已收录的文章内容。</p>
           </div>
           <h1 v-else class="mb-5 truncate text-[15px] font-semibold">{{ sessionTitle }}</h1>
@@ -306,13 +306,13 @@ function useSuggestion(text: string) {
                   <div class="min-h-0 overflow-hidden"><div class="bg-background/70 px-4 pt-3.5 pb-3">
                     <div class="grid grid-cols-5 gap-2.5 max-md:grid-cols-2 max-sm:grid-cols-1">
                       <div v-for="field in filterFields" :key="field.id" class="grid gap-1">
-                        <Label :for="field.id" class="text-[11px] font-normal text-muted-foreground">{{ field.label }}</Label>
+                        <Label :for="field.id" class="text-xs font-normal text-muted-foreground">{{ field.label }}</Label>
                         <Input :id="field.id" v-model="field.model.value" :type="field.type" class="h-8 border-transparent bg-card text-xs shadow-none md:text-xs" :placeholder="field.type === 'text' ? '逗号分隔' : undefined" :aria-label="field.aria" />
                       </div>
                     </div>
-                    <p class="mt-2 text-[10px] text-muted-foreground">
+                    <p class="mt-2 text-xs text-muted-foreground">
                       本次提问及重新生成将按当前检索范围筛选，分类、标签、场景需与文章中的值完全一致。
-                      <Button v-if="activeFilterCount" type="button" variant="link" class="h-auto p-0 text-[10px] text-link" @click="clearFilters">清除筛选</Button>
+                      <Button v-if="activeFilterCount" type="button" variant="link" class="h-auto p-0 text-xs text-link" @click="clearFilters">清除筛选</Button>
                     </p>
                   </div></div>
                 </CollapsibleContent>
@@ -325,24 +325,24 @@ function useSuggestion(text: string) {
                 />
                 <div class="flex items-center justify-between gap-2 px-3 pb-2.5">
                   <CollapsibleTrigger as-child>
-                    <Button type="button" variant="ghost" size="xs" :class="['text-[11px] font-normal text-muted-foreground', (open || activeFilterCount > 0) && 'bg-secondary text-[#5d6b37]']">
+                    <Button type="button" variant="ghost" size="xs" :class="['text-xs font-normal text-muted-foreground', (open || activeFilterCount > 0) && 'bg-secondary text-olive']">
                       <SlidersHorizontal />检索范围<span v-if="activeFilterCount" class="font-mono">· {{ activeFilterCount }}</span>
                     </Button>
                   </CollapsibleTrigger>
                   <div class="flex items-center gap-3">
-                    <span class="font-mono text-[10px] text-muted-foreground/80 max-sm:hidden">⌘/Ctrl + Enter 提交</span>
+                    <span class="font-mono text-[11px] text-muted-foreground max-sm:hidden">⌘/Ctrl + Enter 提交</span>
                     <Button v-if="busy" type="button" size="sm" @click="stop">停止生成 <Square class="fill-current" /></Button>
                     <Button v-else type="submit" size="sm" :disabled="!question.trim() || !ready">提问 <ArrowUpRight /></Button>
                   </div>
                 </div>
               </Collapsible>
             </form>
-            <p class="py-2.5 text-center text-[10px] text-muted-foreground/80">回答由知识库内容生成，请结合原文核实重要信息。</p>
+            <p class="py-2.5 text-center text-xs text-muted-foreground">回答由知识库内容生成，请结合原文核实重要信息。</p>
           </div>
 
           <div v-if="!turns.length" class="mt-5 grid gap-2">
-            <p class="mb-0.5 text-[11px] text-muted-foreground">试试这样提问</p>
-            <Button v-for="text in ['最近收录的文章有哪些主要主题？', '帮我总结一篇文章的核心观点']" :key="text" variant="ghost" class="h-auto min-h-10 justify-between bg-card py-2 text-left text-xs font-normal whitespace-normal text-[#505a54]" @click="useSuggestion(text)">{{ text }} <ArrowUpRight class="text-[#87934d]" /></Button>
+            <p class="mb-0.5 text-xs text-muted-foreground">试试这样提问</p>
+            <Button v-for="text in ['最近收录的文章有哪些主要主题？', '帮我总结一篇文章的核心观点']" :key="text" variant="ghost" class="h-auto min-h-10 justify-between bg-card py-2 text-left text-[13px] font-normal whitespace-normal text-body" @click="useSuggestion(text)">{{ text }} <ArrowUpRight class="text-olive" /></Button>
           </div>
         </section>
 

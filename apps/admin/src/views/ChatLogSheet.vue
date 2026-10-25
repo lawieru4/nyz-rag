@@ -14,7 +14,7 @@ const emit = defineEmits<{ (e: "close"): void }>();
   <Sheet :open="!!log" @update:open="(open) => { if (!open) emit('close'); }">
     <SheetContent v-if="log" class="w-full gap-0 sm:max-w-2xl" :aria-describedby="undefined">
       <SheetHeader class="border-b">
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">CONVERSATION DETAIL</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">CONVERSATION DETAIL</p>
         <SheetTitle class="text-lg">问答详情</SheetTitle>
       </SheetHeader>
       <div class="min-h-0 flex-1 overflow-y-auto px-4">
@@ -44,7 +44,7 @@ const emit = defineEmits<{ (e: "close"): void }>();
         <DetailSection v-if="log.chunks.length" :title="`召回片段（${log.chunks.length}）`">
           <div class="grid gap-2">
             <article v-for="chunk in log.chunks" :key="chunk.chunkId" class="rounded-md border bg-muted/40 p-3">
-              <small class="text-[11px] text-muted-foreground">[{{ chunk.citation }}] {{ chunk.title }}{{ chunk.sectionPath.length ? ` · ${chunk.sectionPath.join(' > ')}` : '' }} · 合并 {{ chunk.score.toFixed(4) }}<template v-if="chunk.vectorScore !== undefined"> · 向量 {{ chunk.vectorScore.toFixed(3) }}</template><template v-if="chunk.keywordScore !== undefined"> · 关键词 {{ chunk.keywordScore.toFixed(2) }}</template><template v-if="chunk.summaryScore !== undefined"> · 摘要 {{ chunk.summaryScore.toFixed(3) }}</template><template v-if="chunk.rerankScore !== undefined"> · 重排 {{ chunk.rerankScore.toFixed(3) }}</template></small>
+              <small class="text-xs text-muted-foreground">[{{ chunk.citation }}] {{ chunk.title }}{{ chunk.sectionPath.length ? ` · ${chunk.sectionPath.join(' > ')}` : '' }} · 合并 {{ chunk.score.toFixed(4) }}<template v-if="chunk.vectorScore !== undefined"> · 向量 {{ chunk.vectorScore.toFixed(3) }}</template><template v-if="chunk.keywordScore !== undefined"> · 关键词 {{ chunk.keywordScore.toFixed(2) }}</template><template v-if="chunk.summaryScore !== undefined"> · 摘要 {{ chunk.summaryScore.toFixed(3) }}</template><template v-if="chunk.rerankScore !== undefined"> · 重排 {{ chunk.rerankScore.toFixed(3) }}</template></small>
               <p class="mt-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words">{{ chunk.excerpt }}</p>
             </article>
           </div>

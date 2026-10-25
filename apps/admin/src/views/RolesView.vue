@@ -160,18 +160,18 @@ async function deleteRole(role: AdminRole) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        <TableRow v-for="role in roles" :key="role.id" class="text-xs text-muted-foreground">
+        <TableRow v-for="role in roles" :key="role.id" class="text-[13px] text-muted-foreground">
           <TableCell class="max-w-56 py-3 pl-4">
             <div class="grid gap-0.5">
               <b class="truncate font-semibold text-foreground">{{ role.name }}</b>
-              <small v-if="role.description" class="truncate text-[11px]" :title="role.description">{{ role.description }}</small>
+              <small v-if="role.description" class="truncate text-xs" :title="role.description">{{ role.description }}</small>
             </div>
           </TableCell>
           <TableCell class="max-w-96 whitespace-normal">
             <div v-if="grantedModules(role).length" class="flex flex-wrap gap-1">
               <Badge v-for="item in grantedModules(role)" :key="item.label" :variant="item.manage ? 'brand' : 'muted'">{{ item.label }} · {{ item.manage ? '管理' : '查看' }}</Badge>
             </div>
-            <span v-else class="text-muted-foreground/60">无权限</span>
+            <span v-else class="text-muted-foreground">无权限</span>
           </TableCell>
           <TableCell class="font-mono">{{ role.adminCount }}</TableCell>
           <TableCell><StatusBadge :on="!role.disabled">{{ role.disabled ? '已停用' : '正常' }}</StatusBadge></TableCell>
@@ -211,7 +211,7 @@ async function deleteRole(role: AdminRole) {
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="sm:max-w-xl" :aria-describedby="undefined">
       <DialogHeader>
-        <p class="font-mono text-[10px] font-medium tracking-wider text-link">ROLE</p>
+        <p class="font-mono text-[11px] font-medium tracking-wider text-link">ROLE</p>
         <DialogTitle>{{ editingId ? '编辑角色' : '新建角色' }}</DialogTitle>
       </DialogHeader>
       <form class="grid gap-4" novalidate @submit.prevent="saveRole">
@@ -229,13 +229,13 @@ async function deleteRole(role: AdminRole) {
         <fieldset class="grid gap-2" :disabled="formBusy">
           <legend class="mb-2 text-sm font-medium">权限</legend>
           <div class="overflow-hidden rounded-md border">
-            <div class="grid grid-cols-[1fr_3rem_3rem] items-center gap-x-3 bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground">
+            <div class="grid grid-cols-[1fr_3rem_3rem] items-center gap-x-3 bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
               <span>模块</span><span class="text-center">查看</span><span class="text-center">管理</span>
             </div>
             <div v-for="item in PERMISSION_MODULES" :key="item.module" class="grid grid-cols-[1fr_3rem_3rem] items-center gap-x-3 border-t px-3 py-2.5">
               <div class="grid min-w-0 gap-0.5">
                 <span class="text-xs font-medium">{{ item.label }}</span>
-                <small class="text-[11px] text-muted-foreground">查看：{{ item.view }}<template v-if="hasManage(item)">；管理：{{ item.manage }}</template></small>
+                <small class="text-xs text-muted-foreground">查看：{{ item.view }}<template v-if="hasManage(item)">；管理：{{ item.manage }}</template></small>
               </div>
               <div class="flex justify-center">
                 <Switch :model-value="granted(viewPermission(item.module))" :aria-label="`${item.label}：查看`" @update:model-value="setPermission(item, 'view', $event)" />
@@ -246,7 +246,7 @@ async function deleteRole(role: AdminRole) {
               </div>
             </div>
           </div>
-          <p class="text-[11px] text-muted-foreground">「管理」包含「查看」。管理员与角色管理仅限超级管理员，不能通过角色授予；修改后立即对使用该角色的管理员生效。</p>
+          <p class="text-xs text-muted-foreground">「管理」包含「查看」。管理员与角色管理仅限超级管理员，不能通过角色授予；修改后立即对使用该角色的管理员生效。</p>
         </fieldset>
         <DialogFooter>
           <Button type="button" variant="outline" :disabled="formBusy" @click="dialogOpen = false">取消</Button>

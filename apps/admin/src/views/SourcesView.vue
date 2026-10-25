@@ -70,7 +70,7 @@ const sourceRows = computed(() => sources.value.map((source) => ({ source, cover
 const taskState = {
   已完成: { icon: Check, class: "bg-success-soft text-success", progress: "完成", result: "同步完成" },
   运行中: { icon: RefreshCw, class: "bg-secondary text-link", progress: "", result: "正在同步文章" },
-  失败: { icon: TriangleAlert, class: "bg-destructive/10 text-destructive", progress: "失败", result: "同步失败" },
+  失败: { icon: TriangleAlert, class: "bg-destructive-soft text-destructive", progress: "失败", result: "同步失败" },
   等待中: { icon: LoaderCircle, class: "bg-muted text-muted-foreground", progress: "排队中", result: "等待 Worker" },
 } satisfies Record<Task["status"], unknown>;
 
@@ -128,8 +128,8 @@ function startCrawl(source: Source) {
   <Card class="mb-8 grid grid-cols-2 gap-0 py-0 lg:grid-cols-4" aria-label="数据源概览">
     <article v-for="item in summary" :key="item.label" class="relative flex min-h-26 flex-col px-5 py-4 max-lg:odd:border-r max-lg:[&:nth-child(-n+2)]:border-b lg:border-r lg:last:border-r-0">
       <span class="text-xs text-muted-foreground">{{ item.label }}</span>
-      <strong class="mt-2 text-2xl font-semibold text-primary">{{ item.value }}<span v-if="item.unit" class="ml-1 text-xs font-normal text-muted-foreground">{{ item.unit }}</span></strong>
-      <small class="mt-0.5 text-[11px] text-muted-foreground/80">{{ item.hint }}</small>
+      <strong class="mt-2 text-[28px] leading-tight font-semibold text-foreground tabular-nums">{{ item.value }}<span v-if="item.unit" class="ml-1 text-xs font-normal text-muted-foreground">{{ item.unit }}</span></strong>
+      <small class="mt-0.5 text-xs text-muted-foreground">{{ item.hint }}</small>
       <component :is="item.icon" class="absolute top-4 right-4 size-4 text-link/70" aria-hidden="true" />
     </article>
   </Card>
@@ -142,19 +142,19 @@ function startCrawl(source: Source) {
       <Table class="min-w-[750px]">
         <TableHeader class="bg-muted/50"><TableRow><TableHead class="pl-4">名称</TableHead><TableHead>同步频率</TableHead><TableHead title="已入库文章数 / 最近一次同步时接口返回的文章总数">已入库 / 接口总数</TableHead><TableHead>状态</TableHead><TableHead>最近同步</TableHead><TableHead /></TableRow></TableHeader>
         <TableBody>
-          <TableRow v-for="{ source, coverage } in sourceRows" :key="source.id" class="text-xs text-muted-foreground">
+          <TableRow v-for="{ source, coverage } in sourceRows" :key="source.id" class="text-[13px] text-muted-foreground">
             <TableCell class="py-3 pl-4">
               <div class="flex items-center gap-2.5">
                 <span class="grid size-7 place-items-center rounded-md border bg-secondary font-mono text-xs text-link">A</span>
-                <span class="grid gap-1"><b class="text-xs font-semibold text-foreground">{{ source.name }}</b><small class="max-w-80 truncate text-[11px]">{{ source.url }}</small></span>
+                <span class="grid gap-1"><b class="text-sm font-semibold text-foreground">{{ source.name }}</b><small class="max-w-80 truncate text-xs">{{ source.url }}</small></span>
               </div>
             </TableCell>
             <TableCell>{{ source.frequency }}</TableCell>
             <TableCell>
               <div class="grid w-52 gap-1.5">
-                <span class="tabular-nums"><b class="font-semibold text-foreground">{{ source.pages.toLocaleString() }}</b> / {{ source.remoteTotal?.toLocaleString() ?? "—" }}<span v-if="coverage.percent !== null" class="ml-1.5 text-[11px]">{{ coverage.percent }}%</span></span>
+                <span class="tabular-nums"><b class="font-semibold text-foreground">{{ source.pages.toLocaleString() }}</b> / {{ source.remoteTotal?.toLocaleString() ?? "—" }}<span v-if="coverage.percent !== null" class="ml-1.5 text-xs">{{ coverage.percent }}%</span></span>
                 <Progress v-if="coverage.percent !== null" :model-value="coverage.percent" class="h-1" />
-                <small class="text-[11px] tabular-nums">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
+                <small class="text-xs tabular-nums">{{ coverage.hint }}<span v-if="source.failedCount" class="text-destructive"> · {{ source.failedCount }} 篇失败待重试</span></small>
               </div>
             </TableCell>
             <TableCell><StatusBadge :on="source.status === '运行中'">{{ source.status }}</StatusBadge></TableCell>
@@ -178,19 +178,19 @@ function startCrawl(source: Source) {
       <div v-for="task in tasks" :key="task.id" class="flex min-h-14 items-center gap-3 border-b px-4 last:border-b-0">
         <span :class="['grid size-6 flex-none place-items-center rounded-full', taskState[task.status].class]"><component :is="taskState[task.status].icon" class="size-3.5" /></span>
         <div class="grid w-56 min-w-0 gap-1 max-lg:w-44">
-          <b class="truncate text-xs font-semibold">{{ task.source }} <span class="ml-1.5 font-mono text-[10px] font-normal text-muted-foreground/70" :title="task.id">{{ task.id.startsWith('CR-') ? task.id : task.id.slice(0, 8) }}</span></b>
-          <small class="truncate text-[11px] text-muted-foreground">{{ task.error || task.started }}</small>
+          <b class="truncate text-xs font-semibold">{{ task.source }} <span class="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground" :title="task.id">{{ task.id.startsWith('CR-') ? task.id : task.id.slice(0, 8) }}</span></b>
+          <small class="truncate text-xs text-muted-foreground">{{ task.error || task.started }}</small>
         </div>
         <div class="flex max-w-80 flex-1 items-center gap-2.5">
           <Progress :model-value="taskProgress(task).value" class="h-1" />
-          <small class="min-w-24 text-[11px] whitespace-nowrap text-muted-foreground tabular-nums">{{ taskProgress(task).label }}</small>
+          <small class="min-w-24 text-xs whitespace-nowrap text-muted-foreground tabular-nums">{{ taskProgress(task).label }}</small>
         </div>
-        <span class="ml-auto w-32 text-[11px] text-muted-foreground tabular-nums max-md:hidden">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
+        <span class="ml-auto w-32 text-xs text-muted-foreground tabular-nums max-md:hidden">{{ taskState[task.status].result }}<span v-if="task.failedCount" class="text-destructive"> · {{ task.failedCount }} 篇失败</span></span>
       </div>
       <EmptyState v-if="tasks.length === 0">暂无同步任务</EmptyState>
     </Card>
   </section>
-  <footer class="flex items-center gap-2 px-0.5 py-3 text-[11px] text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，单次同步有篇数上限，首次全量同步需多次执行；接口总数取自最近一次同步，无正文（如 VIP）的文章会计入失败。</footer>
+  <footer class="flex items-center gap-2 px-0.5 py-3 text-xs text-muted-foreground"><Info class="size-3.5 flex-none" />数据源按 updateTime 增量同步 nyzdata 文章，单次同步有篇数上限，首次全量同步需多次执行；接口总数取自最近一次同步，无正文（如 VIP）的文章会计入失败。</footer>
 
   <SourceCreateDialog v-model:open="dialogOpen" :refresh-sources="loadKnowledge" />
 </template>
