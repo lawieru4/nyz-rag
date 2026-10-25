@@ -4,7 +4,7 @@ import {
   AdmissionError, buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, getModelSelections, HISTORY_TURNS, keywordSearchChunks,
   listChatMessages, listChatSessions, listKnowledgeBases, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve,
-  summarySearchChunks, usableModel, vectorSearchChunks, type AnswerContext, type ChatOwner, type ChatTurn,
+  summarySearchChunks, usableModel, validateCitations, vectorSearchChunks, INSUFFICIENT_EVIDENCE_ANSWER, type AnswerContext, type ChatOwner, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
   ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
@@ -88,26 +88,33 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
     try {
       let text = "";
       for await (const chunk of chat.streamChat(buildChatMessages(knowledgeBase?.prompt ?? "", question, context, options.history), { signal: options.signal })) {
+        if (options.signal?.aborted) break;
         if (chunk.type === "token") {
-          usage.firstTokenMs ??= elapsed(started);
           text += chunk.text;
-          options.onToken?.(chunk.text);
         } else {
           usage.promptTokens = chunk.promptTokens;
           usage.completionTokens = chunk.completionTokens;
         }
       }
-      if (text.trim()) {
-        answer = text.trim();
+      const candidate = text.trim();
+      const citations = validateCitations(candidate, context.sources.length);
+      if (candidate === INSUFFICIENT_EVIDENCE_ANSWER || (citations.cited.length > 0 && citations.invalid.length === 0)) {
+        answer = candidate;
         answerMode = "generated";
         usage.model = chat.model;
       } else {
-        log.warn("Chat model returned an empty answer; using extractive answer");
+        log.warn({ cited: citations.cited, invalid: citations.invalid }, "Chat answer rejected by citation presence/ID gate; using extractive evidence");
       }
     } catch (error) {
       if (error instanceof AdmissionError) throw error;
       if (!options.signal?.aborted) log.warn(`Chat model failed; using extractive answer: ${error instanceof Error ? error.message : "unknown error"}`);
     }
+  }
+  // Buffer the complete model response before releasing any answer text. This
+  // increases visible latency; firstTokenMs measures accepted output, not arrival.
+  if (options.onToken && !options.signal?.aborted) {
+    usage.firstTokenMs = elapsed(started);
+    options.onToken(answer);
   }
   return { answer, answerMode, context, usage, retrievalMs, totalMs: elapsed(started) };
 }

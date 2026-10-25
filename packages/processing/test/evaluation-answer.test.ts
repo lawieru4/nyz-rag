@@ -5,6 +5,7 @@ import {
 } from "../src/evaluation-answer.js";
 import { runVariant, runVariantWithContext } from "../src/evaluation-run.js";
 import { buildAnswerContext, buildChatMessages, referenceText, type ChunkHit, type RetrievalDependencies } from "../src/rag.js";
+import { citationStats as sharedCitationStats, citedNumbers as sharedCitedNumbers, validateCitations } from "../src/citations.js";
 
 const judgement = (faithful: number | null, complete: number | null, citation: number | null = 5, refused = false): Judgement => ({
   scores: { faithful, complete, citation }, refused, analysis: "", unsupported: [], missing: [],
@@ -21,11 +22,17 @@ const item = (id: string, overrides: Partial<AnswerItem> = {}): AnswerItem => ({
 });
 
 test("citations are parsed in the bracket forms models write and checked against the context", () => {
+  assert.equal(citationStats, sharedCitationStats, "offline exports preserve the shared implementation");
+  assert.equal(citedNumbers, sharedCitedNumbers);
   assert.deepEqual(citedNumbers("结论一[2][1]。结论二 [1, 3]，另见[4、2]；数组 a[i] 与 [x] 不算。"), [1, 2, 3, 4]);
   const sources = [{ articleKey: "B" }, { articleKey: "A" }];
   assert.deepEqual(citationStats("见 [2]。", sources, ["A"]), { cited: [2], invalid: [], sourceCitation: 2, sourceCited: true });
   assert.deepEqual(citationStats("见 [1][3]。", sources, ["A"]), { cited: [1, 3], invalid: [3], sourceCitation: 2, sourceCited: false });
   assert.deepEqual(citationStats("见 [1]。", sources, ["C"]), { cited: [1], invalid: [], sourceCitation: null, sourceCited: false });
+  assert.deepEqual(validateCitations("见 [2，1][2、0][3]。", 2), { cited: [0, 1, 2, 3], invalid: [0, 3] });
+  assert.deepEqual(validateCitations("没有引用，[x] 和 [1.5] 不算。", 2), { cited: [], invalid: [] });
+  assert.deepEqual(validateCitations("[1]", 0), { cited: [1], invalid: [1] });
+  assert.deepEqual(validateCitations(`[${"9".repeat(400)}]`, 2).invalid, [Infinity]);
 });
 
 test("the judge sees the same references as the chat model and never the run settings", () => {

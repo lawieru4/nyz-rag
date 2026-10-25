@@ -5,6 +5,7 @@ import { embeddingInput } from "./chunking.js";
 import { AdmissionError } from "./admission.js";
 import type { ChatMessage, RerankResult } from "./models.js";
 import { searchTerms } from "./search-terms.js";
+import { INSUFFICIENT_EVIDENCE_ANSWER } from "./citations.js";
 
 /** 单路召回命中的切片；score 为该路得分（向量为余弦相似度，关键词为 IDF 之和）。 */
 export interface ChunkHit {
@@ -278,8 +279,11 @@ export function buildChatMessages(prompt: string, question: string, context: Ans
   const system = [
     prompt.trim() || DEFAULT_ANSWER_PROMPT,
     "回答要求：",
-    "- 只依据「参考资料」回答，不要编造资料中没有的事实、数据或结论；资料不足以回答时明确说明。",
-    "- 引用资料时在相应句末用方括号标注文章编号，例如 [1] 或 [1][2]。",
+    "- 只依据本轮「参考资料」回答，不要编造资料中没有的事实、数据或结论。",
+    "- 每项事实、数值和关键结论都应在相应句末用方括号标注本轮有效的文章编号，例如 [1] 或 [1][2]；作答必须至少有一个引用，禁止引用不存在的编号。",
+    "- 资料只支持部分问题时，仅回答有依据的部分并标注引用，明确列出无法回答的部分，不得补全或推断缺失信息。",
+    "- 问题中的对象、条件或指代不明确时，不要猜测；若能给出有依据的部分回答，仍须标注引用，并明确请求用户澄清缺失的对象或条件。",
+    `- 无法依据资料作答（包括必须先澄清才能回答）时，只输出固定句子「${INSUFFICIENT_EVIDENCE_ANSWER}」，不得添加引用、解释或其他文字。`,
     "- 使用简体中文，条理清晰，保留化学式、数值与单位的原始写法。",
     ...(history.length ? ["- 之前的对话只用于理解当前问题的指代，事实依据仍以本轮「参考资料」为准。"] : []),
   ].join("\n");
@@ -290,14 +294,14 @@ export function buildChatMessages(prompt: string, question: string, context: Ans
   ];
 }
 
-/** 未配置 Chat 模型或调用失败时，直接摘录最相关的原文片段。 */
+/** 无可接受的生成回答时只展示原文证据，不宣称证据足以回答。 */
 export function extractiveAnswer(context: AnswerContext): string {
   if (!context.chunks.length) return NO_MATCH_ANSWER;
   const excerpts = context.chunks.slice(0, 2).map((chunk) => {
     const text = chunk.content.replace(/\s+/g, " ").trim();
     return `[${chunk.citation}] 《${chunk.title}》：${text.slice(0, 200)}${text.length > 200 ? "……" : ""}`;
   });
-  return `以下是知识库中最相关的原文片段（未经模型生成）：\n\n${excerpts.join("\n\n")}`;
+  return `暂无法提供可靠的生成回答。以下仅为检索到的原文片段，未验证其是否足以回答问题，也不代表已核实的答案，请核对原文或补充问题中的对象与条件：\n\n${excerpts.join("\n\n")}`;
 }
 
 /** 问答记录中保存的召回片段。 */

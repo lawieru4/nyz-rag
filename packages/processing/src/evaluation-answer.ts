@@ -3,6 +3,8 @@
 import type { QuestionType, Specificity, Split } from "./evaluation.js";
 import { GROUP_DIMENSIONS, groupKey, percentile, type GroupDimension } from "./evaluation-run.js";
 import type { ChatMessage } from "./models.js";
+import type { CitationStats } from "./citations.js";
+export { citedNumbers, citationStats, type CitationStats } from "./citations.js";
 
 /** 修改评审提示、评分口径或程序统计规则时加一；不同版本的运行不能续跑或对比。 */
 export const ANSWER_EVAL_VERSION = 1;
@@ -12,15 +14,6 @@ export type JudgeCriterion = (typeof JUDGE_CRITERIA)[number];
 
 /** 评审按 1～5 分打分，不低于该分计为通过。 */
 export const JUDGE_PASS_SCORE = 4;
-
-/** 回答的引用：cited 为回答中出现过的引用编号，invalid 为超出参考资料范围的编号。 */
-export interface CitationStats {
-  cited: number[];
-  invalid: number[];
-  /** 来源文章在参考资料中的引用编号；不在上下文中为 null。 */
-  sourceCitation: number | null;
-  sourceCited: boolean;
-}
 
 export interface Judgement {
   /** 各项得分；缺失或不是 1～5 的整数时为 null，不计入均值，按未通过计。 */
@@ -72,25 +65,6 @@ export interface AnswerItem {
   judgeUsage?: Usage;
   /** 调用失败的阶段与原因，下次运行重新处理；judge 阶段失败时保留回答，只重新评审。 */
   error?: { stage: "retrieval" | "generation" | "judge"; message: string };
-}
-
-// ---- 引用 ----
-
-// [1]、[1][2]，以及模型偶尔写成的 [1, 2] / [1、2]。
-const CITATION = /\[(\d+(?:\s*[,，、]\s*\d+)*)\]/g;
-
-export function citedNumbers(answer: string): number[] {
-  const numbers = new Set<number>();
-  for (const match of answer.matchAll(CITATION)) for (const value of match[1].split(/\s*[,，、]\s*/)) numbers.add(Number(value));
-  return [...numbers].sort((a, b) => a - b);
-}
-
-/** sources 按引用编号排列（第 n 项为 [n]），articleKey 为其所属文章。 */
-export function citationStats(answer: string, sources: Array<{ articleKey: string }>, sourceArticleKeys: string[]): CitationStats {
-  const cited = citedNumbers(answer);
-  const index = sources.findIndex((source) => sourceArticleKeys.includes(source.articleKey));
-  const sourceCitation = index >= 0 ? index + 1 : null;
-  return { cited, invalid: cited.filter((value) => value < 1 || value > sources.length), sourceCitation, sourceCited: sourceCitation !== null && cited.includes(sourceCitation) };
 }
 
 // ---- 评审 ----
