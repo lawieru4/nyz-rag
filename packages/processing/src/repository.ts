@@ -18,7 +18,7 @@ import type {
   ChatSessionRecord, CrawlTaskRecord, CreateSourceRequest, DataSourceRecord, DocumentChunkRecord,
   DocumentDetail, DocumentEmbeddingRecord, DocumentReference, DocumentListResponse, DocumentProcessingStatus, DocumentRecord, DocumentStatus, DocumentSummary, KnowledgeBaseRecord,
   KnowledgeStats, ModelCapability, ModelProviderRecord, ModelSettingRecord, ModelSettingsResponse, RetrievalFilters, SaveKnowledgeBaseRequest, SaveModelProviderRequest, SaveModelSettingRequest,
-  SaveAdminRoleRequest, SecretSettingStatus, UpdateAdminRoleRequest,
+  SaveAdminRoleRequest, SecretSettingStatus, UpdateAdminRoleRequest, UpdateSourceRequest,
 } from "@nyz-rag/types";
 import { DocumentBusyError, getDb, lockDocumentWork, withTransaction, type Executor } from "./db.js";
 import { activeOperation, insertOperation, sourceSyncRunning } from "./operations.js";
@@ -66,9 +66,13 @@ export async function createSource(input: CreateSourceRequest, db: Executor = ge
   return (await getSource(id, db))!;
 }
 
-export async function updateSourceStatus(id: string, status: DataSourceRecord["status"], db: Executor = getDb()): Promise<DataSourceRecord | null> {
-  const updated = await db.update(dataSources).set({ status }).where(eq(dataSources.id, id)).returning({ id: dataSources.id });
+export async function updateSource(id: string, patch: UpdateSourceRequest, db: Executor = getDb()): Promise<DataSourceRecord | null> {
+  const updated = await db.update(dataSources).set(patch).where(eq(dataSources.id, id)).returning({ id: dataSources.id });
   return updated.length ? getSource(id, db) : null;
+}
+
+export async function updateSourceStatus(id: string, status: DataSourceRecord["status"], db: Executor = getDb()): Promise<DataSourceRecord | null> {
+  return updateSource(id, { status }, db);
 }
 
 export async function getSourceSyncState(id: string, db: Executor = getDb()): Promise<ArticleSourceSyncState> {

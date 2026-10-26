@@ -650,12 +650,13 @@ const createSourceBodySchema = {
   additionalProperties: false,
 } as const;
 
-const updateSourceStatusBodySchema = {
+const updateSourceBodySchema = {
   type: "object",
   properties: {
     status: { type: "string", enum: ["运行中", "已暂停"] },
+    frequency: { type: "string", enum: ["每小时", "每 6 小时", "每天", "手动"] },
   },
-  required: ["status"],
+  minProperties: 1,
   additionalProperties: false,
 } as const;
 
@@ -1334,7 +1335,7 @@ export const routeSchemas: Record<string, RouteSchema> = {
 
   "PATCH /api/admin/sources/:id": {
     params: { type: "object", properties: { id: uuidParam }, required: ["id"], additionalProperties: false },
-    body: updateSourceStatusBodySchema,
+    body: updateSourceBodySchema,
     response: { "200": dataSourceRecordSchema, ...errorResponses },
   },
 

@@ -508,8 +508,13 @@ export interface CreateSourceRequest {
   frequency: string;
 }
 
-export interface UpdateSourceStatusRequest {
-  status: DataSourceRecord["status"];
+/** 管理端可选的同步频率；手动、空值与其他值都不自动同步。 */
+export type SourceFrequency = "每小时" | "每 6 小时" | "每天" | "手动";
+
+/** 至少包含一项。 */
+export interface UpdateSourceRequest {
+  status?: DataSourceRecord["status"];
+  frequency?: SourceFrequency;
 }
 
 export interface SearchResult {

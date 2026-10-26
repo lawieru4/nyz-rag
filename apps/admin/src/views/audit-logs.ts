@@ -14,7 +14,7 @@ const WRITE_ACTIONS: Record<string, string> = {
   "PUT /api/admin/settings/article-token": "设置文章 token",
   "DELETE /api/admin/settings/article-token": "清除文章 token",
   "POST /api/admin/sources": "新建数据源",
-  "PATCH /api/admin/sources/:id": "暂停或恢复数据源",
+  "PATCH /api/admin/sources/:id": "修改数据源（启停或同步频率）",
   "POST /api/admin/sources/:id/sync": "同步数据源",
   "POST /api/admin/documents/:id/reprocess": "重新处理文档",
   "POST /api/admin/documents/:id/embed": "向量化文档",

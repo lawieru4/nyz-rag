@@ -7,7 +7,7 @@ import { Input } from "@nyz-rag/ui/components/input";
 import { Label } from "@nyz-rag/ui/components/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@nyz-rag/ui/components/select";
 import { toast } from "@nyz-rag/ui/lib/toast";
-import { client, errorMessage, refreshAfterWrite } from "../workspace";
+import { client, errorMessage, refreshAfterWrite, sourceFrequencies } from "../workspace";
 
 const props = defineProps<{ refreshSources: () => Promise<void> }>();
 const dialogOpen = defineModel<boolean>("open", { required: true });
@@ -57,7 +57,7 @@ async function addSource() {
         <div class="grid gap-2"><Label for="source-url">来源地址</Label><Input id="source-url" v-model="form.url" type="url" placeholder="https://nyzdata.nenghe.com/nyzfoxx/article?tagKey=…" required /></div>
         <div class="grid gap-2">
           <Label for="source-frequency">同步频率</Label>
-          <Select v-model="form.frequency"><SelectTrigger id="source-frequency" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="frequency in ['每小时', '每 6 小时', '每天', '手动']" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent></Select>
+          <Select v-model="form.frequency"><SelectTrigger id="source-frequency" class="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem v-for="frequency in sourceFrequencies" :key="frequency" :value="frequency">{{ frequency }}</SelectItem></SelectContent></Select>
         </div>
         <p class="rounded-md bg-secondary p-2.5 text-xs leading-relaxed text-secondary-foreground">新增来源默认暂停，确认授权后再启动。来源地址填写 nyzdata 文章列表接口（不含 token），token 在本页「nyzdata 接口 Token」中配置。</p>
         <DialogFooter>
