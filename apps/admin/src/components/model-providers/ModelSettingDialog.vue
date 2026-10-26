@@ -78,7 +78,7 @@ watch(open, (isOpen) => {
   }
   const current = props.setting;
   const providerId = current && enabledProviders.value.some((provider) => provider.id === current.providerId) ? current.providerId : enabledProviders.value[0]?.id ?? "";
-  settingForm.value = { providerId, model: current?.model ?? "", temperature: current?.temperature ?? props.capability.defaultTemperature ?? 0.3, maxTokens: current?.maxTokens ?? 1024 };
+  settingForm.value = { providerId, model: current?.model ?? "", temperature: current?.temperature ?? props.capability.defaultTemperature ?? 0.3, maxTokens: current?.maxTokens ?? props.capability.defaultMaxTokens ?? 1024 };
   void loadModels();
 });
 
@@ -147,6 +147,7 @@ async function saveSetting() {
           <div class="grid gap-2"><Label for="ms-temperature">温度</Label><Input id="ms-temperature" v-model.number="settingForm.temperature" type="number" min="0" max="2" step="0.1" required /></div>
           <div class="grid gap-2"><Label for="ms-max-tokens">最大输出 Token</Label><Input id="ms-max-tokens" v-model.number="settingForm.maxTokens" type="number" min="1" max="1048576" step="1" required /></div>
           <p v-if="capability.id === 'chat'" class="col-span-2 text-xs leading-relaxed text-muted-foreground">最大输出 Token 是单次回答的长度上限（max_tokens），不是上下文窗口；不要超过模型的最大输出长度，否则调用会失败并退回原文摘录。问答回答一般 1024～4096 足够。</p>
+          <p v-else-if="capability.id === 'rewrite'" class="col-span-2 text-xs leading-relaxed text-muted-foreground">改写只输出一个问题，温度建议为 0；最大输出 256 一般足够。推理模型的思考过程也计入输出，上限过小会被截断，改写失败时退回原问题检索。</p>
           <p v-else class="col-span-2 text-xs leading-relaxed text-muted-foreground">审核输出逐项判断与理由，温度建议为 0 以便结果稳定；最大输出 1024～2048 一般足够，推理模型需要留出思考的长度。</p>
         </div>
         <p v-if="capability.id === 'embedding'" class="text-xs leading-relaxed text-muted-foreground">更换 Embedding 供应商或模型后，已向量化的文档需要重新向量化。</p>

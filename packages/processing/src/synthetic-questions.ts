@@ -288,7 +288,7 @@ export function parseReview(value: Record<string, unknown>): ReviewResult {
 
 // ---- 程序校验 ----
 
-const PRONOUNS = /本文|该文|该研究|此研究|本研究|该论文|这篇|上述|文中|作者|该团队|该工作|此项研究/;
+export const PRONOUNS = /本文|该文|该研究|此研究|本研究|该论文|这篇|上述|文中|作者|该团队|该工作|此项研究/;
 
 /** 问题词项中出现在参考文本词项里的比例。 */
 export function lexicalOverlap(question: string, reference: string): number {
@@ -313,7 +313,7 @@ export function evidenceSource(article: CorpusArticle, type: SyntheticType): str
 }
 
 // 答案中的小数与 4 位以上整数（不与字母相连），出现在问题里视为泄漏答案；年份是问题应写明的时间范围，不算。
-const answerNumbers = (text: string) => [...normalizeSearchText(text).matchAll(/(?<![a-z0-9.])(\d+\.\d+|\d{4,})(?![a-z0-9])/g)]
+export const answerNumbers = (text: string) => [...normalizeSearchText(text).matchAll(/(?<![a-z0-9.])(\d+\.\d+|\d{4,})(?![a-z0-9])/g)]
   .map((match) => match[1]).filter((value) => !/^(19|20)\d{2}$/.test(value));
 
 export interface CheckResult {

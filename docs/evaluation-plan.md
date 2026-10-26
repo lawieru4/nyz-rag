@@ -81,7 +81,7 @@
 
 `low` 题天然可能被多篇文章回答，单来源 Hit 会偏低，所以必须与 `high` 题分开报告（第七节）。
 
-首版不生成 `compare`（需跨篇标注）、`followup`（合成的多轮追问不像真实用户），也不生成 `unanswerable`（无法证明语料中确实没有答案）。
+首版不生成 `compare`（需跨篇标注）、`followup`（合成的多轮追问不像真实用户），也不生成 `unanswerable`（无法证明语料中确实没有答案）。多轮追问题后来为检验检索问题改写，从单轮合成集派生（第 8.10 节），仍不能代替真实多轮对话。
 
 ### 4.3 生成要求
 
@@ -574,6 +574,49 @@ keyword、vector、summary 只在与 rerank、fused 重叠的文章上有结论�
 - **对比改动时仍以严格指标为主**。宽松指标随复判结论变化，只用来区分「排序失误」与「其他文章也能回答」。改动后跌出前 1、前 10 的题目，先查看复判结论再下结论。
 - **新运行的复判成本低**：结论按「题目 + 文章」复用，新运行只需复判新出现在来源文章之前的文章。
 
+### 8.10 多轮追问评估（检索问题改写）
+
+问答在有历史时先由 Chat 模型把追问改写为独立问题再检索（`query-rewrite.ts`）。单轮评估集测不到这一步，因此另建多轮题集，并让检索与回答评估能重放对话历史。
+
+**题集（`evaluate:multiturn`）**。从已冻结的单轮合成集派生，标注沿用原问题，不重新出题：
+
+- 追问题（`type: followup`）：Chat 模型把原问题拆成两轮——第一轮就原问题中的核心对象（`entity`，逐字摘自原问题）提一个概括性问题，并依据文章给出不含答案的回答；第二轮与原问题问同一件事，但用指代或省略代替对象。原问题写入 `standalone` 字段。
+- 程序校验：对象必须出现在原问题、第一轮问题和回答中，不得出现在追问中（含词项重叠 ≥ 0.5 的近似写法）；第一轮回答不得包含原问题的答案或其中的数值；长度限制与指代词检查同第五节。
+- 审核模型逐项打 1～5 分（全部 ≥ 4 通过）：`dependent`（追问依赖历史）、`resolvable`（指代能唯一确定为该对象）、`equivalent`（与原问题等价，条件与时间范围未丢失）、`natural`。审核不看文章正文。未通过时带原因重试，共 3 次。
+- 换话题题（与追问题同等数量，不调用模型）：当前问题是另一道原问题（完整、独立），历史取自另一篇来源文章的追问题第一轮，用于检查改写会不会把旧话题带进检索。
+- 局限：第一轮回答由生成模型依据文章写成，不是系统的真实回答，也不附带上一轮引用的文章标题（线上改写会用到），评估结果偏保守；合成追问不能代替真实多轮对话，真实题目仍从反馈审核流程积累（第十二节）。
+
+**重放**。`evaluate:retrieval --mode=hybrid` 与 `evaluate:answer` 遇到带历史的题目时必须指定 `--rewrite`（否则报错，避免误产生费用或静默忽略历史）；`offline` / `db` 模式和过滤条件仍不支持。
+
+| `--rewrite` | 检索问题 | 用途 |
+| --- | --- | --- |
+| `none` | 只用当前问题 | 引入改写前的线上行为（下限） |
+| `concat` | 最近 3 轮的问题与当前问题拼接 | 不调用模型的基线 |
+| `llm` | 与问答相同的模型改写（同一提示词与模型选择：业务模型 `rewrite`，未配置时为 Chat 模型、温度 0）；失败或输出不合格时用当前问题 | 当前线上行为，会调用模型 |
+| `standalone` | 题目标注的独立问题 | 改写的上限 |
+
+没有历史的题目在任何方式下都只用当前问题。回答层评估把历史（最近 3 轮）送入回答模型，评审看到的问题附上此前各轮的问题与独立问题（单轮题不变）。
+
+**指标**。各指标另按对话分组（`turn`：`single` / `followup` / `with-history`）输出，`evaluate:compare` 增加「按对话」一行。运行记录的 `rewrite` 汇总改写失败数、改写耗时 p50 / p95（改写位于首 Token 之前，即首 Token 延迟的增量）、Token 用量，以及独立问题词项保留率（独立问题的检索词项出现在检索问题中的比例，衡量改写是否补全了对象与条件）。
+
+建议的验收：在 dev 集上，`llm` 的追问题 Hit@10 / MRR 明显高于 `none`、接近 `standalone`，且换话题题不低于 `none`（1 个百分点容差）；`concat` 若已接近 `llm`，需要权衡多一次模型调用是否值得。
+
+**首轮结果（2026-10-26）**。题集 `nyz-rag-multiturn-v1`：由 `nyz-rag-synthetic-v1` 的 dev 238 道派生（生成 gemini-3.8-flash-high，审核 gpt-6.1-sol，提示版本 1），通过 236 道，另配对换话题 236 道；生成与审核共约 1.19M Token。审核几乎全部给满分，按词项计算追问平均保留独立问题 70% 的词项，约一半追问不看历史也基本能检索到，改写收益因此被稀释。业务库（切片版本 3）`rerank` 变体的 Hit@5 / MRR（%）：
+
+| `--rewrite` | 追问（236） | 换话题（236） |
+| --- | --- | --- |
+| `none` | 89.0 / 85.6 | 97.9 / 95.8 |
+| `concat` | 98.3 / 95.2 | 94.9 / 83.0 |
+| `llm` | 98.7 / 95.2（234 道，2 道查询 Embedding 限流失败） | 97.9 / 95.8 |
+| `standalone` | 97.9 / 95.8 | 97.9 / 95.6 |
+
+- `llm` 的追问题达到 `standalone` 上限，换话题题与 `none` 持平（236 道中只有 1 道被改写并带入了上一轮对象，排序未受影响），召回层验收通过。向量与摘要两路受指代影响最大（`none` 下追问 Hit@5 为 48.7 / 43.6，`llm` 为 82.5 / 72.7）。
+- `concat` 追问效果与 `llm` 相当，但把旧话题带进检索，换话题 MRR 下降约 13 个百分点，不能代替改写。
+- 改写 0 次失败；耗时 p50 4.2 秒、p95 5.7 秒，即首 Token 延迟增加约 4 秒，p95 已接近 8 秒超时。每次平均输入约 330、输出约 176 Token；输出远长于改写结果，推测含推理 Token（所用 Chat 模型为带推理的型号）。延迟是目前的主要问题；为此业务模型新增「检索问题改写」（`rewrite`），可为改写单独配置不带推理的快速模型。
+- 改写模型复测（`multiturn-llm-gpt6luna`）：改写模型改为不带推理的 gpt-6-luna（温度 0、最大 256 Token）后，两边都有效的 470 道 `rerank` Hit@5 / MRR 为 97.7 / 95.4（原 98.3 / 95.5），名次 463 道不变、上升 2、下降 5，召回持平；改写耗时 p50 3.3 秒、p90 6.1 秒，约 5% 首次请求超过 8 秒超时（评估脚本会重试，在线问答则退回原问题检索），最终失败 1 道；每次输入约 390、输出约 44 Token。若把超时降到 5 秒，追问中退回原问题的比例将由 5% 升至 18%，因此保持 8 秒。同一次运行中有 1 道改写输出是对任务的解释（「原样输出最新问题，因为无法确定"它"指代的对象」）而被当作检索问题，导致来源文章跌出前 10；输出校验已增加此类说法的拦截（此前两次全量运行的 944 次改写中只命中这 1 道）。
+- 选型试点：经本机代理转发的 aipro-gpt-6-luna 每次输入约 4.8K Token（代理附加了系统提示词），10 道冒烟中 5 道超时，不可用；改写模型应直连或选用不附加提示词的通道，换模型前先用 `--limit=10` 冒烟。
+- 回答层（`evaluate:answer --rewrite`）尚未运行。
+
 ## 九、工具实现
 
 | 步骤 | 内容 | 预估 |
@@ -586,6 +629,7 @@ keyword、vector、summary 只在与 rerank、fused 重叠的文章上有结论�
 | X ✅ | 实验索引 `evaluate:index`、`--schema` 与 `--context`、全部证据覆盖率与上下文字数、对比中的证据变化清单；父子块切片实验（第 8.5、8.6 节） | 1 天 |
 | H ✅ | 失败题复判 `evaluate:adjudicate`：审核模型判断排在来源文章之前的文章能否回答，证据程序校验，按「题目 + 文章」缓存；宽松 Hit@K / MRR 写入运行记录，`evaluate:compare` 并列对比（第 7.3、8.9 节） | 1 天，基线产出后 |
 | I ✅ | 回答层评估 `evaluate:answer`：对评估集运行完整问答（不保存问答记录），计算来源文章被引用的比例；LLM 评审回答是否忠实于上下文、是否完整、引用是否恰当；`--compare` 对比（第 8.7 节） | 2 天，切片改造后 |
+| M ✅ | 多轮追问：`evaluate:multiturn` 从单轮合成集派生追问题与换话题题；`evaluate:retrieval` / `evaluate:answer` 的 `--rewrite` 重放历史；按对话分组与改写统计（第 8.10 节）。题集 `nyz-rag-multiturn-v1` 已冻结，召回层已运行 | 1 天 + 模型运行时间 |
 
 顺序：C → G（试点）→ A → B → 全量生成与基线。生成与评估都只使用已有依赖与模型供应商配置，不新增依赖。
 
@@ -622,6 +666,14 @@ pnpm evaluate:answer --compare answer-topk answer-budget
 # 7. 失败题复判（调用审核模型，产生费用；第 7.3 节）：先统计，再复判，宽松指标写入运行记录
 pnpm evaluate:adjudicate baseline-chunker3 --dry-run
 pnpm evaluate:adjudicate baseline-chunker3
+
+# 8. 多轮追问（第 8.10 节）：派生题集（调用 Chat 与审核模型），再对比检索问题的四种来源（llm 调用 Chat 模型）
+pnpm evaluate:multiturn --name=nyz-rag-multiturn-v1 --from=packages/processing/test/evaluation/nyz-rag-synthetic-v1.json --split=dev --limit=30
+pnpm evaluate:multiturn --name=nyz-rag-multiturn-v1
+pnpm evaluate:multiturn --name=nyz-rag-multiturn-v1 --freeze
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-multiturn-v1.json --rewrite=none --name=mt-none
+pnpm evaluate:retrieval --mode=hybrid --dataset=packages/processing/test/evaluation/nyz-rag-multiturn-v1.json --rewrite=llm --name=mt-llm
+pnpm evaluate:compare mt-none mt-llm
 ```
 
 根目录的 `evaluate:*` 脚本转发到 `@nyz-rag/processing`。dev 集 238 道题、全部变体按顺序运行约需数分钟，`--concurrency` 可以并行，但会使耗时指标偏高。

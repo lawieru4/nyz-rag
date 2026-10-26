@@ -244,7 +244,7 @@ export const modelProviders = pgTable("model_providers", {
   updatedAt: timestamptz().notNull().defaultNow(),
 });
 
-// 业务模型：Chat、Embedding、Rerank 各选一个供应商与模型；temperature / max_tokens 只用于 Chat。被使用的供应商不能删除。
+// 业务模型：Chat、Embedding、Rerank、审核、改写各选一个供应商与模型；temperature / max_tokens 只用于 Chat、审核与改写。被使用的供应商不能删除。
 export const modelSettings = pgTable("model_settings", {
   capability: text().$type<ModelCapability>().primaryKey(),
   providerId: text().notNull().references(() => modelProviders.id, { onDelete: "restrict" }),
@@ -253,7 +253,7 @@ export const modelSettings = pgTable("model_settings", {
   maxTokens: integer().notNull().default(1024),
   updatedAt: timestamptz().notNull().defaultNow(),
 }, (table) => [
-  check("model_settings_capability_check", sql`${table.capability} IN ('chat', 'embedding', 'rerank', 'review')`),
+  check("model_settings_capability_check", sql`${table.capability} IN ('chat', 'embedding', 'rerank', 'review', 'rewrite')`),
   check("model_settings_model_check", sql`btrim(${table.model}) <> ''`),
   check("model_settings_temperature_check", sql`${table.temperature} BETWEEN 0 AND 2`),
   check("model_settings_max_tokens_check", sql`${table.maxTokens} BETWEEN 1 AND 1048576`),
@@ -365,6 +365,13 @@ export const chatMessages = pgTable("chat_messages", {
   // 知识库可能被删除，不设外键。
   knowledgeBaseId: text(),
   model: text(),
+  // 追问时由模型改写、实际用于检索的问题；未改写（无历史、改写失败或输出不合格）时为空。
+  retrievalQuery: text(),
+  // 改写耗时（已计入 retrievalMs），未尝试改写时为空。
+  rewriteMs: integer(),
+  // 改写调用的 Token 用量，与回答的 prompt_tokens / completion_tokens 分开记录；供应商未返回用量时为空。
+  rewritePromptTokens: integer(),
+  rewriteCompletionTokens: integer(),
   retrievalMs: integer(),
   firstTokenMs: integer(),
   totalMs: integer(),

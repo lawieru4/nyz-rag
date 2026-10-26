@@ -2,6 +2,7 @@
 import type { CorpusSnapshot, EvaluationLabel, EvaluationQuestion, QuestionType, Specificity, Split } from "./evaluation.js";
 import { assertSupportedEvaluationInputs } from "./evaluation.js";
 import type { RunAdjudication } from "./evaluation-adjudication.js";
+import type { QueryOutcome, RewriteMode } from "./evaluation-rewrite.js";
 import { buildAnswerContext, buildSectionContext, CANDIDATE_LIMIT, retrieve, type AnswerContext, type RetrievalDependencies, type RetrievalSettings, type SectionContext } from "./rag.js";
 
 export const RETRIEVAL_VARIANTS = ["keyword", "vector", "summary", "fused", "rerank"] as const;
@@ -72,6 +73,10 @@ export interface RunQuestion {
   split: Split;
   lexicalOverlap?: number;
   sourceArticleKeys: string[];
+  /** 对话历史轮数；没有历史时省略。 */
+  historyTurns?: number;
+  /** 带历史的题目实际用于检索的问题（--rewrite）及独立问题词项的保留比例；没有历史时省略。 */
+  rewrite?: QueryOutcome & { standaloneRecall?: number | null };
   /** 因语料变化排除的原因：来源文章已不在语料中，或证据已不在原文中。 */
   excluded?: string;
   embeddingMs?: number;
@@ -93,7 +98,7 @@ export interface HybridMetrics {
   contextChars: number | null;
 }
 
-export const GROUP_DIMENSIONS = ["split", "type", "specificity", "overlap"] as const;
+export const GROUP_DIMENSIONS = ["split", "type", "specificity", "overlap", "turn"] as const;
 export type GroupDimension = (typeof GROUP_DIMENSIONS)[number];
 
 export interface VariantSummary {
@@ -104,6 +109,17 @@ export interface VariantSummary {
 }
 
 interface ModelInfo { provider: string; model: string }
+
+/** 带历史题目的检索问题改写统计；failures 为 llm 改写失败或输出不合格、退回当前问题的题数。 */
+export interface RewriteSummary {
+  mode: RewriteMode;
+  questions: number;
+  failures: number;
+  latency: { p50: number | null; p95: number | null };
+  /** 按对话分组（turn）的独立问题词项平均保留比例，只统计标注了独立问题的题目。 */
+  standaloneRecall: Record<string, number | null>;
+  usage: { promptTokens: number; completionTokens: number };
+}
 
 export interface RunRecord {
   schemaVersion: typeof RUN_SCHEMA_VERSION;
@@ -116,11 +132,14 @@ export interface RunRecord {
   /** 向量化覆盖率不足 100% 时为 true，结果不完整。 */
   incomplete: boolean;
   /** context 为上下文组装方式，缺省为 topk；schema 为评估用的实验 schema，缺省为业务库。 */
-  settings: { knowledgeBase: { id: string; name: string } | null; retrieval: RetrievalSettings; rankingDepth: number; context?: ContextMode; schema?: string };
-  models: { embedding: ModelInfo | null; rerank: ModelInfo | null };
+  /** rewrite 为带历史题目的检索问题改写方式，只有数据集含带历史的题目时记录。 */
+  settings: { knowledgeBase: { id: string; name: string } | null; retrieval: RetrievalSettings; rankingDepth: number; context?: ContextMode; schema?: string; rewrite?: RewriteMode };
+  /** rewrite 为 --rewrite=llm 时改写使用的模型（业务模型 rewrite，未配置时为 Chat 模型）。 */
+  models: { embedding: ModelInfo | null; rerank: ModelInfo | null; rewrite?: ModelInfo };
   variants: RetrievalVariant[];
   summary: Partial<Record<RetrievalVariant, VariantSummary>>;
   embedding: { p50: number | null; p95: number | null; failures: number };
+  rewrite?: RewriteSummary;
   questions: RunQuestion[];
   /** 失败题复判与宽松指标（7.3），由 evaluate:adjudicate 补写。 */
   adjudication?: RunAdjudication;
@@ -179,7 +198,7 @@ export function variantDependencies(variant: RetrievalVariant, full: RetrievalDe
 
 /**
  * 用一个变体检索一道题：排名列表取 RANKING_DEPTH 个切片，回答上下文按 context.mode 组装（默认取前 settings.topK 个并按 maxContextLength 截取）。
- * 只有 rerank 变体开启 Rerank，其余参数取自知识库。
+ * 只有 rerank 变体开启 Rerank，其余参数取自知识库。带历史的题目必须给出 retrievalQuery（按 --rewrite 得到的检索问题），否则报错。
  */
 export async function runVariant(...args: Parameters<typeof runVariantWithContext>): Promise<VariantResult> {
   return (await runVariantWithContext(...args)).result;
@@ -187,12 +206,12 @@ export async function runVariant(...args: Parameters<typeof runVariantWithContex
 
 /** 同 runVariant，另返回组装好的回答上下文，供回答层评估送入 Chat 模型。 */
 export async function runVariantWithContext(
-  question: Pick<EvaluationQuestion, "question" | "type" | "labels"> & Partial<Pick<EvaluationQuestion, "id" | "history" | "filters">>, variant: RetrievalVariant, settings: RetrievalSettings,
-  dependencies: RetrievalDependencies, articleKeyOf: (documentId: string) => string, context: ContextOptions = { mode: "topk" },
+  question: Pick<EvaluationQuestion, "question" | "type" | "labels"> & Partial<Pick<EvaluationQuestion, "id" | "history" | "filters">> & { retrievalQuery?: string },
+  variant: RetrievalVariant, settings: RetrievalSettings, dependencies: RetrievalDependencies, articleKeyOf: (documentId: string) => string, context: ContextOptions = { mode: "topk" },
 ): Promise<{ result: VariantResult; context: AnswerContext }> {
-  assertSupportedEvaluationInputs([{ ...question, id: question.id ?? "question", history: question.history ?? [], filters: question.filters ?? null } as EvaluationQuestion]);
+  assertSupportedEvaluationInputs([{ ...question, id: question.id ?? "question", history: question.history ?? [], filters: question.filters ?? null } as EvaluationQuestion], { history: question.retrievalQuery !== undefined });
   const started = performance.now();
-  const { chunks, warnings } = await retrieve(question.question, { ...settings, topK: RANKING_DEPTH, rerankEnabled: variant === "rerank" }, variantDependencies(variant, dependencies));
+  const { chunks, warnings } = await retrieve(question.retrievalQuery ?? question.question, { ...settings, topK: RANKING_DEPTH, rerankEnabled: variant === "rerank" }, variantDependencies(variant, dependencies));
   const retrievalMs = round(performance.now() - started, 1);
   const ranked: RunChunk[] = chunks.map((chunk) => ({
     chunkId: chunk.chunkId, articleKey: articleKeyOf(chunk.documentId), score: round(chunk.score, 6),
@@ -240,11 +259,15 @@ export function hybridMetrics(results: VariantResult[]): HybridMetrics {
   };
 }
 
-export const groupKey: Record<GroupDimension, (question: Pick<RunQuestion, "split" | "type" | "specificity" | "lexicalOverlap">) => string> = {
+/** 对话分组：single 为没有历史，followup 为追问题，with-history 为带历史的其他题目（如换话题）。 */
+export const turnGroup = (question: Pick<RunQuestion, "type" | "historyTurns">) => !question.historyTurns ? "single" : question.type === "followup" ? "followup" : "with-history";
+
+export const groupKey: Record<GroupDimension, (question: Pick<RunQuestion, "split" | "type" | "specificity" | "lexicalOverlap" | "historyTurns">) => string> = {
   split: (question) => question.split,
   type: (question) => question.type,
   specificity: (question) => question.specificity ?? "unknown",
   overlap: (question) => overlapBucket(question.lexicalOverlap),
+  turn: turnGroup,
 };
 
 /** 参与指标的题目：未因语料变化排除，查询 Embedding 与该变体的检索都成功。 */
@@ -283,6 +306,28 @@ export function summarizeVariant(questions: RunQuestion[], variant: RetrievalVar
   };
 }
 
+/** 带历史题目的改写统计（未因语料变化排除的题目）。 */
+export function summarizeRewrite(questions: RunQuestion[], mode: RewriteMode): RewriteSummary {
+  const rewritten = questions.filter((question) => !question.excluded && question.rewrite);
+  const recall = new Map<string, number[]>();
+  for (const question of rewritten) {
+    const value = question.rewrite!.standaloneRecall;
+    if (typeof value === "number") recall.set(turnGroup(question), [...(recall.get(turnGroup(question)) ?? []), value]);
+  }
+  const times = rewritten.flatMap((question) => question.rewrite!.ms === undefined ? [] : [question.rewrite!.ms]);
+  return {
+    mode,
+    questions: rewritten.length,
+    failures: rewritten.filter((question) => question.rewrite!.failed).length,
+    latency: { p50: percentile(times, 0.5), p95: percentile(times, 0.95) },
+    standaloneRecall: Object.fromEntries([...recall].sort(([a], [b]) => a.localeCompare(b)).map(([key, values]) => [key, round(values.reduce((sum, value) => sum + value, 0) / values.length)])),
+    usage: {
+      promptTokens: rewritten.reduce((sum, question) => sum + (question.rewrite!.promptTokens ?? 0), 0),
+      completionTokens: rewritten.reduce((sum, question) => sum + (question.rewrite!.completionTokens ?? 0), 0),
+    },
+  };
+}
+
 // ---- 对比 ----
 
 export interface MetricsDelta {
@@ -309,7 +354,7 @@ export interface RunComparison {
   a: HybridMetrics;
   b: HybridMetrics;
   delta: MetricsDelta;
-  groups: Record<"type" | "specificity", Record<string, { a: HybridMetrics; b: HybridMetrics; delta: MetricsDelta }>>;
+  groups: Record<"type" | "specificity" | "turn", Record<string, { a: HybridMetrics; b: HybridMetrics; delta: MetricsDelta }>>;
   ranks: { improved: number; worsened: number; unchanged: number };
   moves: { enteredTop5: RankMove[]; leftTop5: RankMove[]; enteredTop10: RankMove[]; leftTop10: RankMove[] };
   /** 证据命中由否变是（gained）与由是变否（lost）的题目，名次为两次运行中来源文章的名次。 */
@@ -351,7 +396,7 @@ export function compareRuns(a: RunRecord, b: RunRecord, variantA: RetrievalVaria
     const metricsB = hybridMetrics(items.map((item) => item.b));
     return { a: metricsA, b: metricsB, delta: metricsDelta(metricsA, metricsB) };
   };
-  const grouped = (dimension: "type" | "specificity") => {
+  const grouped = (dimension: "type" | "specificity" | "turn") => {
     const groups = new Map<string, typeof pairs>();
     for (const item of pairs) {
       const key = groupKey[dimension](item.question);
@@ -375,5 +420,5 @@ export function compareRuns(a: RunRecord, b: RunRecord, variantA: RetrievalVaria
     if (item.a.evidenceHit === false && item.b.evidenceHit === true) evidence.gained.push(move);
     if (item.a.evidenceHit === true && item.b.evidenceHit === false) evidence.lost.push(move);
   }
-  return { variants: [variantA, variantB], questions: pairs.length, ...compare(pairs), groups: { type: grouped("type"), specificity: grouped("specificity") }, ranks, moves, evidence };
+  return { variants: [variantA, variantB], questions: pairs.length, ...compare(pairs), groups: { type: grouped("type"), specificity: grouped("specificity"), turn: grouped("turn") }, ranks, moves, evidence };
 }

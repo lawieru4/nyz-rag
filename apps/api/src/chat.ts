@@ -4,7 +4,7 @@ import {
   getChatReview, saveChatReview, approveChatReview, exportChatReview, parseChatReview, parseFeedbackReasons,
   AdmissionError, buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
   DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, getModelSelections, HISTORY_TURNS, keywordSearchChunks,
-  listChatMessages, listChatSessions, listKnowledgeBases, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve,
+  listChatMessages, listChatSessions, listKnowledgeBases, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, rewriteModelSelection, rewriteQuestion,
   summarySearchChunks, usableModel, validateCitations, vectorSearchChunks, INSUFFICIENT_EVIDENCE_ANSWER, type AnswerContext, type ChatOwner, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
@@ -36,6 +36,10 @@ interface AnswerResult {
   answerMode: ChatAnswerMode;
   context: AnswerContext;
   usage: { model?: string; firstTokenMs?: number; promptTokens?: number; completionTokens?: number };
+  /** 改写后用于检索的问题；未改写时省略。 */
+  retrievalQuery?: string;
+  /** 改写的耗时与 Token 用量（不含在 usage 中，usage 只记回答）；未尝试改写时省略。 */
+  rewrite?: { ms: number; promptTokens?: number; completionTokens?: number };
   retrievalMs: number;
   totalMs: number;
 }
@@ -52,6 +56,7 @@ async function resolveKnowledgeBase(id: string | undefined) {
  * 混合检索（关键词 + 向量，RRF 合并，可选 Rerank）后调用业务模型配置中的 Chat 模型回答；Embedding、Rerank 同样取各自配置的供应商与模型。
  * 未配置 Chat 模型、密钥不可用或调用失败时降级为摘录原文片段；向量检索与 Rerank 失败时同样降级，并记录日志。
  * 限流拒绝与限流服务故障不降级，返回错误且不保存回答。
+ * 会话中有历史时先用 Chat 模型把追问改写为独立问题，用于三路召回与 Rerank，回答仍用原问题 + 历史；改写失败、超时或输出不合格时用原问题检索。
  * 知识库开启引用校验（默认）时，无引用（固定拒答除外）或含越界编号的生成回答同样降级为摘录；关闭时非空回答即采用。
  * signal 中止（客户端断开）时直接返回，由调用方丢弃结果。
  */
@@ -64,8 +69,27 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   const chatModel = usableModel(selections.chat);
   const embeddingModel = usableModel(selections.embedding);
   const rerankModel = usableModel(selections.rerank);
+  const rewriteModel = rewriteModelSelection(selections);
   const embedding = embeddingModel ? createEmbeddingModel(embeddingModel) : null;
   const reranker = rerankModel ? createRerankModel(rerankModel) : null;
+
+  // 追问时改写检索问题（改写模型，未配置时用 Chat 模型）：限流（AdmissionError）照常报错，其他失败只降级。
+  let retrievalQuery: string | undefined;
+  let rewrite: AnswerResult["rewrite"];
+  if (options.history?.length && rewriteModel && !options.signal?.aborted) {
+    const rewriteStarted = performance.now();
+    rewrite = { ms: 0 };
+    try {
+      const { query, ...usage } = await rewriteQuestion(createChatModel(rewriteModel), question, options.history, options.signal);
+      Object.assign(rewrite, usage);
+      if (query) retrievalQuery = query;
+      else log.warn("Query rewrite returned an unusable result; retrieving with the original question");
+    } catch (error) {
+      if (error instanceof AdmissionError) throw error;
+      if (!options.signal?.aborted) log.warn(`Query rewrite failed; retrieving with the original question: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+    rewrite.ms = elapsed(rewriteStarted);
+  }
 
   // 切片与摘要两路向量召回共用同一个查询向量，只调用一次 Embedding。
   const queryVectors = new Map<string, Promise<number[]>>();
@@ -73,7 +97,7 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
     if (!queryVectors.has(text)) queryVectors.set(text, embedding!.embedQuery(text));
     return queryVectors.get(text)!;
   };
-  const { chunks, warnings } = await retrieve(question, settings, {
+  const { chunks, warnings } = await retrieve(retrievalQuery ?? question, settings, {
     keywordSearch: (terms, limit) => keywordSearchChunks(terms, limit, undefined, options.filters),
     vectorSearch: embedding ? async (text, limit) => vectorSearchChunks(await embedQuery(text), embedding, limit, undefined, options.filters) : undefined,
     summarySearch: embedding ? async (text, limit) => summarySearchChunks(await embedQuery(text), embedding, limit, undefined, options.filters) : undefined,
@@ -138,7 +162,7 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
     text = answer;
     emit(text.length);
   }
-  return { answer, answerMode, context, usage, retrievalMs, totalMs: elapsed(started) };
+  return { answer, answerMode, context, usage, retrievalQuery, rewrite, retrievalMs, totalMs: elapsed(started) };
 }
 
 async function saveAnswer(result: AnswerResult, input: { question: string; knowledgeBase: KnowledgeBaseRecord | null; owner: ChatOwner; sessionId?: string; supersedes?: string }) {
@@ -146,7 +170,8 @@ async function saveAnswer(result: AnswerResult, input: { question: string; knowl
   const createdAt = new Date().toISOString();
   await createChatMessage({
     id, createdAt, owner: input.owner, sessionId: input.sessionId, supersedes: input.supersedes, question: input.question, answer: result.answer, answerMode: result.answerMode,
-    knowledgeBaseId: input.knowledgeBase?.id, ...result.usage, retrievalMs: result.retrievalMs, totalMs: result.totalMs,
+    knowledgeBaseId: input.knowledgeBase?.id, ...result.usage, retrievalQuery: result.retrievalQuery, rewriteMs: result.rewrite?.ms, rewritePromptTokens: result.rewrite?.promptTokens, rewriteCompletionTokens: result.rewrite?.completionTokens,
+    retrievalMs: result.retrievalMs, totalMs: result.totalMs,
     sources: result.context.sources, chunks: retrievedChunkRecords(result.context),
   });
   return { id, createdAt };
@@ -272,7 +297,7 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
     try {
       const result = await answerQuestion({
         question, knowledgeBase, filters, log: request.log, signal: controller.signal,
-        history: history.slice(-HISTORY_TURNS).map(({ question, answer }) => ({ question, answer })),
+        history: history.slice(-HISTORY_TURNS).map(({ question, answer, sources }) => ({ question, answer, sourceTitles: sources.map((source) => source.title) })),
         onSources: (sources) => sources.forEach((source, index) => send({ event: "source", data: { ...source, citation: index + 1 } })),
         onToken: (content) => send({ event: "token", data: { content } }),
       });

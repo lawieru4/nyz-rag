@@ -20,7 +20,7 @@ type ModelProvider = ModelProviderRecord;
 const json = { "content-type": "application/json" };
 
 const providers = ref<ModelProvider[]>([]);
-const settings = ref<ModelSettingsResponse>({ chat: null, embedding: null, rerank: null, review: null });
+const settings = ref<ModelSettingsResponse>({ chat: null, embedding: null, rerank: null, review: null, rewrite: null });
 
 // 只采用最近一次读取的结果（写入后的刷新可能与上一次刷新交错）。
 let loadSeq = 0;

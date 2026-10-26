@@ -1,8 +1,9 @@
 // 用法：pnpm --filter @nyz-rag/processing evaluate:answer --dataset=<路径> --name=<运行名> [--split=dev|test] [--context=topk|budget|section] [--variant=fused|rerank]
-//         [--schema=eval_<名称>] [--limit=N] [--concurrency=2]
+//         [--schema=eval_<名称>] [--limit=N] [--concurrency=2] [--rewrite=none|concat|llm|standalone]
 //       pnpm --filter @nyz-rag/processing evaluate:answer --compare <运行A> <运行B> [--json]
 // 回答层评估：每道题按问答的方式检索（retrieve()，最近创建的知识库参数与业务模型配置），按 --context 组装上下文后调用 Chat 模型回答（不保存问答记录），
 // 统计来源文章被引用的比例，再由审核模型（业务模型 review）评审回答是否忠实于参考资料、是否完整、引用是否恰当。会调用模型，产生费用。
+// 带历史的题目（多轮追问）须用 --rewrite 指定检索问题（同 evaluate:retrieval），回答时与问答一样附上历史（最近 3 轮）。
 // 结果逐题追加到 .nyz-data/eval-answers/<运行名>/items.jsonl，中断后用同样的参数重新运行即从未完成的题目继续；--compare 逐题对比两次运行。方案见 docs/evaluation-plan.md 第九节。
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -10,10 +11,12 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { closeDatabase } from "../db.js";
 import {
-  ANSWER_EVAL_VERSION, answeredItems, citationStats, compareAnswerRuns, JUDGE_CRITERIA, judgeMessages, parseJudgement, summarizeAnswers,
+  ANSWER_EVAL_VERSION, answeredItems, citationStats, compareAnswerRuns, JUDGE_CRITERIA, judgeMessages, judgeQuestion, parseJudgement, summarizeAnswers,
   type AnswerChange, type AnswerItem, type AnswerMetrics, type AnswerSummary,
 } from "../evaluation-answer.js";
-import { assertSupportedEvaluationInputs, filterSplit, readEvaluationDataset, SPLITS, validateEvaluationDataset, type CorpusSnapshot, type EvaluationQuestion, type Split } from "../evaluation.js";
+import { assertSupportedEvaluationInputs, filterSplit, hasHistory, readEvaluationDataset, SPLITS, validateEvaluationDataset, type CorpusSnapshot, type EvaluationQuestion, type Split } from "../evaluation.js";
+import { evaluationQuery, REWRITE_MODES, type RewriteMode } from "../evaluation-rewrite.js";
+import { rewriteModelSelection, rewriteQuestion } from "../query-rewrite.js";
 import { CONTEXT_MODES, runVariantWithContext, sourceLabels, type ContextMode } from "../evaluation-run.js";
 import { closeModelAdmissionLimiter } from "../model-admission.js";
 import { createChatModel, createEmbeddingModel, createRerankModel, type ChatMessage, type ChatModel } from "../models.js";
@@ -54,8 +57,10 @@ interface AnswerRun {
     knowledgeBase: { id: string; name: string } | null; retrieval: RetrievalSettings; prompt: string; context: ContextMode; variant: AnswerVariant; schema: string | null;
     /** 知识库的引用校验开关，决定回答要求用严格还是宽松版本（本命令不做生成后的引用校验）；引入开关之前的运行没有该字段。 */
     citationCheck?: boolean;
+    /** 带历史题目的检索问题改写方式，只有数据集含带历史的题目时记录。 */
+    rewrite?: RewriteMode;
   };
-  models: { embedding: ModelInfo | null; rerank: ModelInfo | null; chat: ModelInfo; judge: ModelInfo };
+  models: { embedding: ModelInfo | null; rerank: ModelInfo | null; chat: ModelInfo; judge: ModelInfo; rewrite?: ModelInfo };
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : "unknown error";
@@ -125,7 +130,13 @@ async function run() {
   const errors = validateEvaluationDataset(fullDataset);
   if (errors.length) throw new Error(`Evaluation dataset invalid:\n${errors.join("\n")}`);
   const dataset = filterSplit(fullDataset, split);
-  assertSupportedEvaluationInputs(dataset.questions);
+  const rewriteArg = arg("rewrite") as RewriteMode | undefined;
+  if (rewriteArg !== undefined && !REWRITE_MODES.includes(rewriteArg)) throw new Error(`--rewrite must be one of ${REWRITE_MODES.join(", ")}`);
+  const withHistory = hasHistory(dataset.questions);
+  if (withHistory && !rewriteArg) throw new Error(`数据集含带历史的题目，请用 --rewrite=${REWRITE_MODES.join("|")} 指定检索问题（llm 会调用改写模型或 Chat 模型）`);
+  if (rewriteArg && !withHistory) console.warn("数据集没有带历史的题目，--rewrite 不起作用。");
+  const rewriteMode = withHistory ? rewriteArg : undefined;
+  assertSupportedEvaluationInputs(dataset.questions, { history: rewriteMode !== undefined });
   const selected = dataset.questions.slice(0, limit);
   if (!selected.length) throw new Error(`No questions in split ${split}`);
 
@@ -154,14 +165,17 @@ async function run() {
   const reranker = variant === "rerank" ? createRerankModel(rerankSelection!) : null;
   const chat = createChatModel(chatSelection);
   const judge = createChatModel(judgeSelection);
+  const rewriteSelection = rewriteMode === "llm" ? rewriteModelSelection(selections)! : null;
+  const rewriter = rewriteSelection ? createChatModel(rewriteSelection) : null;
 
   const current: AnswerRun = {
     version: ANSWER_EVAL_VERSION, name, createdAt: new Date().toISOString(),
     dataset: { name: dataset.name, version: dataset.version, path: relative(repoRoot, datasetPath).replaceAll("\\", "/"), split: split ?? "all" },
     corpus: snapshot,
-    settings: { knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, prompt: knowledgeBase?.prompt ?? "", context: contextMode, variant, schema, citationCheck: knowledgeBase?.citationCheck ?? true },
+    settings: { knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, prompt: knowledgeBase?.prompt ?? "", context: contextMode, variant, schema, citationCheck: knowledgeBase?.citationCheck ?? true, ...(rewriteMode ? { rewrite: rewriteMode } : {}) },
     models: {
       embedding: modelInfo(embeddingSelection), rerank: reranker ? modelInfo(rerankSelection!) : null, chat: modelInfo(chatSelection, true), judge: modelInfo(judgeSelection, true),
+      ...(rewriteSelection ? { rewrite: modelInfo(rewriteSelection, true) } : {}),
     },
   };
   const workDir = join(answersDir, name);
@@ -182,7 +196,7 @@ async function run() {
   const items = await readItems(itemsPath);
   const pending = selected.filter((question) => { const item = items.get(question.id); return !item || item.error; });
   console.info(`数据集 ${dataset.name}@${dataset.version}，${split ?? "全部"} ${selected.length} 道题，待处理 ${pending.length} 道；${variant}，上下文 ${contextMode}/${settings.maxContextLength} 字（topK=${settings.topK}）；`
-    + `Chat ${chat.model}，审核 ${judge.model}；索引 ${schema ?? "业务库"}`);
+    + `Chat ${chat.model}，审核 ${judge.model}${rewriter ? `，改写 ${rewriter.model}` : ""}；索引 ${schema ?? "业务库"}`);
 
   let writes = Promise.resolve();
   const save = (item: AnswerItem) => {
@@ -199,6 +213,7 @@ async function run() {
       ...(question.specificity ? { specificity: question.specificity } : {}),
       ...(question.lexicalOverlap !== undefined ? { lexicalOverlap: question.lexicalOverlap } : {}),
       sourceArticleKeys: labels.map((label) => label.articleKey), at: new Date().toISOString(),
+      ...(question.history.length ? { historyTurns: question.history.length } : {}),
     };
     const excluded = staleQuestionReason(question, byKey);
     if (excluded) return save({ ...base, excluded });
@@ -208,9 +223,12 @@ async function run() {
     if (item.answer === undefined) {
       let retrieved: Awaited<ReturnType<typeof runVariantWithContext>>;
       let embeddingMs: number;
+      // 带历史的题目先按 --rewrite 得到检索问题；改写失败时与问答一样退回当前问题。
+      const outcome = await evaluationQuery(question, rewriteMode ?? "none", rewriter ? (text, history) => withRetry(() => rewriteQuestion(rewriter, text, history)) : undefined);
+      const rewrite = question.history.length ? { rewrite: outcome } : {};
       try {
         const started = performance.now();
-        const vector = await withRetry(() => embedding.embedQuery(question.question));
+        const vector = await withRetry(() => embedding.embedQuery(outcome.query));
         embeddingMs = ms(started);
         const dependencies: RetrievalDependencies = {
           keywordSearch: (terms, count) => keywordSearchChunks(terms, count),
@@ -218,13 +236,14 @@ async function run() {
           summarySearch: (_text, count) => summarySearchChunks(vector, embedding, count),
           ...(reranker ? { rerank: (query: string, texts: string[], topN: number) => withRetry(() => reranker.rerank(query, texts, topN)) } : {}),
         };
-        retrieved = await runVariantWithContext(question, variant, settings, dependencies, articleKeyOf, { mode: contextMode, loadSections: (ids) => listSectionContexts(ids) });
+        retrieved = await runVariantWithContext({ ...question, ...(question.history.length ? { retrievalQuery: outcome.query } : {}) }, variant, settings, dependencies, articleKeyOf, { mode: contextMode, loadSections: (ids) => listSectionContexts(ids) });
       } catch (error) {
-        return save({ ...base, error: { stage: "retrieval", message: message(error) } });
+        return save({ ...base, ...rewrite, error: { stage: "retrieval", message: message(error) } });
       }
       const { result, context } = retrieved;
       item = {
         ...base,
+        ...rewrite,
         retrieval: {
           rank: result.rank, contextHit: result.contextHit, evidenceHit: result.evidenceHit, evidenceFull: result.evidenceFull ?? null, contextChars: result.contextChars ?? 0,
           context: context.chunks.map((chunk) => ({ chunkId: chunk.chunkId, articleKey: articleKeyOf(chunk.documentId), citation: chunk.citation })),
@@ -233,7 +252,7 @@ async function run() {
       };
       if (!context.chunks.length) return save({ ...item, answerMode: "no-context", answer: NO_MATCH_ANSWER });
       try {
-        const generated = await complete(chat, buildChatMessages(current.settings.prompt, question.question, context, [], current.settings.citationCheck));
+        const generated = await complete(chat, buildChatMessages(current.settings.prompt, question.question, context, question.history, current.settings.citationCheck));
         item.answerMode = "generated";
         item.answer = generated.text;
         item.generation = { model: chat.model, firstTokenMs: generated.firstTokenMs, totalMs: generated.totalMs, promptTokens: generated.promptTokens, completionTokens: generated.completionTokens };
@@ -244,7 +263,7 @@ async function run() {
     }
     try {
       const judged = await complete(judge, judgeMessages({
-        question: question.question, ...(question.answer ? { referenceAnswer: question.answer } : {}), evidence: labels.flatMap((label) => label.evidence),
+        question: judgeQuestion(question), ...(question.answer ? { referenceAnswer: question.answer } : {}), evidence: labels.flatMap((label) => label.evidence),
         references: item.retrieval!.references, answer: item.answer!,
       }));
       item.judgeUsage = { promptTokens: judged.promptTokens, completionTokens: judged.completionTokens };
@@ -285,6 +304,8 @@ function preview(runFile: AnswerRun, items: AnswerItem[], questions: EvaluationQ
   for (const item of items) {
     const scores = item.judgement ? JUDGE_CRITERIA.map((key) => `${key} ${item.judgement!.scores[key] ?? "-"}`).join(" / ") : "未评审";
     lines.push(`## ${item.id}｜${item.type}/${item.specificity ?? "-"}｜${scores}`, "", `- 问题：${item.question}`);
+    for (const turn of byId.get(item.id)?.history ?? []) lines.push(`- 历史问题：${turn.question}`);
+    if (item.rewrite) lines.push(`- 检索问题：${item.rewrite.query}${item.rewrite.failed ? `（${item.rewrite.failed}，退回当前问题）` : ""}`);
     if (byId.get(item.id)?.answer) lines.push(`- 参考答案：${byId.get(item.id)!.answer}`);
     if (item.excluded) { lines.push(`- 排除：${item.excluded}`, ""); continue; }
     if (item.retrieval) {
@@ -334,7 +355,11 @@ function printSummary(runFile: AnswerRun, summary: AnswerSummary) {
   console.info(`\n${runFile.name}：${runFile.dataset.name}@${runFile.dataset.version}（${runFile.dataset.split}），${runFile.settings.variant}，上下文 ${runFile.settings.context}（比例为 %，得分为 1～5 分均值）`);
   for (const [label, value, kind] of metricRows(summary)) console.info(`${label.padEnd(14)}${format(value, kind).padStart(8)}`);
   console.info(`题目 ${reliability.total}：已回答 ${summary.overall.questions}、已评审 ${summary.overall.judged}、排除 ${reliability.excluded}、调用失败 ${reliability.errors}、无上下文 ${reliability.noContext}、检索降级 ${reliability.degraded}`);
-  console.info(`Token 合计：生成输入 ${usage.generate.promptTokens}、输出 ${usage.generate.completionTokens}；评审输入 ${usage.judge.promptTokens}、输出 ${usage.judge.completionTokens}。按题型、具体度与词面重叠分组的指标见 report.json。`);
+  if (summary.rewrite.questions) {
+    const { questions, failures, ms } = summary.rewrite;
+    console.info(`检索问题 ${runFile.settings.rewrite}：带历史 ${questions} 道${runFile.settings.rewrite === "llm" ? `，改写失败或不合格 ${failures} 道，改写耗时（位于首 Token 之前）p50 ${num(ms.p50)}ms / p95 ${num(ms.p95)}ms，Token 输入 ${usage.rewrite.promptTokens}、输出 ${usage.rewrite.completionTokens}` : ""}`);
+  }
+  console.info(`Token 合计：生成输入 ${usage.generate.promptTokens}、输出 ${usage.generate.completionTokens}；评审输入 ${usage.judge.promptTokens}、输出 ${usage.judge.completionTokens}。按题型、具体度、词面重叠与对话分组的指标见 report.json。`);
 }
 
 async function loadRun(ref: string): Promise<{ run: AnswerRun; items: AnswerItem[] }> {
@@ -360,7 +385,7 @@ async function compare() {
     console.log(JSON.stringify({ a: a.run, b: b.run, warnings, comparison }, null, 2));
     return;
   }
-  const setup = ({ settings, models }: AnswerRun) => `${settings.variant}，上下文 ${settings.context}/${settings.retrieval.maxContextLength} 字（topK=${settings.retrieval.topK}），Chat ${models.chat.model}，索引 ${settings.schema ?? "业务库"}${settings.citationCheck === undefined ? "" : `，引用校验${settings.citationCheck ? "开启" : "关闭"}`}`;
+  const setup = ({ settings, models }: AnswerRun) => `${settings.variant}，上下文 ${settings.context}/${settings.retrieval.maxContextLength} 字（topK=${settings.retrieval.topK}），Chat ${models.chat.model}，索引 ${settings.schema ?? "业务库"}${settings.citationCheck === undefined ? "" : `，引用校验${settings.citationCheck ? "开启" : "关闭"}`}${settings.rewrite ? `，检索问题 ${settings.rewrite}${models.rewrite ? `（${models.rewrite.model}）` : ""}` : ""}`;
   console.info(`A：${a.run.name}（${setup(a.run)}）`);
   console.info(`B：${b.run.name}（${setup(b.run)}）`);
   for (const warning of warnings) console.warn(`注意：${warning}`);
@@ -372,7 +397,8 @@ async function compare() {
     const delta = kind === "rate" ? signed(diff(value, other)) : kind === "score" ? signed(diff(value, other), 1, 2) : signed(diff(value, other), 1, 0);
     console.info(`${label.padEnd(14)}${format(value, kind).padStart(8)}${format(other, kind).padStart(8)}${delta.padStart(8)}`);
   }
-  for (const [dimension, title] of [["specificity", "按具体度"], ["type", "按题型"]] as const) {
+  for (const [dimension, title] of [["specificity", "按具体度"], ["type", "按题型"], ["turn", "按对话"]] as const) {
+    if (dimension === "turn" && Object.keys(comparison.a.groups.turn).length < 2) continue;
     const groups = Object.keys(comparison.a.groups[dimension]).map((key) => {
       const [x, y] = [comparison.a.groups[dimension][key], comparison.b.groups[dimension][key]];
       return `${key}（${x.judged} 道）${JUDGE_CRITERIA.slice(0, 2).map((criterion) => signed(diff(x.pass[criterion], y?.pass[criterion] ?? null))).join(" / ")}`;

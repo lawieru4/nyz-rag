@@ -43,10 +43,17 @@ test("review export requires current explicit approval and exports only independ
   assert.throws(() => parseChatReview({ ...emptyChatReview() }), /fields/);
 });
 
-test("evaluation runners reject annotated history or filters instead of silently widening replay", async () => {
-  for (const extra of [{ history: [{ question: "Prior", answer: "Answer" }] }, { filters: { categories: ["Public"] } }]) {
-    const question = { ...candidate, id: "q", source: "real" as const, ...extra };
-    assert.throws(() => assertSupportedEvaluationInputs([question]), /does not support history or filters/);
-    await assert.rejects(runVariantWithContext(question, "keyword", DEFAULT_RETRIEVAL_SETTINGS, { keywordSearch: async () => { assert.fail("must reject before retrieval"); } }, (id) => id), /does not support history or filters/);
-  }
+test("evaluation runners reject filters, and history unless a retrieval query was chosen, instead of silently widening replay", async () => {
+  const reject = { keywordSearch: async () => { assert.fail("must reject before retrieval"); } };
+  const filtered = { ...candidate, id: "q", source: "real" as const, filters: { categories: ["Public"] } };
+  assert.throws(() => assertSupportedEvaluationInputs([filtered], { history: true }), /does not support filters/);
+  await assert.rejects(runVariantWithContext({ ...filtered, retrievalQuery: "q" }, "keyword", DEFAULT_RETRIEVAL_SETTINGS, reject, (id) => id), /does not support filters/);
+
+  const followup = { ...candidate, id: "q", source: "real" as const, history: [{ question: "Prior", answer: "Answer" }] };
+  assert.throws(() => assertSupportedEvaluationInputs([followup]), /does not support history/);
+  await assert.rejects(runVariantWithContext(followup, "keyword", DEFAULT_RETRIEVAL_SETTINGS, reject, (id) => id), /does not support history/);
+  assert.doesNotThrow(() => assertSupportedEvaluationInputs([followup], { history: true }));
+  let searched: string[] = [];
+  await runVariantWithContext({ ...followup, retrievalQuery: "Rewritten lithium question" }, "keyword", DEFAULT_RETRIEVAL_SETTINGS, { keywordSearch: async (terms) => { searched = terms; return []; } }, (id) => id);
+  assert.ok(searched.includes("lithium") && searched.includes("rewritten"), "the chosen retrieval query is searched, not the original question");
 });

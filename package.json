@@ -12,6 +12,7 @@
     "db:reindex-search": "pnpm --filter @nyz-rag/processing db:reindex-search",
     "evaluate:retrieval": "pnpm --filter @nyz-rag/processing evaluate:retrieval",
     "evaluate:generate": "pnpm --filter @nyz-rag/processing evaluate:generate",
+    "evaluate:multiturn": "pnpm --filter @nyz-rag/processing evaluate:multiturn",
     "evaluate:compare": "pnpm --filter @nyz-rag/processing evaluate:compare",
     "evaluate:answer": "pnpm --filter @nyz-rag/processing evaluate:answer",
     "evaluate:adjudicate": "pnpm --filter @nyz-rag/processing evaluate:adjudicate",

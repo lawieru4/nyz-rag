@@ -4,7 +4,7 @@ import { setImmediate } from "node:timers/promises";
 import { mock, test } from "node:test";
 import * as processing from "@nyz-rag/processing";
 import type { ChatChunk, ChatMessage, ChatModel } from "@nyz-rag/processing";
-import type { KnowledgeBaseRecord } from "@nyz-rag/types";
+import type { ChatSessionMessage, KnowledgeBaseRecord } from "@nyz-rag/types";
 
 const sessionId = "00000000-0000-4000-8000-000000000001";
 const hit: processing.ChunkHit = {
@@ -22,18 +22,29 @@ let configured = true;
 let stream: ChatModel["streamChat"];
 let prompt: ChatMessage[] = [];
 let knowledgeBases: KnowledgeBaseRecord[] = [];
+let sessionHistory: ChatSessionMessage[] = [];
+// The query rewrite call is routed by its system prompt; answer calls go to `stream`.
+let rewriteStream: ChatModel["streamChat"];
+let rewriteSelections: processing.ModelSelection[] = [];
+let rewriteSetting: processing.ModelSelection | null = null;
+let searchedTerms: string[][] = [];
+const isRewrite = (messages: ChatMessage[]) => messages[0].content.includes("问题改写器");
 
 // Keep the real retrieval/context/prompt/citation functions; replace only storage
 // and the external model boundary. Both production route handlers run unchanged.
 mock.module("@nyz-rag/processing", { namedExports: {
   ...processing,
-  getModelSelections: async () => ({ chat: configured ? selection : null, embedding: null, rerank: null }),
-  keywordSearchChunks: async () => hits,
+  getModelSelections: async () => ({ chat: configured ? selection : null, embedding: null, rerank: null, review: null, rewrite: rewriteSetting }),
+  keywordSearchChunks: async (terms: string[]) => { searchedTerms.push(terms); return hits; },
   listKnowledgeBases: async () => knowledgeBases,
   getChatSession: async () => ({ id: sessionId, title: "Test", messageCount: 0, createdAt: "", updatedAt: "" }),
-  listSessionMessages: async () => [],
+  listSessionMessages: async () => sessionHistory,
   createChatMessage: async (value: Saved) => { saved.push(value); },
-  createChatModel: () => ({ model: "mock-chat", streamChat: (messages: ChatMessage[], options?: { signal?: AbortSignal }) => {
+  createChatModel: (selection: processing.ModelSelection) => ({ model: "mock-chat", streamChat: (messages: ChatMessage[], options?: { signal?: AbortSignal }) => {
+    if (isRewrite(messages)) {
+      rewriteSelections.push(selection);
+      return rewriteStream(messages, options);
+    }
     prompt = messages;
     return stream(messages, options);
   } }),
@@ -46,6 +57,11 @@ function makeApp() {
   hits = [hit];
   configured = true;
   knowledgeBases = [];
+  sessionHistory = [];
+  rewriteSelections = [];
+  rewriteSetting = null;
+  searchedTerms = [];
+  rewriteStream = async function* () { assert.fail("no history, no query rewrite"); };
   return buildTestApp({ userAuth, userAuthStore: memoryAuthStore(), users: memoryUsers().repository, mailer: null });
 }
 
@@ -269,5 +285,97 @@ test("SSE streams tokens as they arrive, measures first token, and discards on d
         assert.equal(saved[0].answerMode, "generated");
       }
     } finally { finish(); await app.close(); }
+  });
+});
+
+test("follow-ups retrieve with the rewritten question, answer with the original, and fall back on rewrite failure", async (t) => {
+  const previous: ChatSessionMessage = {
+    id: "m1", question: "介绍一种正极材料", answer: "磷酸锰铁锂是一种正极材料 [1]。", answerMode: "generated", rating: null, createdAt: "",
+    sources: [{ documentId: "doc-1", title: "磷酸锰铁锂研究进展", url: "https://example.test/a" }],
+  };
+  const answered: ChatModel["streamChat"] = async function* () { yield { type: "token", text: "Supported answer [1]" }; };
+  const followUp = (app: ReturnType<typeof makeApp>) => app.inject({
+    method: "POST", url: `/api/chat/sessions/${sessionId}/stream`, headers: userHeaders, payload: { question: "它的循环寿命怎么样？" },
+  });
+
+  await t.test("rewritten", async () => {
+    const app = makeApp();
+    sessionHistory = [previous];
+    stream = answered;
+    let rewritePrompt: ChatMessage[] = [];
+    rewriteStream = async function* (messages) {
+      rewritePrompt = messages;
+      yield { type: "token", text: "磷酸锰铁锂的循环寿命如何？" };
+      yield { type: "usage", promptTokens: 150, completionTokens: 9 };
+    };
+    try {
+      const response = await followUp(app);
+      assert.equal(events(response.body).find((event) => event.event === "done")!.data.answerMode, "generated");
+      assert.deepEqual(searchedTerms, [processing.searchTerms("磷酸锰铁锂的循环寿命如何？")]);
+      assert.match(rewritePrompt[1].content, /参考文章：《磷酸锰铁锂研究进展》/);
+      assert.deepEqual(rewriteSelections.map(({ temperature, maxTokens }) => ({ temperature, maxTokens })), [{ temperature: 0, maxTokens: processing.REWRITE_MAX_TOKENS }]);
+      assert.ok(prompt.at(-1)!.content.endsWith("问题：它的循环寿命怎么样？"), "the answer model gets the original question");
+      assert.ok(prompt.some((message) => message.role === "user" && message.content === previous.question), "and the history");
+      assert.equal(saved[0].question, "它的循环寿命怎么样？");
+      assert.equal(saved[0].retrievalQuery, "磷酸锰铁锂的循环寿命如何？");
+      assert.equal(typeof saved[0].rewriteMs, "number");
+      assert.deepEqual([saved[0].rewritePromptTokens, saved[0].rewriteCompletionTokens], [150, 9]);
+      assert.equal(saved[0].promptTokens, undefined, "answer usage stays separate from rewrite usage");
+    } finally { await app.close(); }
+  });
+
+  for (const [label, rewrite] of [
+    ["provider failure", async function* () { throw new Error("provider failed"); }],
+    ["unusable output", async function* () { yield { type: "token", text: "这是一段回答\n而不是问题" }; }],
+  ] as const) await t.test(label, async () => {
+    const app = makeApp();
+    sessionHistory = [previous];
+    stream = answered;
+    rewriteStream = rewrite as ChatModel["streamChat"];
+    try {
+      const response = await followUp(app);
+      assert.equal(events(response.body).find((event) => event.event === "done")!.data.answerMode, "generated");
+      assert.deepEqual(searchedTerms, [processing.searchTerms("它的循环寿命怎么样？")]);
+      assert.equal(saved[0].retrievalQuery, undefined);
+      assert.equal(typeof saved[0].rewriteMs, "number", "the attempt is still timed");
+      assert.equal(saved[0].rewritePromptTokens, undefined);
+    } finally { await app.close(); }
+  });
+
+  await t.test("AdmissionError stays an error without saving", async () => {
+    const app = makeApp();
+    sessionHistory = [previous];
+    stream = async function* () { assert.fail("no answer after a rejected rewrite"); };
+    rewriteStream = async function* () { throw new processing.AdmissionError(429, 3, "Model busy"); };
+    try {
+      const response = await followUp(app);
+      assert.deepEqual(events(response.body), [{ event: "error", data: { error: "Model busy" } }]);
+      assert.equal(saved.length, 0);
+    } finally { await app.close(); }
+  });
+
+  await t.test("a configured rewrite model is used with its own settings, even without a chat model", async () => {
+    const app = makeApp();
+    sessionHistory = [previous];
+    configured = false;
+    rewriteSetting = { ...selection, model: "mock-rewrite", temperature: 0.1, maxTokens: 512 };
+    rewriteStream = async function* () { yield { type: "token", text: "磷酸锰铁锂的循环寿命如何？" }; };
+    try {
+      await followUp(app);
+      assert.deepEqual(rewriteSelections.map(({ model, temperature, maxTokens }) => ({ model, temperature, maxTokens })), [{ model: "mock-rewrite", temperature: 0.1, maxTokens: 512 }]);
+      assert.deepEqual(searchedTerms, [processing.searchTerms("磷酸锰铁锂的循环寿命如何？")]);
+      assert.equal(saved[0].answerMode, "extractive");
+    } finally { await app.close(); }
+  });
+
+  await t.test("no rewrite or chat model means no rewrite", async () => {
+    const app = makeApp();
+    sessionHistory = [previous];
+    configured = false;
+    try {
+      await followUp(app);
+      assert.deepEqual(searchedTerms, [processing.searchTerms("它的循环寿命怎么样？")]);
+      assert.equal(saved[0].rewriteMs, undefined);
+    } finally { await app.close(); }
   });
 });
