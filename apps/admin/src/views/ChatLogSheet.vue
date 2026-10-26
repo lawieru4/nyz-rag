@@ -29,12 +29,18 @@ const emit = defineEmits<{ (e: "close"): void; (e: "saved"): void }>();
         </MetaRow>
         <MetaRow v-if="log.totalMs !== undefined">
           <span>检索 {{ log.retrievalMs }} ms</span>
+          <span v-if="log.rewriteMs !== undefined">（含问题改写 {{ log.rewriteMs }} ms）</span>
           <span v-if="log.firstTokenMs !== undefined">首 Token {{ log.firstTokenMs }} ms</span>
           <span>总耗时 {{ log.totalMs }} ms</span>
           <span v-if="log.promptTokens !== undefined">Token {{ log.promptTokens }} + {{ log.completionTokens }}</span>
+          <span v-if="log.rewritePromptTokens !== undefined">改写 Token {{ log.rewritePromptTokens }} + {{ log.rewriteCompletionTokens }}</span>
         </MetaRow>
         <h3 class="mt-4 text-xs font-semibold text-muted-foreground">用户提问</h3>
         <p class="document-text py-2">{{ log.question }}</p>
+        <template v-if="log.retrievalQuery !== undefined">
+          <h3 class="mt-2 text-xs font-semibold text-muted-foreground">检索问题（结合历史改写）</h3>
+          <p class="document-text py-2">{{ log.retrievalQuery === log.question ? '与用户提问相同' : log.retrievalQuery }}</p>
+        </template>
         <h3 class="mt-2 text-xs font-semibold text-muted-foreground">回答</h3>
         <p class="document-text py-2">{{ log.answer }}</p>
         <p v-if="log.feedbackReasons?.length" class="py-2 text-xs text-muted-foreground">用户反馈原因：{{ log.feedbackReasons.join(' / ') }}</p>

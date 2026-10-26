@@ -571,7 +571,7 @@ test("PUT /api/admin/model-settings/:capability — validates the capability and
 test("GET /api/admin/model-settings — returns every capability, null when unset", async () => {
   const app = buildTestApp();
   app.get("/api/admin/model-settings", async () => ({
-    chat: null, rerank: null, review: null,
+    chat: null, rerank: null, review: null, rewrite: null,
     embedding: { capability: "embedding", providerId: UUID, model: "BAAI/bge-m3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01" },
   }));
   await app.ready();
@@ -579,7 +579,7 @@ test("GET /api/admin/model-settings — returns every capability, null when unse
   const res = await app.inject({ method: "GET", url: "/api/admin/model-settings" });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.json(), {
-    chat: null, rerank: null, review: null,
+    chat: null, rerank: null, review: null, rewrite: null,
     embedding: { capability: "embedding", providerId: UUID, model: "BAAI/bge-m3", temperature: 0.3, maxTokens: 1024, updatedAt: "2026-01-01" },
   });
 });

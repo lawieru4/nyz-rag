@@ -54,11 +54,11 @@ function toggleReason(reason: ChatFeedbackReason) {
           <Button v-if="turn.sources.length" variant="link" size="xs" class="h-auto p-0 text-xs font-normal text-link" @click="emit('source', null)">查看原文片段</Button>
         </div>
         <div v-if="turn.sources.length" class="flex flex-wrap gap-1.5">
-          <button
-            v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" type="button"
-            :class="['inline-flex max-w-full items-center gap-1.5 rounded-md bg-background py-1 pr-2.5 pl-1 text-left transition-colors hover:bg-accent hover:text-foreground', activeCitation === sourceIndex + 1 && 'bg-accent text-foreground']"
+          <Button
+            v-for="(source, sourceIndex) in turn.sources" :key="source.documentId" type="button" variant="ghost"
+            :class="['h-auto max-w-full gap-1.5 bg-background py-1 pr-2.5 pl-1 text-left text-xs font-normal hover:bg-accent hover:text-foreground', activeCitation === sourceIndex + 1 && 'bg-accent text-foreground']"
             :title="source.title" @click="emit('source', sourceIndex + 1)"
-          ><span class="citation m-0 flex-none">{{ sourceIndex + 1 }}</span><span class="truncate">{{ source.title }}</span></button>
+          ><span class="citation m-0 flex-none">{{ sourceIndex + 1 }}</span><span class="truncate">{{ source.title }}</span></Button>
         </div>
         <span v-else>暂无匹配文章</span>
       </div>

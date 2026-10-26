@@ -849,9 +849,9 @@ export async function deleteModelProvider(id: string): Promise<{ deleted: boolea
   });
 }
 
-// ---- 业务模型（Chat / Embedding / Rerank / 审核各选一个供应商与模型） ----
+// ---- 业务模型（Chat / Embedding / Rerank / 审核 / 改写各选一个供应商与模型） ----
 
-const MODEL_CAPABILITIES: ModelCapability[] = ["chat", "embedding", "rerank", "review"];
+const MODEL_CAPABILITIES: ModelCapability[] = ["chat", "embedding", "rerank", "review", "rewrite"];
 const toModelSetting = (row: typeof modelSettings.$inferSelect): ModelSettingRecord => ({ ...row, updatedAt: iso(row.updatedAt)! });
 
 export async function getModelSettings(db: Executor = getDb()): Promise<ModelSettingsResponse> {
@@ -1110,7 +1110,8 @@ export async function createChatMessage(log: NewChatMessage, db?: Executor): Pro
     }
     await tx.insert(chatMessages).values({
       id: log.id, sessionId: log.sessionId ?? null, ...owner, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
-      retrievalMs: log.retrievalMs ?? null, firstTokenMs: log.firstTokenMs ?? null, totalMs: log.totalMs ?? null, promptTokens: log.promptTokens ?? null,
+      retrievalQuery: log.retrievalQuery ?? null, rewriteMs: log.rewriteMs ?? null,
+      rewritePromptTokens: log.rewritePromptTokens ?? null, rewriteCompletionTokens: log.rewriteCompletionTokens ?? null, retrievalMs: log.retrievalMs ?? null, firstTokenMs: log.firstTokenMs ?? null, totalMs: log.totalMs ?? null, promptTokens: log.promptTokens ?? null,
       completionTokens: log.completionTokens ?? null, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined,
     });
     if (log.sources.length) {

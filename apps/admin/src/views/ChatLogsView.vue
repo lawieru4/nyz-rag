@@ -51,7 +51,7 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
       <TableBody>
         <TableRow v-for="log in logs" :key="log.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4">
-            <button class="grid max-w-96 gap-1 text-left" @click="selected = log"><b class="truncate text-sm text-foreground hover:underline">{{ log.question }}</b><small class="truncate text-xs">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small></button>
+            <Button variant="ghost" class="grid h-auto max-w-96 items-stretch justify-stretch gap-1 p-0 text-left whitespace-normal font-normal text-inherit hover:bg-transparent hover:text-inherit" @click="selected = log"><b class="truncate text-sm text-foreground hover:underline">{{ log.question }}</b><small class="truncate text-xs">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small></Button>
           </TableCell>
           <TableCell>{{ chatLogOwner(log) }}</TableCell>
           <TableCell class="max-w-64 truncate">{{ log.sources.length ? log.sources.map((source) => source.title).join('、') : '无引用' }}</TableCell>
@@ -63,7 +63,7 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
     </Table>
     <ul class="divide-y md:hidden" aria-label="问答记录列表">
       <li v-for="log in logs" :key="log.id">
-        <button class="grid w-full min-w-0 gap-1.5 px-4 py-3 text-left text-[13px] text-muted-foreground" @click="selected = log">
+        <Button variant="ghost" class="grid h-auto w-full min-w-0 items-stretch justify-stretch gap-1.5 px-4 py-3 text-left text-[13px] whitespace-normal font-normal text-muted-foreground hover:bg-transparent hover:text-muted-foreground" @click="selected = log">
           <b class="line-clamp-2 text-sm break-words text-foreground">{{ log.question }}</b>
           <small class="line-clamp-2 text-xs break-words">{{ log.supersededAt ? '[已重新生成] ' : '' }}{{ log.answer }}</small>
           <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -72,7 +72,7 @@ const { items: logs, total, query, page, loading, load: loadChatLogs, search, fi
             <span class="truncate">{{ chatLogOwner(log) }}</span>
             <span>{{ log.sources.length ? `${log.sources.length} 篇引用` : '无引用' }}</span>
           </span>
-        </button>
+        </Button>
       </li>
     </ul>
     <EmptyState v-if="loading && !logs.length">正在加载问答记录…</EmptyState>

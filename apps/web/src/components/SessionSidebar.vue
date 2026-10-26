@@ -55,13 +55,13 @@ const statsNote = computed(() => {
       <section v-for="group in groups" :key="group.label" class="mt-2 first:mt-0">
         <h2 class="px-2 py-1.5 text-xs font-medium text-muted-foreground">{{ group.label }}</h2>
         <div v-for="session in group.sessions" :key="session.id" :class="['group flex items-center rounded-md transition-colors hover:bg-card/60', session.id === sessionId && 'bg-card hover:bg-card']">
-          <button
-            class="min-w-0 flex-1 px-2 py-2 text-left pointer-coarse:py-3 text-[13px] text-body disabled:cursor-default disabled:opacity-60"
+          <Button
+            variant="ghost" class="block h-auto min-w-0 flex-1 shrink px-2 py-2 text-left pointer-coarse:py-3 text-[13px] font-normal text-body hover:bg-transparent hover:text-body disabled:cursor-default disabled:opacity-60"
             :disabled="busy" :title="session.title" :aria-current="session.id === sessionId ? 'page' : undefined"
             @click="emit('open', session.id)"
           >
             <span class="block truncate">{{ session.title || '新会话' }}</span>
-          </button>
+          </Button>
           <IconButton
             label="删除会话" size="icon-sm"
             class="mr-0.5 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-transparent hover:text-destructive focus-visible:opacity-100 [@media(hover:none)]:opacity-100"

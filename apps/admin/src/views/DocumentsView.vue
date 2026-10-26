@@ -141,7 +141,7 @@ async function deleteDocument(document: DocumentSummary) {
       <TableBody>
         <TableRow v-for="document in documents" :key="document.id" class="text-[13px] text-muted-foreground">
           <TableCell class="py-3 pl-4">
-            <button class="grid max-w-96 gap-1 text-left" @click="openDocument(document.id)"><b class="truncate text-sm text-foreground hover:underline">{{ document.title }}</b><small class="truncate text-xs">{{ document.url }}</small></button>
+            <Button variant="ghost" class="grid h-auto max-w-96 items-stretch justify-stretch gap-1 p-0 text-left whitespace-normal font-normal text-inherit hover:bg-transparent hover:text-inherit" @click="openDocument(document.id)"><b class="truncate text-sm text-foreground hover:underline">{{ document.title }}</b><small class="truncate text-xs">{{ document.url }}</small></Button>
           </TableCell>
           <TableCell>{{ sourceName(document.sourceId) }}</TableCell>
           <TableCell><StatusBadge :tone="processingTone(document)">{{ processingLabel(document) }}</StatusBadge></TableCell>
@@ -160,7 +160,7 @@ async function deleteDocument(document: DocumentSummary) {
     </Table>
     <ul class="divide-y md:hidden" aria-label="文档列表">
       <li v-for="document in documents" :key="document.id" class="grid gap-2 px-4 py-3 text-[13px] text-muted-foreground">
-        <button class="grid min-w-0 gap-1 text-left" @click="openDocument(document.id)"><b class="line-clamp-2 text-sm break-words text-foreground">{{ document.title }}</b><small class="truncate text-xs">{{ sourceName(document.sourceId) }} · {{ new Date(document.updatedAt).toLocaleString() }}</small></button>
+        <Button variant="ghost" class="grid h-auto min-w-0 items-stretch justify-stretch gap-1 p-0 text-left whitespace-normal font-normal text-inherit hover:bg-transparent hover:text-inherit" @click="openDocument(document.id)"><b class="line-clamp-2 text-sm break-words text-foreground">{{ document.title }}</b><small class="truncate text-xs">{{ sourceName(document.sourceId) }} · {{ new Date(document.updatedAt).toLocaleString() }}</small></Button>
         <div class="flex flex-wrap items-center gap-1.5">
           <StatusBadge :tone="processingTone(document)">{{ processingLabel(document) }}</StatusBadge>
           <StatusBadge :tone="embeddingTone(document.embedding?.status)">{{ embeddingStatuses[document.embedding?.status ?? 'pending'] }}</StatusBadge>

@@ -1,6 +1,7 @@
 // 回答层评估的纯逻辑：引用统计、评审提示与解析、指标汇总与两次运行的对比。
 // 检索、模型调用与断点续跑文件由 cli/evaluate-answer.ts 负责。方案见 docs/evaluation-plan.md 第九节。
-import type { QuestionType, Specificity, Split } from "./evaluation.js";
+import type { EvaluationQuestion, QuestionType, Specificity, Split } from "./evaluation.js";
+import type { QueryOutcome } from "./evaluation-rewrite.js";
 import { GROUP_DIMENSIONS, groupKey, percentile, type GroupDimension } from "./evaluation-run.js";
 import type { ChatMessage } from "./models.js";
 import type { CitationStats } from "./citations.js";
@@ -39,6 +40,10 @@ export interface AnswerItem {
   lexicalOverlap?: number;
   sourceArticleKeys: string[];
   at: string;
+  /** 对话历史轮数；没有历史时省略。 */
+  historyTurns?: number;
+  /** 带历史的题目实际用于检索的问题（--rewrite）；没有历史时省略。 */
+  rewrite?: QueryOutcome;
   /** 因语料变化排除的原因。 */
   excluded?: string;
   retrieval?: {
@@ -68,6 +73,18 @@ export interface AnswerItem {
 }
 
 // ---- 评审 ----
+
+/**
+ * 送给评审的问题：追问单独看可能指代不明，附上此前各轮的问题与标注的独立问题，评审据此理解在问什么；单轮题保持原样。
+ * 评审仍只看这一轮的回答，历史回答不送入评审。
+ */
+export function judgeQuestion(question: Pick<EvaluationQuestion, "question" | "history" | "standalone">): string {
+  if (!question.history.length) return question.question;
+  return [
+    question.question,
+    `（多轮对话中的追问。此前用户依次问过：${question.history.map((turn) => `「${turn.question}」`).join("、")}${question.standalone ? `；补全指代后的问题：${question.standalone}` : ""}）`,
+  ].join("\n");
+}
 
 /**
  * 评审只看问题、参考答案与证据、送入模型的参考资料和回答，不知道上下文的组装方式与模型配置。
@@ -177,8 +194,10 @@ export interface AnswerSummary {
   generation: { promptTokens: number | null; completionTokens: number | null; firstTokenMs: { p50: number | null; p95: number | null }; totalMs: { p50: number | null; p95: number | null } };
   retrievalMs: { p50: number | null; p95: number | null };
   contextChars: number | null;
+  /** 带历史题目的检索问题改写：题数、llm 改写失败或不合格的题数与耗时（耗时位于首 Token 之前）。 */
+  rewrite: { questions: number; failures: number; ms: { p50: number | null; p95: number | null } };
   /** Token 合计，用于估算费用。 */
-  usage: { generate: Usage; judge: Usage };
+  usage: { generate: Usage; judge: Usage; rewrite: Usage };
 }
 
 const latency = (values: number[]) => ({ p50: percentile(values, 0.5), p95: percentile(values, 0.95) });
@@ -214,7 +233,15 @@ export function summarizeAnswers(items: AnswerItem[]): AnswerSummary {
     },
     retrievalMs: latency(answered.map((item) => item.retrieval!.retrievalMs)),
     contextChars: mean(answered.map((item) => item.retrieval!.contextChars), 0),
-    usage: { generate: sumUsage(items.map((item) => item.generation)), judge: sumUsage(items.map((item) => item.judgeUsage)) },
+    rewrite: {
+      questions: answered.filter((item) => item.rewrite).length,
+      failures: answered.filter((item) => item.rewrite?.failed).length,
+      ms: latency(answered.flatMap((item) => item.rewrite?.ms === undefined ? [] : [item.rewrite.ms])),
+    },
+    usage: {
+      generate: sumUsage(items.map((item) => item.generation)), judge: sumUsage(items.map((item) => item.judgeUsage)),
+      rewrite: sumUsage(items.map((item) => item.rewrite && { promptTokens: item.rewrite.promptTokens ?? 0, completionTokens: item.rewrite.completionTokens ?? 0 })),
+    },
   };
 }
 

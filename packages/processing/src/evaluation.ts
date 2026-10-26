@@ -27,6 +27,8 @@ export interface EvaluationQuestion {
   /** 参考答案，只用于审核题目质量，检索时不使用。 */
   answer?: string;
   history: Array<{ question: string; answer: string }>;
+  /** 带历史的题目对应的独立问题（不依赖对话即可理解），只用作检索问题改写的上限（--rewrite=standalone）与改写保留词项的参照。 */
+  standalone?: string;
   filters: RetrievalFilters | null;
   type: QuestionType;
   specificity?: Specificity;
@@ -150,6 +152,7 @@ export function validateEvaluationDataset(input: AnyEvaluationDataset, options: 
     if (typeof item.answerable !== "boolean") errors.push(`${at}: answerable must be a boolean`);
     if (!Array.isArray(item.history)) errors.push(`${at}: history must be an array`);
     else if (item.history.some((turn) => !turn || typeof turn.question !== "string" || !turn.question.trim() || typeof turn.answer !== "string")) errors.push(`${at}: history turns require question and answer strings`);
+    if (item.standalone !== undefined && (typeof item.standalone !== "string" || !item.standalone.trim())) errors.push(`${at}: standalone must be a non-empty string`);
     try { if (item.filters !== null) parseRetrievalFilters(item.filters); }
     catch (error) { errors.push(`${at}: ${(error as Error).message}`); }
     if (!item.labels?.length && item.answerable !== false) errors.push(`questions[${index}] has no relevance labels`);
@@ -185,12 +188,18 @@ export function validateEvaluationDataset(input: AnyEvaluationDataset, options: 
 export const filterSplit = (dataset: EvaluationDataset, split?: Split): EvaluationDataset =>
   split ? { ...dataset, questions: dataset.questions.filter((item) => item.split === split) } : dataset;
 
-/** Current evaluation runners are single-turn/unfiltered, not faithful replay engines. */
-export function assertSupportedEvaluationInputs(questions: EvaluationQuestion[]): void {
+/**
+ * 评估执行器不重放过滤条件；对话历史只有指定了检索问题改写方式（--rewrite）的 hybrid 检索与回答评估支持。
+ * 不支持的输入直接报错，避免静默忽略后报告成功。
+ */
+export function assertSupportedEvaluationInputs(questions: EvaluationQuestion[], options: { history?: boolean } = {}): void {
   for (const question of questions) {
-    if (question.history.length || (question.filters && Object.keys(question.filters).length)) throw new Error(`${question.id}: evaluation runner does not support history or filters; refusing to silently ignore supplied inputs`);
+    if (question.filters && Object.keys(question.filters).length) throw new Error(`${question.id}: evaluation runner does not support filters; refusing to silently ignore supplied inputs`);
+    if (question.history.length && !options.history) throw new Error(`${question.id}: this evaluation mode does not support history; use --mode=hybrid or evaluate:answer with --rewrite`);
   }
 }
+
+export const hasHistory = (questions: EvaluationQuestion[]) => questions.some((question) => question.history.length > 0);
 
 /** 按文章确定 dev / test（约 2:1）：同一篇文章的题目始终在同一侧，扩充时已有文章的划分不变。 */
 export function splitForArticle(articleKey: string): Split {

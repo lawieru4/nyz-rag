@@ -532,7 +532,7 @@ const saveModelProviderBodySchema = {
 
 const modelCapabilityParams = {
   type: "object",
-  properties: { capability: { type: "string", enum: ["chat", "embedding", "rerank", "review"] } },
+  properties: { capability: { type: "string", enum: ["chat", "embedding", "rerank", "review", "rewrite"] } },
   required: ["capability"],
   additionalProperties: false,
 } as const;
@@ -558,8 +558,9 @@ const modelSettingsResponseSchema = {
     embedding: { ...modelSettingRecordSchema, nullable: true },
     rerank: { ...modelSettingRecordSchema, nullable: true },
     review: { ...modelSettingRecordSchema, nullable: true },
+    rewrite: { ...modelSettingRecordSchema, nullable: true },
   },
-  required: ["chat", "embedding", "rerank", "review"],
+  required: ["chat", "embedding", "rerank", "review", "rewrite"],
   additionalProperties: false,
 } as const;
 
@@ -706,6 +707,10 @@ const chatLogRecordSchema = {
     answerMode: { type: "string", enum: ["generated", "extractive"] },
     knowledgeBaseId: { type: "string" },
     model: { type: "string" },
+    retrievalQuery: { type: "string" },
+    rewriteMs: { type: "number" },
+    rewritePromptTokens: { type: "number" },
+    rewriteCompletionTokens: { type: "number" },
     retrievalMs: { type: "number" },
     firstTokenMs: { type: "number" },
     totalMs: { type: "number" },

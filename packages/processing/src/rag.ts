@@ -247,6 +247,8 @@ export function buildSectionContext(chunks: RetrievedChunk[], sections: SectionC
 export interface ChatTurn {
   question: string;
   answer: string;
+  /** 该轮引用的文章标题，只用于检索问题改写（query-rewrite.ts），不送入回答模型。 */
+  sourceTitles?: string[];
 }
 
 // 送入模型的历史轮数与每轮回答的字数上限。

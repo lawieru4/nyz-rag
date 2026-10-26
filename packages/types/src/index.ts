@@ -612,6 +612,13 @@ export interface ChatLogRecord {
   answerMode: ChatAnswerMode;
   knowledgeBaseId?: string;
   model?: string;
+  /** 追问时改写后实际用于检索的问题；未改写时省略。 */
+  retrievalQuery?: string;
+  /** 检索问题改写耗时（包含在 retrievalMs 中）；未尝试改写时省略。 */
+  rewriteMs?: number;
+  /** 检索问题改写调用的 Token 用量（不含在 promptTokens / completionTokens 中）。 */
+  rewritePromptTokens?: number;
+  rewriteCompletionTokens?: number;
   retrievalMs?: number;
   firstTokenMs?: number;
   totalMs?: number;
@@ -657,10 +664,10 @@ export type SaveModelProviderRequest = Pick<ModelProviderRecord, "name" | "provi
   & Partial<Pick<ModelProviderRecord, "credentialEnv">>
   & { apiKey?: string; clearApiKey?: boolean };
 
-/** 业务模型的用途：问答生成、向量化与检索、重排序、审核（评估集题目审核等离线任务）。 */
-export type ModelCapability = "chat" | "embedding" | "rerank" | "review";
+/** 业务模型的用途：问答生成、向量化与检索、重排序、审核（评估集题目审核等离线任务）、检索问题改写（追问时改写为独立问题，未配置时用 Chat 模型）。 */
+export type ModelCapability = "chat" | "embedding" | "rerank" | "review" | "rewrite";
 
-/** 某项用途选定的供应商与模型；temperature / maxTokens 只用于 Chat 与审核。 */
+/** 某项用途选定的供应商与模型；temperature / maxTokens 只用于 Chat、审核与改写。 */
 export interface ModelSettingRecord {
   capability: ModelCapability;
   providerId: string;

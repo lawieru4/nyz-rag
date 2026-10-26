@@ -6,7 +6,7 @@ import {
 import type { ListProviderModelsRequest, ModelCapability, SaveModelProviderRequest, SaveModelSettingRequest } from "@nyz-rag/types";
 import { requires } from "./admin-auth.js";
 
-const CAPABILITY_LABELS: Record<ModelCapability, string> = { chat: "Chat", embedding: "Embedding", rerank: "Rerank", review: "审核" };
+const CAPABILITY_LABELS: Record<ModelCapability, string> = { chat: "Chat", embedding: "Embedding", rerank: "Rerank", review: "审核", rewrite: "检索问题改写" };
 
 function validBaseUrl(url: string) {
   if (!url) return true;

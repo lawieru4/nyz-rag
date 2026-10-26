@@ -2,6 +2,7 @@
 
 - This is a pnpm workspace (`apps/*`, `packages/*`); shared frontend/API contracts live in `packages/types` and are imported as `@nyz-rag/types`.
 - `apps/web` and `apps/admin` are separate Vue 3/Vite applications; `apps/api` is the Fastify entrypoint and `apps/worker` consumes the BullMQ `document-processing` queue.
+- All modules must prioritize reusing existing components. Before adding or changing UI, check `packages/ui` (`@nyz-rag/ui/components/*`) and existing application components; use them instead of duplicating implementations or using raw HTML controls when an equivalent component exists. Only add a new component when existing components cannot meet the requirement; place reusable UI components in `packages/ui` and follow the established component conventions.
 - Root commands: `pnpm dev` starts API, web, and worker (not admin); `pnpm build` builds all workspace packages; `pnpm typecheck` typechecks all packages.
 - Focused commands: `pnpm --filter @nyz-rag/<api|web|admin|worker|types> dev|build|typecheck`. API and worker use `tsx watch`; Vue apps use Vite and `vue-tsc`.
 - Local development reuses shared PostgreSQL 18/pgvector at `localhost:5432` and Redis 8 at `localhost:6379`. Use the dedicated `nyzrag` database/role and set `DOCUMENT_QUEUE_NAME=nyz-rag-document-processing` in both API and worker. Do not change booth-ai services. Optional isolated services require `docker compose --profile standalone up -d postgres redis` and URLs using ports 55433/56380.

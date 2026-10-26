@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { LoaderCircle, Plus } from "@lucide/vue";
 import type { AdminAccount, AdminRole, CreateAdminRequest, UpdateAdminRequest } from "@nyz-rag/types";
 import { Alert, AlertDescription } from "@nyz-rag/ui/components/alert";
+import { Badge } from "@nyz-rag/ui/components/badge";
 import { Button } from "@nyz-rag/ui/components/button";
 import { Card } from "@nyz-rag/ui/components/card";
 import { confirm } from "@nyz-rag/ui/confirm";
@@ -146,7 +147,7 @@ async function toggleAdmin(admin: AdminAccount) {
           <TableCell class="py-3 pl-4 font-semibold text-foreground">{{ admin.nickname }}</TableCell>
           <TableCell>{{ admin.email }}</TableCell>
           <TableCell>
-            <span v-if="admin.isSuper" class="rounded-sm bg-brand-soft px-1.5 py-0.5 text-[11px] font-medium text-accent-foreground">超级管理员</span>
+            <Badge v-if="admin.isSuper" variant="brand" class="rounded-sm border-0 px-1.5 text-[11px]">超级管理员</Badge>
             <Select v-else :model-value="admin.roleId ?? NO_ROLE" :disabled="updating.has(admin.id)" @update:model-value="changeRole(admin, String($event))">
               <SelectTrigger size="sm" class="min-w-32 text-xs" :aria-label="`${admin.nickname} 的角色`"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -186,7 +187,7 @@ async function toggleAdmin(admin: AdminAccount) {
         </div>
         <span>创建于 {{ new Date(admin.createdAt).toLocaleString() }}</span>
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <span v-if="admin.isSuper" class="rounded-sm bg-brand-soft px-1.5 py-0.5 text-[11px] font-medium text-accent-foreground">超级管理员</span>
+          <Badge v-if="admin.isSuper" variant="brand" class="rounded-sm border-0 px-1.5 text-[11px]">超级管理员</Badge>
           <Select v-else :model-value="admin.roleId ?? NO_ROLE" :disabled="updating.has(admin.id)" @update:model-value="changeRole(admin, String($event))">
             <SelectTrigger size="sm" class="min-w-0 flex-1 text-xs" :aria-label="`${admin.nickname} 的角色`"><SelectValue /></SelectTrigger>
             <SelectContent>

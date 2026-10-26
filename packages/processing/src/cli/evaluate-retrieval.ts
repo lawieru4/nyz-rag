@@ -1,24 +1,27 @@
 // 用法：pnpm --filter @nyz-rag/processing evaluate:retrieval [--mode=offline|db] [--dataset=<路径>] [--split=dev|test] [--k=1,3,5,10]
 //       pnpm --filter @nyz-rag/processing evaluate:retrieval --mode=hybrid --dataset=<路径> --name=<运行名> [--split=dev|test] [--variant=keyword,vector,summary,fused,rerank]
-//         [--context=topk|budget|section] [--schema=eval_<名称>] [--concurrency=1] [--limit=N]
+//         [--context=topk|budget|section] [--schema=eval_<名称>] [--concurrency=1] [--limit=N] [--rewrite=none|concat|llm|standalone]
 // offline / db 为关键词冒烟测试；hybrid 调用问答使用的 retrieve()（业务模型配置中的 Embedding、Rerank 与最近创建的知识库参数），
 // 按变体消融，--context 选择回答上下文的组装方式，--schema 改用 evaluate:index 建立的实验索引；
+// 数据集含带历史的题目（多轮追问）时必须用 --rewrite 指定检索问题：none 只用当前问题，concat 拼接历史问题，llm 与问答相同的模型改写（调用改写模型，未配置时为 Chat 模型），standalone 用题目标注的独立问题（上限）；
 // 运行记录保存到 .nyz-data/eval-runs/<时间>-<运行名>.json，用 evaluate:compare 对比。方案见 docs/evaluation-plan.md。
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join, relative, resolve, dirname } from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import {
-  assertSupportedEvaluationInputs, evaluateRetrieval, filterSplit, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset,
+  assertSupportedEvaluationInputs, evaluateRetrieval, filterSplit, hasHistory, rankOffline, readEvaluationDataset, SPLITS, validateEvaluationDataset,
   type DatasetValidationOptions, type EvaluationDataset, type EvaluationQuestion, type Split,
 } from "../evaluation.js";
 import {
-  CONTEXT_MODES, failedResult, HIT_KS, percentile, RANKING_DEPTH, RETRIEVAL_VARIANTS, RUN_SCHEMA_VERSION, runVariant, sourceLabels, summarizeVariant,
+  CONTEXT_MODES, failedResult, HIT_KS, percentile, RANKING_DEPTH, RETRIEVAL_VARIANTS, RUN_SCHEMA_VERSION, runVariant, sourceLabels, summarizeRewrite, summarizeVariant,
   type ContextMode, type RetrievalVariant, type RunQuestion, type RunRecord,
 } from "../evaluation-run.js";
+import { evaluationQuery, REWRITE_MODES, standaloneTermRecall, type RewriteMode } from "../evaluation-rewrite.js";
 import { getDb, closeDatabase } from "../db.js";
 import { closeModelAdmissionLimiter } from "../model-admission.js";
-import { createEmbeddingModel, createRerankModel } from "../models.js";
+import { createChatModel, createEmbeddingModel, createRerankModel } from "../models.js";
+import { rewriteModelSelection, rewriteQuestion } from "../query-rewrite.js";
 import { usableModel } from "../provider.js";
 import { DEFAULT_RETRIEVAL_SETTINGS, type RetrievalDependencies, type RetrievalSettings } from "../rag.js";
 import { documents } from "../schema.js";
@@ -53,7 +56,14 @@ if (split !== undefined && !SPLITS.includes(split)) throw new Error("--split mus
 // 先校验完整数据集（ID 唯一等），再按 --split 取子集。
 const fullDataset = await readEvaluationDataset(datasetPath);
 const dataset = filterSplit(fullDataset, split);
-assertSupportedEvaluationInputs(dataset.questions);
+const rewriteArg = arg("rewrite") as RewriteMode | undefined;
+if (rewriteArg !== undefined && !REWRITE_MODES.includes(rewriteArg)) throw new Error(`--rewrite must be one of ${REWRITE_MODES.join(", ")}`);
+// 只有 hybrid 模式支持对话历史，且必须明确检索问题的来源（llm 会调用改写模型或 Chat 模型、产生费用）。
+const withHistory = hasHistory(dataset.questions);
+if (withHistory && mode === "hybrid" && !rewriteArg) throw new Error(`数据集含带历史的题目，请用 --rewrite=${REWRITE_MODES.join("|")} 指定检索问题（llm 会调用改写模型或 Chat 模型）`);
+assertSupportedEvaluationInputs(dataset.questions, { history: mode === "hybrid" && rewriteArg !== undefined });
+if (rewriteArg && !withHistory) console.warn("数据集没有带历史的题目，--rewrite 不起作用。");
+const rewriteMode = withHistory ? rewriteArg : undefined;
 if (!dataset.questions.length) throw new Error(`No questions in split ${split}`);
 
 // --- Offline mode: rank using a stable keyword baseline against local clean files. ---
@@ -163,6 +173,9 @@ async function hybrid() {
     if (variants.includes("rerank") && !rerankSelection) throw new Error("未配置可用的 Rerank 模型，请去掉 rerank 变体");
     const embedding = embeddingSelection && variants.some((variant) => variant !== "keyword") ? createEmbeddingModel(embeddingSelection) : null;
     const reranker = rerankSelection && variants.includes("rerank") ? createRerankModel(rerankSelection) : null;
+    const rewriteSelection = rewriteMode === "llm" ? rewriteModelSelection(selections) : null;
+    if (rewriteMode === "llm" && !rewriteSelection) throw new Error("--rewrite=llm 需要可用的改写模型或 Chat 模型（业务模型 rewrite / chat）");
+    const rewriter = rewriteSelection ? createChatModel(rewriteSelection) : null;
 
     const corpusChanged = Boolean(dataset.corpus && dataset.corpus.fingerprint !== snapshot.fingerprint);
     if (corpusChanged) console.warn("语料快照与数据集生成时不同：来源文章被删除或证据已不在原文中的题目将排除在指标之外。");
@@ -178,6 +191,7 @@ async function hybrid() {
         ...(question.specificity ? { specificity: question.specificity } : {}),
         ...(question.lexicalOverlap !== undefined ? { lexicalOverlap: question.lexicalOverlap } : {}),
         sourceArticleKeys: sourceLabels(question).map((label) => label.articleKey),
+        ...(question.history.length ? { historyTurns: question.history.length } : {}),
         ...(excluded ? { excluded } : {}),
         results: {},
       }, question];
@@ -187,16 +201,20 @@ async function hybrid() {
 
     console.info(`数据集 ${dataset.name}@${dataset.version}，${split ?? "全部"} ${selected.length} 道题；变体 ${variants.join(", ")}；`
       + `知识库 ${knowledgeBase?.name ?? "（默认参数）"} topK=${settings.topK} 阈值=${settings.similarityThreshold} 上下文 ${contextMode}/${settings.maxContextLength} 字；`
-      + `Embedding ${embedding?.model ?? "-"}，Rerank ${reranker?.model ?? "-"}；索引 ${schema ?? "业务库"}（切片版本 ${snapshot.chunkerVersion ?? "1"}）`);
+      + `Embedding ${embedding?.model ?? "-"}，Rerank ${reranker?.model ?? "-"}；索引 ${schema ?? "业务库"}（切片版本 ${snapshot.chunkerVersion ?? "1"}）`
+      + (rewriteMode ? `；带历史的题目检索问题 ${rewriteMode}${rewriter ? `（改写 ${rewriter.model}）` : ""}` : ""));
 
     async function processQuestion([entry, question]: [RunQuestion, EvaluationQuestion]) {
       if (entry.excluded) return;
+      // 带历史的题目先按 --rewrite 得到检索问题，各变体共用；改写失败时与问答一样退回当前问题，并记录原因。
+      const outcome = await evaluationQuery(question, rewriteMode ?? "none", rewriter ? (text, history) => withRetry(() => rewriteQuestion(rewriter, text, history)) : undefined);
+      if (question.history.length) entry.rewrite = { ...outcome, ...(question.standalone ? { standaloneRecall: standaloneTermRecall(question.standalone, outcome.query) } : {}) };
       // 同一道题的各变体共用一次查询 Embedding，与 API 一致；先算好向量，retrieve() 耗时不含 Embedding。
       let vector: number[] | null = null;
       if (embedding) {
         const started = performance.now();
         try {
-          vector = await withRetry(() => embedding.embedQuery(question.question));
+          vector = await withRetry(() => embedding.embedQuery(outcome.query));
           entry.embeddingMs = Math.round((performance.now() - started) * 10) / 10;
         } catch (error) {
           entry.error = `查询 Embedding 失败：${message(error)}`;
@@ -212,7 +230,7 @@ async function hybrid() {
         ...(reranker ? { rerank: (query: string, texts: string[], topN: number) => withRetry(() => reranker.rerank(query, texts, topN)) } : {}),
       };
       for (const variant of variants) {
-        try { entry.results[variant] = await runVariant(question, variant, settings, dependencies, articleKeyOf, { mode: contextMode, loadSections: (ids) => listSectionContexts(ids) }); }
+        try { entry.results[variant] = await runVariant({ ...question, ...(question.history.length ? { retrievalQuery: outcome.query } : {}) }, variant, settings, dependencies, articleKeyOf, { mode: contextMode, loadSections: (ids) => listSectionContexts(ids) }); }
         catch (error) { entry.results[variant] = failedResult(message(error)); }
       }
     }
@@ -243,14 +261,17 @@ async function hybrid() {
       incomplete,
       settings: {
         knowledgeBase: knowledgeBase ? { id: knowledgeBase.id, name: knowledgeBase.name } : null, retrieval: settings, rankingDepth: RANKING_DEPTH, context: contextMode, ...(schema ? { schema } : {}),
+        ...(rewriteMode ? { rewrite: rewriteMode } : {}),
       },
       models: {
         embedding: embedding && embeddingSelection ? { provider: embeddingSelection.provider.name, model: embedding.model } : null,
         rerank: reranker && rerankSelection ? { provider: rerankSelection.provider.name, model: reranker.model } : null,
+        ...(rewriter && rewriteSelection ? { rewrite: { provider: rewriteSelection.provider.name, model: rewriter.model } } : {}),
       },
       variants,
       summary: Object.fromEntries(variants.map((variant) => [variant, summarizeVariant(questions, variant)])),
       embedding: { p50: percentile(embeddingTimes, 0.5), p95: percentile(embeddingTimes, 0.95), failures: questions.filter((question) => question.error).length },
+      ...(rewriteMode ? { rewrite: summarizeRewrite(questions, rewriteMode) } : {}),
       questions,
     };
     await mkdir(runsDir, { recursive: true });
@@ -277,7 +298,16 @@ function printSummary(record: RunRecord, data: EvaluationDataset) {
       String(reliability.evaluated).padStart(5), String(reliability.degraded).padStart(5), String(reliability.errors).padStart(5), String(reliability.shallowRanking).padStart(9),
     ].join(" "));
   }
-  console.info(`查询 Embedding p50 ${Math.round(record.embedding.p50 ?? 0)}ms / p95 ${Math.round(record.embedding.p95 ?? 0)}ms，失败 ${record.embedding.failures} 道；因语料变化排除 ${record.questions.filter((question) => question.excluded).length} 道。按划分、题型、具体度与词面重叠分组的指标见运行记录的 summary。`);
+  if (record.rewrite) {
+    const { mode, questions, failures, latency, standaloneRecall, usage } = record.rewrite;
+    for (const variant of record.variants) {
+      const groups = record.summary[variant]!.groups.turn;
+      console.info(`${variant} 按对话（Hit@5 / Hit@10 / MRR，%）：${Object.entries(groups).map(([key, metrics]) => `${key}（${metrics.questions} 道）${percent(metrics.hitAt["5"]).trim()} / ${percent(metrics.hitAt["10"]).trim()} / ${percent(metrics.mrr).trim()}`).join("；")}`);
+    }
+    console.info(`检索问题 ${mode}：带历史 ${questions} 道${mode === "llm" ? `，改写失败或不合格 ${failures} 道，改写耗时 p50 ${Math.round(latency.p50 ?? 0)}ms / p95 ${Math.round(latency.p95 ?? 0)}ms，Token 输入 ${usage.promptTokens}、输出 ${usage.completionTokens}` : ""}；`
+      + `独立问题词项保留：${Object.entries(standaloneRecall).map(([key, value]) => `${key} ${percent(value).trim()}%`).join("、") || "-"}`);
+  }
+  console.info(`查询 Embedding p50 ${Math.round(record.embedding.p50 ?? 0)}ms / p95 ${Math.round(record.embedding.p95 ?? 0)}ms，失败 ${record.embedding.failures} 道；因语料变化排除 ${record.questions.filter((question) => question.excluded).length} 道。按划分、题型、具体度、词面重叠与对话分组的指标见运行记录的 summary。`);
 }
 
 if (mode === "offline") await offline();

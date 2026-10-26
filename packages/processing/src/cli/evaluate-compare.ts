@@ -70,7 +70,8 @@ function printComparison(comparison: RunComparison, lenient: { a: LenientMetrics
   for (const [label, a, b, delta] of metricRows(comparison.a, comparison.b, comparison.delta)) console.info(`${label.padEnd(8)}${pct(a).padStart(8)}${pct(b).padStart(8)}${signed(delta).padStart(8)}`);
   console.info(`${"上下文字数".padEnd(8)}${chars(comparison.a.contextChars).padStart(7)}${chars(comparison.b.contextChars).padStart(8)}${signedChars(comparison.delta.contextChars).padStart(8)}`);
   if (lenient) printLenient(lenient);
-  for (const [dimension, title] of [["specificity", "按具体度"], ["type", "按题型"]] as const) {
+  for (const [dimension, title] of [["specificity", "按具体度"], ["type", "按题型"], ["turn", "按对话"]] as const) {
+    if (dimension === "turn" && Object.keys(comparison.groups.turn).length < 2) continue;
     console.info(`${title}（Hit@10 / MRR 差值）：${Object.entries(comparison.groups[dimension]).map(([key, group]) => `${key}（${group.a.questions} 道）${signed(group.delta.hitAt["10"])} / ${signed(group.delta.mrr)}`).join("；")}`);
   }
   console.info(`来源文章名次：上升 ${comparison.ranks.improved}、下降 ${comparison.ranks.worsened}、不变 ${comparison.ranks.unchanged}`);
@@ -87,7 +88,7 @@ function printComparison(comparison: RunComparison, lenient: { a: LenientMetrics
   list("证据由命中变为未命中", comparison.evidence.lost);
 }
 
-const setup = (run: RunRecord) => `上下文 ${run.settings.context ?? "topk"}/${run.settings.retrieval.maxContextLength} 字，索引 ${run.settings.schema ?? "业务库"}（切片版本 ${run.corpus.chunkerVersion ?? 1}）`;
+const setup = (run: RunRecord) => `上下文 ${run.settings.context ?? "topk"}/${run.settings.retrieval.maxContextLength} 字，索引 ${run.settings.schema ?? "业务库"}（切片版本 ${run.corpus.chunkerVersion ?? 1}）${run.settings.rewrite ? `，检索问题 ${run.settings.rewrite}${run.models.rewrite ? `（${run.models.rewrite.model}）` : ""}` : ""}`;
 
 const refs = process.argv.slice(2).filter((value) => !value.startsWith("--"));
 if (refs.length !== 2) throw new Error("Usage: evaluate:compare <run A> <run B> [--variant=fused | --variant=fused:rerank] [--json]");
