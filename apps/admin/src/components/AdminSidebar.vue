@@ -32,42 +32,44 @@ const roleLabel = computed(() => props.session.admin.isSuper ? "超级管理员"
 </script>
 
 <template>
-  <aside :class="['flex flex-col px-3.5 pt-6 pb-3.5', drawer ? 'h-full' : 'fixed inset-y-0 left-0 z-10 w-58 bg-sidebar text-sidebar-foreground max-lg:w-48 max-md:hidden']">
-    <RouterLink class="flex items-center gap-1 px-2 text-sm font-bold text-sidebar-accent-foreground" :to="homePath(session)" aria-label="能知管理后台" @click="emit('select', $event, '')">
-      <img src="/logo_t.png" alt="能知" class="h-10 w-30 flex-none object-contain max-lg:w-24" />
-      <span class="text-[11px] font-medium text-sidebar-foreground">管理后台</span>
+  <aside :class="['flex min-h-0 flex-col gap-6 px-3 pt-6 pb-3', drawer ? 'h-full' : 'fixed inset-y-0 left-0 z-10 w-58 bg-sidebar text-sidebar-foreground max-lg:w-48 max-md:hidden']">
+    <RouterLink class="flex min-h-11 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-bold text-sidebar-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sidebar-ring" :to="homePath(session)" aria-label="能知管理后台" @click="emit('select', $event, '')">
+      <img src="/logo_t.png" alt="能知" class="h-10 w-30 flex-none object-contain max-lg:w-22" />
+      <span class="shrink-0 text-xs leading-5 font-medium text-sidebar-foreground">管理后台</span>
     </RouterLink>
-    <div :class="['mx-2.5 mb-3 text-[11px] font-medium tracking-wider text-sidebar-foreground', drawer ? 'mt-8' : 'mt-11']">工作空间</div>
-    <nav class="-mx-1 grid min-h-0 content-start gap-1 overflow-y-auto px-1" aria-label="管理模块">
+    <div class="flex min-h-0 flex-1 flex-col gap-2">
+    <div class="shrink-0 px-3 text-xs leading-5 font-medium tracking-wider text-sidebar-foreground">工作空间</div>
+    <nav class="grid min-h-0 content-start gap-1 overflow-y-auto" aria-label="管理模块">
       <RouterLink
         v-for="item in modules"
         :key="item.name"
-        :class="['flex flex-none items-center gap-3 rounded-md px-3 text-left text-[13px] transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground', drawer ? 'h-11' : 'h-10', activeModule === item.name && 'bg-sidebar-accent text-sidebar-accent-foreground']"
+        :class="['flex min-h-11 flex-none items-center gap-2 rounded-md px-3 py-3 text-left text-sm leading-5 transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-sidebar-ring', activeModule === item.name && 'bg-sidebar-accent text-sidebar-accent-foreground']"
         :title="item.name"
         :aria-current="activeModule === item.name ? 'page' : undefined"
         :to="{ name: item.name }"
         @click="emit('select', $event, item.name)"
       >
-        <component :is="item.icon" :class="['size-4 flex-none', activeModule === item.name ? 'text-sidebar-primary' : 'text-sidebar-foreground/80']" />
-        <span>{{ item.name }}</span>
-        <span v-if="item.name === '数据源'" class="ml-auto font-mono text-[11px]">{{ sourceCount }}</span>
+        <component :is="item.icon" :class="['size-3 flex-none', activeModule === item.name ? 'text-sidebar-primary' : 'text-sidebar-foreground/80']" />
+        <span class="min-w-0 break-words">{{ item.name }}</span>
+        <span v-if="item.name === '数据源'" class="ml-auto shrink-0 font-mono text-xs leading-5 tabular-nums">{{ sourceCount }}</span>
       </RouterLink>
     </nav>
-    <div class="mt-auto flex items-center gap-2.5 border-t border-sidebar-border px-1.5 pt-4 pb-1">
+    </div>
+    <div class="flex shrink-0 items-center gap-2 border-t border-sidebar-border pt-3">
       <RouterLink
-        class="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent/60"
+        class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-3 py-2 text-left transition-colors hover:bg-sidebar-accent/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-sidebar-ring"
         title="个人资料"
         :aria-current="activeModule === PROFILE_MODULE ? 'page' : undefined"
         :to="{ name: PROFILE_MODULE }"
         @click="emit('select', $event, PROFILE_MODULE)"
       >
-        <span class="grid size-7.5 flex-none place-items-center rounded-full bg-sidebar-accent font-mono text-[11px] text-sidebar-accent-foreground"><User class="size-3.5" /></span>
-        <span class="grid min-w-0 gap-0.5 text-xs">
-          <b class="truncate text-sidebar-accent-foreground">{{ session.admin.nickname }}</b>
-          <small class="text-xs text-sidebar-foreground">{{ roleLabel }}</small>
+        <span class="grid size-7 flex-none place-items-center rounded-full bg-sidebar-accent text-sidebar-accent-foreground"><User class="size-3" /></span>
+        <span class="grid min-w-0 text-sm leading-5">
+          <b class="truncate text-sidebar-accent-foreground" :title="session.admin.nickname">{{ session.admin.nickname }}</b>
+          <small class="truncate text-xs leading-5 text-sidebar-foreground" :title="roleLabel">{{ roleLabel }}</small>
         </span>
       </RouterLink>
-      <Button variant="ghost" size="icon-sm" class="ml-auto flex-none text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" title="退出登录" aria-label="退出登录" @click="emit('logout')"><LogOut /></Button>
+      <Button variant="ghost" size="icon" class="size-11 flex-none rounded-md text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" title="退出登录" aria-label="退出登录" @click="emit('logout')"><LogOut class="size-3" /></Button>
     </div>
   </aside>
 </template>

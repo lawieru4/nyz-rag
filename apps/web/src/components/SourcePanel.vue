@@ -40,13 +40,13 @@ const documentHref = (id: string) => `#/documents/${encodeURIComponent(id)}`;
         v-for="(source, index) in sources" :key="source.documentId" :data-citation="index + 1"
         :class="['scroll-my-3 rounded-lg bg-card transition-shadow', activeCitation === index + 1 ? 'shadow-[0_0_0_1px_var(--ring),0_0_0_4px_color-mix(in_oklab,var(--brand)_40%,transparent)]' : 'hover:shadow-[0_1px_3px_#202b1414]']"
       >
-        <button type="button" class="flex w-full items-start gap-2.5 px-3.5 pt-3 text-left" :aria-pressed="activeCitation === index + 1" @click="emit('select', index + 1)">
+        <Button type="button" variant="ghost" class="flex h-auto w-full items-start justify-start gap-2.5 px-3.5 pt-3 pb-0 text-left whitespace-normal font-normal hover:bg-transparent hover:text-inherit" :aria-pressed="activeCitation === index + 1" @click="emit('select', index + 1)">
           <span :class="['citation mt-0.5 flex-none', activeCitation === index + 1 && 'citation-active']">{{ index + 1 }}</span>
           <span class="min-w-0">
             <span class="block text-sm leading-snug font-semibold text-foreground">{{ source.title }}</span>
             <span v-if="source.repostSource" class="mt-1 block text-xs text-muted-foreground">转载自 {{ source.repostSource }}</span>
           </span>
-        </button>
+        </Button>
 
         <div v-if="source.excerpts?.length" class="mt-2.5 space-y-2 px-3.5">
           <blockquote v-for="(excerpt, excerptIndex) in source.excerpts" :key="excerptIndex" class="rounded-md bg-quote px-3 py-2.5">
