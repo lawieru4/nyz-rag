@@ -80,7 +80,7 @@ export interface RunQuestion {
   /** 因语料变化排除的原因：来源文章已不在语料中，或证据已不在原文中。 */
   excluded?: string;
   embeddingMs?: number;
-  /** 查询 Embedding 失败，所有变体都没有结果。 */
+  /** 查询 Embedding 或检索问题改写（重试后仍被限流，此时没有 rewrite）失败，所有变体都没有结果。 */
   error?: string;
   results: Partial<Record<RetrievalVariant, VariantResult>>;
 }

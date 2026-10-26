@@ -17,7 +17,7 @@ import {
   CONTEXT_MODES, failedResult, HIT_KS, percentile, RANKING_DEPTH, RETRIEVAL_VARIANTS, RUN_SCHEMA_VERSION, runVariant, sourceLabels, summarizeRewrite, summarizeVariant,
   type ContextMode, type RetrievalVariant, type RunQuestion, type RunRecord,
 } from "../evaluation-run.js";
-import { evaluationQuery, REWRITE_MODES, standaloneTermRecall, type RewriteMode } from "../evaluation-rewrite.js";
+import { evaluationQuery, REWRITE_MODES, standaloneTermRecall, type QueryOutcome, type RewriteMode } from "../evaluation-rewrite.js";
 import { getDb, closeDatabase } from "../db.js";
 import { closeModelAdmissionLimiter } from "../model-admission.js";
 import { createChatModel, createEmbeddingModel, createRerankModel } from "../models.js";
@@ -27,7 +27,7 @@ import { DEFAULT_RETRIEVAL_SETTINGS, type RetrievalDependencies, type RetrievalS
 import { documents } from "../schema.js";
 import { getModelSelections, keywordSearchChunks, listKnowledgeBases, listSectionContexts, summarySearchChunks, vectorSearchChunks } from "../repository.js";
 import { searchTerms } from "../search-terms.js";
-import { loadCorpus, staleQuestionReason, useEvaluationSchema, withRetry } from "./evaluation-corpus.js";
+import { loadCorpus, staleQuestionReason, useEvaluationSchema, withAdmissionRetry, withRetry } from "./evaluation-corpus.js";
 
 const arg = (name: string, fallback?: string) => process.argv.find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
 
@@ -206,8 +206,14 @@ async function hybrid() {
 
     async function processQuestion([entry, question]: [RunQuestion, EvaluationQuestion]) {
       if (entry.excluded) return;
-      // 带历史的题目先按 --rewrite 得到检索问题，各变体共用；改写失败时与问答一样退回当前问题，并记录原因。
-      const outcome = await evaluationQuery(question, rewriteMode ?? "none", rewriter ? (text, history) => withRetry(() => rewriteQuestion(rewriter, text, history)) : undefined);
+      // 带历史的题目先按 --rewrite 得到检索问题，各变体共用；与问答一样改写不重试，超时或失败退回当前问题并记录原因，只有限流重试。
+      let outcome: QueryOutcome;
+      try {
+        outcome = await withAdmissionRetry(() => evaluationQuery(question, rewriteMode ?? "none", rewriter ? (text, history) => rewriteQuestion(rewriter, text, history) : undefined));
+      } catch (error) {
+        entry.error = `检索问题改写：${message(error)}`;
+        return;
+      }
       if (question.history.length) entry.rewrite = { ...outcome, ...(question.standalone ? { standaloneRecall: standaloneTermRecall(question.standalone, outcome.query) } : {}) };
       // 同一道题的各变体共用一次查询 Embedding，与 API 一致；先算好向量，retrieve() 耗时不含 Embedding。
       let vector: number[] | null = null;
@@ -270,7 +276,7 @@ async function hybrid() {
       },
       variants,
       summary: Object.fromEntries(variants.map((variant) => [variant, summarizeVariant(questions, variant)])),
-      embedding: { p50: percentile(embeddingTimes, 0.5), p95: percentile(embeddingTimes, 0.95), failures: questions.filter((question) => question.error).length },
+      embedding: { p50: percentile(embeddingTimes, 0.5), p95: percentile(embeddingTimes, 0.95), failures: questions.filter((question) => question.error && !rewriteBlocked(question)).length },
       ...(rewriteMode ? { rewrite: summarizeRewrite(questions, rewriteMode) } : {}),
       questions,
     };
@@ -284,6 +290,9 @@ async function hybrid() {
     await closeDatabase();
   }
 }
+
+/** 改写被限流（重试后仍失败）的带历史题目：没有检索问题，不计入 Embedding 失败。 */
+const rewriteBlocked = (question: RunQuestion) => Boolean(question.error && question.historyTurns && !question.rewrite);
 
 function printSummary(record: RunRecord, data: EvaluationDataset) {
   const header = ["变体    ", ...HIT_KS.map((k) => `Hit@${k}`.padStart(6)), "   MRR", "  证据", "全证据", "上下文", "  字数", " p50ms", " p95ms", " 题数", " 降级", " 失败", " 深度不足"];
@@ -307,7 +316,8 @@ function printSummary(record: RunRecord, data: EvaluationDataset) {
     console.info(`检索问题 ${mode}：带历史 ${questions} 道${mode === "llm" ? `，改写失败或不合格 ${failures} 道，改写耗时 p50 ${Math.round(latency.p50 ?? 0)}ms / p95 ${Math.round(latency.p95 ?? 0)}ms，Token 输入 ${usage.promptTokens}、输出 ${usage.completionTokens}` : ""}；`
       + `独立问题词项保留：${Object.entries(standaloneRecall).map(([key, value]) => `${key} ${percent(value).trim()}%`).join("、") || "-"}`);
   }
-  console.info(`查询 Embedding p50 ${Math.round(record.embedding.p50 ?? 0)}ms / p95 ${Math.round(record.embedding.p95 ?? 0)}ms，失败 ${record.embedding.failures} 道；因语料变化排除 ${record.questions.filter((question) => question.excluded).length} 道。按划分、题型、具体度、词面重叠与对话分组的指标见运行记录的 summary。`);
+  const blocked = record.questions.filter(rewriteBlocked).length;
+  console.info(`查询 Embedding p50 ${Math.round(record.embedding.p50 ?? 0)}ms / p95 ${Math.round(record.embedding.p95 ?? 0)}ms，失败 ${record.embedding.failures} 道；${blocked ? `改写重试后仍被限流 ${blocked} 道；` : ""}因语料变化排除 ${record.questions.filter((question) => question.excluded).length} 道。按划分、题型、具体度、词面重叠与对话分组的指标见运行记录的 summary。`);
 }
 
 if (mode === "offline") await offline();
