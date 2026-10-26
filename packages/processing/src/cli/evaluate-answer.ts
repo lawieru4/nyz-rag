@@ -15,7 +15,7 @@ import {
   type AnswerChange, type AnswerItem, type AnswerMetrics, type AnswerSummary,
 } from "../evaluation-answer.js";
 import { assertSupportedEvaluationInputs, filterSplit, hasHistory, readEvaluationDataset, SPLITS, validateEvaluationDataset, type CorpusSnapshot, type EvaluationQuestion, type Split } from "../evaluation.js";
-import { evaluationQuery, REWRITE_MODES, type RewriteMode } from "../evaluation-rewrite.js";
+import { evaluationQuery, REWRITE_MODES, type QueryOutcome, type RewriteMode } from "../evaluation-rewrite.js";
 import { rewriteModelSelection, rewriteQuestion } from "../query-rewrite.js";
 import { CONTEXT_MODES, runVariantWithContext, sourceLabels, type ContextMode } from "../evaluation-run.js";
 import { closeModelAdmissionLimiter } from "../model-admission.js";
@@ -24,7 +24,7 @@ import { usableModel, type ModelSelection } from "../provider.js";
 import { buildChatMessages, DEFAULT_RETRIEVAL_SETTINGS, NO_MATCH_ANSWER, referenceText, type RetrievalDependencies, type RetrievalSettings } from "../rag.js";
 import { getModelSelections, keywordSearchChunks, listKnowledgeBases, listSectionContexts, summarySearchChunks, vectorSearchChunks } from "../repository.js";
 import { parseModelJson } from "../synthetic-questions.js";
-import { loadCorpus, staleQuestionReason, useEvaluationSchema, withRetry } from "./evaluation-corpus.js";
+import { loadCorpus, staleQuestionReason, useEvaluationSchema, withAdmissionRetry, withRetry } from "./evaluation-corpus.js";
 
 const arg = (name: string) => process.argv.find((value) => value.startsWith(`--${name}=`))?.slice(name.length + 3);
 const flag = (name: string) => process.argv.includes(`--${name}`);
@@ -223,8 +223,13 @@ async function run() {
     if (item.answer === undefined) {
       let retrieved: Awaited<ReturnType<typeof runVariantWithContext>>;
       let embeddingMs: number;
-      // 带历史的题目先按 --rewrite 得到检索问题；改写失败时与问答一样退回当前问题。
-      const outcome = await evaluationQuery(question, rewriteMode ?? "none", rewriter ? (text, history) => withRetry(() => rewriteQuestion(rewriter, text, history)) : undefined);
+      // 带历史的题目先按 --rewrite 得到检索问题；与问答一样改写不重试，超时或失败退回当前问题，只有限流重试。
+      let outcome: QueryOutcome;
+      try {
+        outcome = await withAdmissionRetry(() => evaluationQuery(question, rewriteMode ?? "none", rewriter ? (text, history) => rewriteQuestion(rewriter, text, history) : undefined));
+      } catch (error) {
+        return save({ ...base, error: { stage: "retrieval", message: `检索问题改写：${message(error)}` } });
+      }
       const rewrite = question.history.length ? { rewrite: outcome } : {};
       try {
         const started = performance.now();

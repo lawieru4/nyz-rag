@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { AdmissionError } from "../src/admission.js";
 import { validateEvaluationDataset, type EvaluationDataset, type EvaluationQuestion } from "../src/evaluation.js";
 import { judgeQuestion, summarizeAnswers, type AnswerItem } from "../src/evaluation-answer.js";
 import { concatQuery, evaluationQuery, standaloneTermRecall } from "../src/evaluation-rewrite.js";
@@ -89,6 +90,8 @@ test("evaluation queries follow the rewrite mode only for questions with history
   assert.deepEqual([unusable.query, unusable.failed], ["那循环寿命呢？", "改写输出不合格"]);
   const failed = await evaluationQuery(followup, "llm", async () => { throw new Error("timeout"); });
   assert.deepEqual([failed.query, failed.failed], ["那循环寿命呢？", "改写失败：timeout"]);
+  // 与问答一致：限流整次报错（由 CLI 重试），而不是退回当前问题。
+  await assert.rejects(evaluationQuery(followup, "llm", async () => { throw new AdmissionError(429, 1, "busy"); }), AdmissionError);
   assert.equal(standaloneTermRecall("磷酸锰铁锂", "磷酸锰铁锂的循环寿命"), 1);
   assert.equal(standaloneTermRecall("磷酸锰铁锂", "那循环寿命呢"), 0);
   assert.equal(standaloneTermRecall("？", "x"), null);

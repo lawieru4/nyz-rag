@@ -1,6 +1,7 @@
 // 评估命令共用的语料读取：第二节范围内的文章（ready、非重复主文档）与语料快照；评估用的实验 schema 与模型调用重试。方案见 docs/evaluation-plan.md。
 import { and, eq, isNull } from "drizzle-orm";
 import type { ArticleMetadata } from "@nyz-rag/types";
+import { AdmissionError } from "../admission.js";
 import { getDb } from "../db.js";
 import { corpusFingerprint, normalizeEvidenceText, type CorpusSnapshot, type EvaluationQuestion } from "../evaluation.js";
 import { sourceLabels } from "../evaluation-run.js";
@@ -33,6 +34,20 @@ export async function withRetry<T>(call: () => Promise<T>): Promise<T> {
     try { return await call(); }
     catch (error) {
       if (retry >= 2) throw error;
+      await sleep(2_000 * (retry + 1) ** 2);
+    }
+  }
+}
+
+/**
+ * 只在本地限流（AdmissionError）时重试，其他错误照常抛出。用于检索问题改写：问答中改写超时或失败即用原问题检索、只有限流整次报错，
+ * 评估按同样规则不重试改写，否则长尾延迟会被重试掩盖；限流取决于评估自身的并发，重试后不计入改写耗时（每次调用重新计时）。
+ */
+export async function withAdmissionRetry<T>(call: () => Promise<T>): Promise<T> {
+  for (let retry = 0; ; retry += 1) {
+    try { return await call(); }
+    catch (error) {
+      if (!(error instanceof AdmissionError) || retry >= 2) throw error;
       await sleep(2_000 * (retry + 1) ** 2);
     }
   }
