@@ -8,3 +8,4 @@ coverage
 *.log
 *.tsbuildinfo
 .nyz-data/
+release/

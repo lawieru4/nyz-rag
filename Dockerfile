@@ -5,7 +5,9 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY apps ./apps
 COPY packages ./packages
 ENV VITE_API_URL=""
-RUN pnpm install --frozen-lockfile && pnpm build
+# 微信小程序不进镜像：只安装、构建 apps 与 packages 中除 weixin 外的包（不选根包，其 build 脚本会递归到全部包）。
+RUN pnpm install --frozen-lockfile --filter "./apps/**" --filter "./packages/**" --filter "!@nyz-rag/weixin" \
+  && pnpm -r --filter "./apps/**" --filter "./packages/**" --filter "!@nyz-rag/weixin" build
 
 FROM node:24-alpine AS backend
 ENV NODE_ENV=production
