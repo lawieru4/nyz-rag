@@ -22,7 +22,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 - 数据库（Drizzle）：修改 `packages/processing/src/schema.ts` 后运行 `pnpm db:generate` 生成迁移（会去掉外键里写死的 `"public".`，使表可建在任意 schema）；`pnpm db:migrate` 手动执行迁移（API/Worker 启动时也会自动执行）；`pnpm db:reindex-search` 按当前词项规则重建全部切片与文档元数据的关键词检索词项（修改 `search-terms.ts` 后执行）。
 - 没有配置 lint。`turbo.json` 存在但根脚本未使用 Turborepo。
 - `@nyz-rag/processing` 通过 `dist/` 导出：单独启动/类型检查 API 或 Worker 前须先 `pnpm --filter @nyz-rag/processing build`，修改 processing 后也要重新构建。`@nyz-rag/types`、`@nyz-rag/api-client`、`@nyz-rag/ui` 直接导出源码，无需构建。
-- 容器方式：`docker compose up -d --build --wait`（只启动 api/worker/web/admin）。不要同时运行本机 Worker 和容器 Worker。API 的 `/health` 只表示进程存活，`/ready` 检查数据库与 Redis（2 秒超时，失败返回 503 并只写出失败项名称），Compose 的 API 健康检查用后者；Worker 的投递器每轮成功（数据库、Redis 可用且队列消费者在运行）后写心跳文件（`NYZ_WORKER_HEARTBEAT_FILE`，默认在系统临时目录），健康检查 `node apps/worker/dist/healthcheck.js` 判断 30 秒内是否有心跳。
+- 容器方式：`docker compose up -d --build --wait`（只启动 api/worker/web/admin）。Docker 构建只安装、构建 `apps/*` 与 `packages/*` 中除 `@nyz-rag/weixin` 外的包。生产部署（1Panel 服务器，`docs/deploy-1panel.md`）不在服务器上构建：`scripts/package-images.ps1` 本地构建并导出镜像到 `release/`，服务器用 `deploy/compose.yml`（自带 pgvector 与 Redis、固定网段兼作 `TRUSTED_PROXIES`、各容器内存上限）启动。不要同时运行本机 Worker 和容器 Worker。API 的 `/health` 只表示进程存活，`/ready` 检查数据库与 Redis（2 秒超时，失败返回 503 并只写出失败项名称），Compose 的 API 健康检查用后者；Worker 的投递器每轮成功（数据库、Redis 可用且队列消费者在运行）后写心跳文件（`NYZ_WORKER_HEARTBEAT_FILE`，默认在系统临时目录），健康检查 `node apps/worker/dist/healthcheck.js` 判断 30 秒内是否有心跳。
 
 ## 架构
 
