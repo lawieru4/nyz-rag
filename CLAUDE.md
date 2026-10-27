@@ -35,6 +35,7 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 - `apps/worker`：BullMQ 消费者（`src/index.ts`，concurrency 1），执行后台操作（outbox，`packages/processing/src/operations.ts`）：
   - 操作状态 `pending → dispatched → running → succeeded | failed`。每个 Worker 都运行投递器：每秒把到期的 pending 操作以 jobId `op-<id>-<step>` 入队并标为 dispatched；每 1/4 租约回收租约过期的 running 操作（回到 pending、`attempt` 加一，共执行 3 次仍未完成记为失败）、确认投递超过一个租约仍未开始的操作在队列中仍有 job（没有则重新入队，覆盖 Redis 数据丢失）；每小时清理已结束的操作（每个目标保留 10 条、最多 30 天）。
   - 执行前按 job 中的 `step` 认领（只有 pending/dispatched 且 step 一致才能改为 running，重复或过期的投递直接跳过），取得租约（`NYZ_OPERATION_LEASE_MS`，默认 60 秒，每 1/4 续租）。结束、失败、重试都在同一事务内写入操作与业务状态，且只有持有租约的执行者能写（否则 `LeaseLostError`）；同步游标经 `saveOwnedSyncState` 同样校验。回到 pending 时 step 加一（jobId 随之变化）。
+  - 优雅关停（SIGTERM/SIGINT）：取消定时循环的等待，等执行中的 job、定时循环与启动补齐结束当前一轮（批）后再关闭队列、Redis 与数据库；关闭连接池后再查询会重新建立连接池，使进程无法退出。
   - 升级前入队的 job（没有 `operationId`）在 Worker 启动时（及执行时）由 `adoptLegacyJob` 转为操作后删除；迁移 `0021_operations` 已把升级时进行中的同步任务、待重新处理与向量排队中的文档转为操作。
   - 三种操作：
     - `sync-source`：数据源只有 `文章 API` 一种（数据库约束保证，网页站点采集已移除）。来源 `url` 为 nyzdata 文章列表接口，token 是全局一个、在管理端数据源页配置的密钥设置（`secret_settings`，`PUT /api/admin/settings/article-token`，只写不读），Worker 每次同步时读取（API 拒绝带 token 的地址），请求间隔/超时由 `NYZ_ARTICLE_REQUEST_DELAY_MS` / `NYZ_ARTICLE_REQUEST_TIMEOUT_MS` 控制。由 `syncArticles` 按 `updateTime` 增量同步，回填进度与失败文章存于 `data_sources.sync_state`。详情原样存入 `documents.raw_json`（必填），`external_id`（必填）为 articleKey，同一来源内按它识别文章；入库后在同一事务内由 `processDocument` 切片并安排向量化操作（`scheduleEmbeddings`，已有活动操作的文档由那个操作处理），同步结束后逐篇向量化。
@@ -78,3 +79,5 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 ## 验证
 
 修改后运行 `pnpm verify`（等价于 `pnpm build`、`pnpm typecheck` 与各包测试）；涉及 API/队列/Worker 链路时在本地基础设施可用时加跑集成测试。
+
+GitHub Actions（`.github/workflows/ci.yml`）在每个 PR 和推送到 main 时运行两个任务：`verify` 执行 `pnpm verify`；`integration` 用 pgvector 与 Redis 服务容器，设置 `NYZ_INTEGRATION_TEST`、`NYZ_AUTH_REDIS_TEST`、`NYZ_RATE_LIMIT_REDIS_TEST` 后执行 `pnpm test`。测试不读取 `.env`，新增依赖环境变量的测试须在测试内设置或同步到工作流。在全新数据库上跑集成测试前须先在 `public` 中创建 `vector` 扩展（工作流已这样做）：否则首个迁移会把扩展建进该测试的临时 schema，并行的其他测试找不到 `vector` 类型。Windows 上 `child.kill("SIGTERM")` 是强制结束，进程的优雅关停只在 Linux（CI、容器）上真正执行。

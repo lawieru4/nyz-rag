@@ -203,7 +203,7 @@ async function runSync(operation: ClaimedOperation) {
 /** 升级前的文档没有正文指纹（或按旧规则计算），启动时在后台补齐；只补指纹，已有的重复内容在下次重新处理时判定。 */
 async function backfillHashes() {
   let batches = 0;
-  for (let cursor = await backfillContentHashes("", 500); cursor; cursor = await backfillContentHashes(cursor, 500)) batches += 1;
+  for (let cursor = await backfillContentHashes("", 500); cursor && !stopped; cursor = await backfillContentHashes(cursor, 500)) batches += 1;
   if (batches) console.info(`Backfilled document content hashes (${batches} batches)`);
 }
 
@@ -212,7 +212,7 @@ async function backfillSearchTerms() {
   for (const [label, reindex] of [["chunk", reindexChunkSearchTerms], ["document metadata", reindexDocumentMetadataTerms]] as const) {
     let cursor = "";
     let batches = 0;
-    for (let last = await reindex(cursor, 500, { onlyMissing: true }); last; last = await reindex(cursor, 500, { onlyMissing: true })) {
+    for (let last = await reindex(cursor, 500, { onlyMissing: true }); last && !stopped; last = await reindex(cursor, 500, { onlyMissing: true })) {
       cursor = last;
       batches += 1;
     }
@@ -229,7 +229,7 @@ async function backfillSummaryEmbeddings() {
   if (!embedding) return;
   const space = { providerId: embedding.provider.id, model: embedding.model };
   let saved = 0;
-  for (let cursor: string | null = ""; cursor !== null;) {
+  for (let cursor: string | null = ""; cursor !== null && !stopped;) {
     const batch = await listMissingSummaryEmbeddings(cursor, 32, space);
     if (batch.items.length) {
       const vectors = await embedChunks(embedding, batch.items.map((item) => item.input));
@@ -283,14 +283,23 @@ async function sweep() {
   }
 }
 
+// 关停时取消定时循环的等待；循环与启动时的后台补齐在每一轮（批）开始前检查 stopped。
 let stopped = false;
+const stopping = new AbortController();
+// 关停先等这些任务结束当前一轮，再关闭队列与连接：之后的查询会重新建立连接池，使进程无法退出。
+const background = new Set<Promise<unknown>>();
+function track(task: Promise<unknown>) {
+  background.add(task);
+  void task.finally(() => background.delete(task));
+}
+
 function every(intervalMs: number, label: string, run: () => Promise<unknown>) {
-  void (async () => {
+  track((async () => {
     while (!stopped) {
       try { await run(); } catch (error) { console.error(`${label} failed`, errorMessage(error, "unknown error")); }
-      await delay(intervalMs);
+      await delay(intervalMs, undefined, { signal: stopping.signal }).catch(() => undefined);
     }
-  })();
+  })());
 }
 
 const adoptLegacy = (job: Job) => adoptLegacyJob({ name: job.name, data: job.data, runAfter: job.delay ? new Date(job.timestamp + job.delay) : undefined });
@@ -308,9 +317,9 @@ async function adoptLegacyJobs() {
 
 await migrate();
 await adoptLegacyJobs();
-void backfillHashes().catch((error: unknown) => console.error("Content hash backfill failed", errorMessage(error, "unknown error")));
-void backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error")));
-void backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error")));
+track(backfillHashes().catch((error: unknown) => console.error("Content hash backfill failed", errorMessage(error, "unknown error"))));
+track(backfillSearchTerms().catch((error: unknown) => console.error("Search term backfill failed", errorMessage(error, "unknown error"))));
+track(backfillSummaryEmbeddings().catch((error: unknown) => console.error("Summary embedding backfill failed", errorMessage(error, "unknown error"))));
 
 const worker = new Worker(queueName, async (job) => {
   const { operationId, step } = job.data as { operationId?: string; step?: number };
@@ -347,7 +356,20 @@ every(SOURCE_SCHEDULE_INTERVAL_MS, "Source scheduling", () => scheduleDueSources
 every(sweepIntervalMs, "Operation sweep", sweep);
 every(PRUNE_INTERVAL_MS, "Operation pruning", () => pruneOperations(10, 30 * 24 * 60 * 60_000));
 
-const shutdown = async () => { stopped = true; await worker.close(); await queue.close(); await connection.quit(); await closeDatabase(); await closeModelAdmissionLimiter(); };
-process.once("SIGINT", () => void shutdown());
-process.once("SIGTERM", () => void shutdown());
+/** 优雅关停：不再领取新 job，等执行中的 job 与后台任务结束当前一轮，再关闭队列、Redis 与数据库。 */
+async function shutdown() {
+  stopped = true;
+  stopping.abort();
+  await Promise.all([worker.close(), Promise.allSettled(background)]);
+  await queue.close();
+  await connection.quit();
+  await closeDatabase();
+  await closeModelAdmissionLimiter();
+}
+const stop = () => void shutdown().catch((error: unknown) => {
+  console.error("Worker shutdown failed", errorMessage(error, "unknown error"));
+  process.exitCode = 1;
+});
+process.once("SIGINT", stop);
+process.once("SIGTERM", stop);
 console.info(`NYZ RAG worker listening on ${queueName} queue`);
