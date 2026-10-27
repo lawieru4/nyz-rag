@@ -63,4 +63,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # 与部署一致，vector 扩展预先建在 public：否则首个迁移会把它建进该测试的临时 schema（search_path 在前），
+      # 并行的其他测试找不到 vector 类型，该 schema 删除时扩展也随之删除。
+      - name: Create vector extension
+        run: docker exec ${{ job.services.postgres.id }} psql -U nyzrag -d nyzrag -c "CREATE EXTENSION IF NOT EXISTS vector"
       - run: pnpm test
