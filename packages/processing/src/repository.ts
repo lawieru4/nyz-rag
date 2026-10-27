@@ -7,7 +7,7 @@ import { ADMIN_PERMISSIONS, normalizeAdminPermissions } from "./admin-permission
 import { emptyChatReview, exportReviewedCandidate, parseChatReview } from "./chat-review.js";
 import { normalizeEvidenceText } from "./evaluation.js";
 import { evidenceSource } from "./synthetic-questions.js";
-import type { ChatFeedbackReason, ChatReviewInput, ChatReviewRecord } from "@nyz-rag/types";
+import type { ChatFallbackReason, ChatFeedbackReason, ChatReviewInput, ChatReviewRecord, ChatStatsResponse, ChatStatsSummary } from "@nyz-rag/types";
 import { contentFingerprint } from "./dedup.js";
 import type { ModelProviderConfig, ModelSelection, ModelTarget } from "./provider.js";
 import type { ChunkHit, SectionContext } from "./rag.js";
@@ -1109,7 +1109,7 @@ export async function createChatMessage(log: NewChatMessage, db?: Executor): Pro
       owner = updated;
     }
     await tx.insert(chatMessages).values({
-      id: log.id, sessionId: log.sessionId ?? null, ...owner, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
+      id: log.id, sessionId: log.sessionId ?? null, ...owner, question: log.question, answer: log.answer, answerMode: log.answerMode ?? "extractive", fallbackReason: log.fallbackReason ?? null, knowledgeBaseId: log.knowledgeBaseId ?? null, model: log.model ?? null,
       retrievalQuery: log.retrievalQuery ?? null, rewriteMs: log.rewriteMs ?? null,
       rewritePromptTokens: log.rewritePromptTokens ?? null, rewriteCompletionTokens: log.rewriteCompletionTokens ?? null, retrievalMs: log.retrievalMs ?? null, firstTokenMs: log.firstTokenMs ?? null, totalMs: log.totalMs ?? null, promptTokens: log.promptTokens ?? null,
       completionTokens: log.completionTokens ?? null, rating: log.rating ?? null, createdAt: log.createdAt ? new Date(log.createdAt) : undefined,
@@ -1149,6 +1149,52 @@ export async function listChatMessages(filter: { query?: string; rating?: string
     db.select({ total: count() }).from(chatMessages).where(where),
   ]);
   return { logs: rows.map(toChatLog), total };
+}
+
+export const CHAT_FALLBACK_REASONS: readonly ChatFallbackReason[] = ["no_chat_model", "no_context", "model_error", "citation_rejected", "empty_answer"];
+
+/**
+ * 最近 days 天（含今天，按 timeZone 划分日期）的问答统计：逐日一行（没有问答的日期为 0）加整段汇总。
+ * 包含被重新生成替换的问答（它们同样调用了模型）；限流拒绝与客户端中止的请求不保存，不在其中。
+ * timeZone 须为调用方校验过的 IANA 时区名。
+ */
+export async function getChatStats(days: number, timeZone: string, db: Executor = getDb()): Promise<ChatStatsResponse> {
+  const fallbackColumns = sql.join(CHAT_FALLBACK_REASONS.map((reason) => sql`count(*) FILTER (WHERE m.fallback_reason = ${reason})::int AS ${sql.identifier(`fallback_${reason}`)}`), sql`, `);
+  type Row = Record<string, number | string | null>;
+  // 汇总行（GROUPING SETS 的空分组）的 date 为空；分位数只统计耗时非空的问答，没有时为空。
+  const { rows } = await db.execute<Row>(sql`
+    WITH bounds AS (SELECT (now() AT TIME ZONE ${timeZone})::date AS today),
+    days AS (SELECT bounds.today - offs AS day FROM bounds, generate_series(0, ${days}::int - 1) AS offs),
+    m AS (
+      SELECT (created_at AT TIME ZONE ${timeZone})::date AS day, id, answer_mode, fallback_reason, rating, total_ms, first_token_ms,
+        prompt_tokens, completion_tokens, rewrite_prompt_tokens, rewrite_completion_tokens
+      FROM ${chatMessages}, bounds
+      WHERE created_at >= ((bounds.today - (${days}::int - 1))::timestamp AT TIME ZONE ${timeZone})
+    )
+    SELECT days.day::text AS date, count(m.id)::int AS questions,
+      count(*) FILTER (WHERE m.answer_mode = 'extractive')::int AS extractive,
+      ${fallbackColumns},
+      count(*) FILTER (WHERE m.rating = 'negative')::int AS negative,
+      round(percentile_cont(0.5) WITHIN GROUP (ORDER BY m.total_ms))::int AS total_ms_p50,
+      round(percentile_cont(0.95) WITHIN GROUP (ORDER BY m.total_ms))::int AS total_ms_p95,
+      round(percentile_cont(0.5) WITHIN GROUP (ORDER BY m.first_token_ms))::int AS first_token_ms_p50,
+      round(percentile_cont(0.95) WITHIN GROUP (ORDER BY m.first_token_ms))::int AS first_token_ms_p95,
+      COALESCE(sum(m.prompt_tokens), 0)::float8 AS prompt_tokens, COALESCE(sum(m.completion_tokens), 0)::float8 AS completion_tokens,
+      COALESCE(sum(m.rewrite_prompt_tokens), 0)::float8 AS rewrite_prompt_tokens, COALESCE(sum(m.rewrite_completion_tokens), 0)::float8 AS rewrite_completion_tokens
+    FROM days LEFT JOIN m ON m.day = days.day
+    GROUP BY GROUPING SETS ((days.day), ())
+    ORDER BY days.day NULLS LAST`);
+  const summary = (row: Row): ChatStatsSummary => ({
+    questions: Number(row.questions), extractive: Number(row.extractive),
+    fallbacks: Object.fromEntries(CHAT_FALLBACK_REASONS.map((reason) => [reason, Number(row[`fallback_${reason}`])])) as ChatStatsSummary["fallbacks"],
+    negative: Number(row.negative),
+    totalMsP50: row.total_ms_p50 as number | null, totalMsP95: row.total_ms_p95 as number | null,
+    firstTokenMsP50: row.first_token_ms_p50 as number | null, firstTokenMsP95: row.first_token_ms_p95 as number | null,
+    promptTokens: Number(row.prompt_tokens), completionTokens: Number(row.completion_tokens),
+    rewritePromptTokens: Number(row.rewrite_prompt_tokens), rewriteCompletionTokens: Number(row.rewrite_completion_tokens),
+  });
+  const total = rows.find((row) => row.date === null)!;
+  return { timeZone, days: rows.filter((row) => row.date !== null).map((row) => ({ date: row.date as string, ...summary(row) })), total: summary(total) };
 }
 
 // 用户端的来源另附该文章被送入模型的片段摘录（按召回顺序）。两层子查询都有同名列，内层用别名、外层用 outer() 限定。

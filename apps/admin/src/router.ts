@@ -4,6 +4,7 @@ import AdminLayout from "./components/AdminLayout.vue";
 import AdminsView from "./views/AdminsView.vue";
 import AuditLogsView from "./views/AuditLogsView.vue";
 import ChatLogsView from "./views/ChatLogsView.vue";
+import ChatStatsView from "./views/ChatStatsView.vue";
 import DocumentsView from "./views/DocumentsView.vue";
 import KnowledgeBasesView from "./views/KnowledgeBasesView.vue";
 import ModelProvidersView from "./views/ModelProvidersView.vue";
@@ -33,6 +34,7 @@ export const router = createRouter({
         { path: "documents", name: "文档管理", component: DocumentsView, meta: { permission: ["documents:view"] } },
         { path: "knowledge-bases", name: "知识库", component: KnowledgeBasesView, meta: { permission: ["knowledge-bases:view"] } },
         { path: "chat-logs", name: "问答记录", component: ChatLogsView, meta: { permission: ["chat-logs:view"] } },
+        { path: "chat-stats", name: "问答统计", component: ChatStatsView, meta: { permission: ["chat-logs:view"] } },
         { path: "users", name: "用户管理", component: UsersView, meta: { permission: ["users:view"] } },
         { path: "model-providers", name: "模型配置", component: ModelProvidersView, meta: { permission: ["models:view"] } },
         { path: "admins", name: "管理员管理", component: AdminsView, meta: { superOnly: true } },

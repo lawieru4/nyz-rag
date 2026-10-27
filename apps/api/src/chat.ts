@@ -3,12 +3,12 @@ import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import {
   getChatReview, saveChatReview, approveChatReview, exportChatReview, parseChatReview, parseFeedbackReasons,
   AdmissionError, buildAnswerContext, buildChatMessages, ChatConflictError, createChatMessage, createChatModel, createChatSession, createEmbeddingModel, createRerankModel,
-  DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getKnowledgeBase, getModelSelections, HISTORY_TURNS, keywordSearchChunks,
+  DEFAULT_RETRIEVAL_SETTINGS, deleteChatSession, extractiveAnswer, getChatSession, getChatStats, getKnowledgeBase, getModelSelections, HISTORY_TURNS, keywordSearchChunks,
   listChatMessages, listChatSessions, listKnowledgeBases, listSessionMessages, parseRetrievalFilters, rateChatMessage, retrievedChunkRecords, retrieve, rewriteModelSelection, rewriteQuestion,
   summarySearchChunks, usableModel, validateCitations, vectorSearchChunks, INSUFFICIENT_EVIDENCE_ANSWER, type AnswerContext, type ChatOwner, type ChatTurn,
 } from "@nyz-rag/processing";
 import type {
-  ChatAnswerMode, ChatFeedbackRequest, ChatLogListResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
+  ChatAnswerMode, ChatFallbackReason, ChatFeedbackRequest, ChatLogListResponse, ChatStatsResponse, ChatRequest, ChatResponse, ChatSessionListResponse, ChatSessionMessage, ChatSessionMessagesResponse, ChatSessionRecord, ChatSource,
   ChatStreamEvent, ChatStreamRequest, CreateChatSessionRequest, KnowledgeBaseRecord, RetrievalFilters, ChatReviewInput,
 } from "@nyz-rag/types";
 import { elapsed, MAX_QUESTION_LENGTH, pageParams } from "./common.js";
@@ -34,6 +34,8 @@ interface AnswerOptions {
 interface AnswerResult {
   answer: string;
   answerMode: ChatAnswerMode;
+  /** 降级为摘录的原因，只写入问答记录。 */
+  fallbackReason?: ChatFallbackReason;
   context: AnswerContext;
   usage: { model?: string; firstTokenMs?: number; promptTokens?: number; completionTokens?: number };
   /** 改写后用于检索的问题；未改写时省略。 */
@@ -42,6 +44,15 @@ interface AnswerResult {
   rewrite?: { ms: number; promptTokens?: number; completionTokens?: number };
   retrievalMs: number;
   totalMs: number;
+}
+
+// 统计按管理员浏览器的时区划分日期；不传时用 API 进程的时区。
+const SERVER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const DEFAULT_STATS_DAYS = 14;
+
+/** 只接受 Node 认识的 IANA 时区名（schema 已排除 "+08:00" 这类 PostgreSQL 会按 POSIX 反向解释的偏移写法）。 */
+function validTimeZone(timeZone: string) {
+  try { return Boolean(new Intl.DateTimeFormat("en-US", { timeZone })); } catch { return false; }
 }
 
 const questionError = (question: string | undefined) => !question ? "question is required"
@@ -111,6 +122,8 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
   const citationCheck = knowledgeBase?.citationCheck ?? true;
   let answer = extractiveAnswer(context, citationCheck);
   let answerMode: ChatAnswerMode = "extractive";
+  // 未配置模型优先于无召回：前者影响每一次问答，更需要处理。
+  let fallbackReason: ChatFallbackReason | undefined = !chatModel ? "no_chat_model" : !context.chunks.length ? "no_context" : undefined;
   const usage: AnswerResult["usage"] = {};
   // 模型输出边生成边发送（token 事件），done 事件中的回答为准：未被采用的输出由 done 替换为摘录。
   let text = "";
@@ -146,14 +159,18 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
         answer = candidate;
         answerMode = "generated";
         usage.model = chat.model;
+        fallbackReason = undefined;
         emit(text.length);
       } else if (citationCheck) {
+        fallbackReason = "citation_rejected";
         log.warn({ cited: citations.cited, invalid: citations.invalid }, "Chat answer rejected by citation presence/ID gate; using extractive evidence");
       } else {
+        fallbackReason = "empty_answer";
         log.warn("Chat model returned an empty answer; using extractive answer");
       }
     } catch (error) {
       if (error instanceof AdmissionError) throw error;
+      fallbackReason = "model_error";
       if (!options.signal?.aborted) log.warn(`Chat model failed; using extractive answer: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   }
@@ -162,14 +179,14 @@ async function answerQuestion(options: AnswerOptions): Promise<AnswerResult> {
     text = answer;
     emit(text.length);
   }
-  return { answer, answerMode, context, usage, retrievalQuery, rewrite, retrievalMs, totalMs: elapsed(started) };
+  return { answer, answerMode, fallbackReason, context, usage, retrievalQuery, rewrite, retrievalMs, totalMs: elapsed(started) };
 }
 
 async function saveAnswer(result: AnswerResult, input: { question: string; knowledgeBase: KnowledgeBaseRecord | null; owner: ChatOwner; sessionId?: string; supersedes?: string }) {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   await createChatMessage({
-    id, createdAt, owner: input.owner, sessionId: input.sessionId, supersedes: input.supersedes, question: input.question, answer: result.answer, answerMode: result.answerMode,
+    id, createdAt, owner: input.owner, sessionId: input.sessionId, supersedes: input.supersedes, question: input.question, answer: result.answer, answerMode: result.answerMode, fallbackReason: result.fallbackReason,
     knowledgeBaseId: input.knowledgeBase?.id, ...result.usage, retrievalQuery: result.retrievalQuery, rewriteMs: result.rewrite?.ms, rewritePromptTokens: result.rewrite?.promptTokens, rewriteCompletionTokens: result.rewrite?.completionTokens,
     retrievalMs: result.retrievalMs, totalMs: result.totalMs,
     sources: result.context.sources, chunks: retrievedChunkRecords(result.context),
@@ -181,6 +198,12 @@ export const chatRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Querystring: { query?: string; rating?: string; status?: string; page?: string; pageSize?: string } }>("/api/admin/chat-logs", requires("chat-logs:view"), async (request): Promise<ChatLogListResponse> => {
     const { query = "", rating, status, page = "1", pageSize = "20" } = request.query;
     return listChatMessages({ query, rating, status, ...pageParams(page, pageSize) });
+  });
+
+  app.get<{ Querystring: { days?: string; timeZone?: string } }>("/api/admin/chat-stats", requires("chat-logs:view"), async (request, reply): Promise<ChatStatsResponse> => {
+    const { days = String(DEFAULT_STATS_DAYS), timeZone = SERVER_TIME_ZONE } = request.query;
+    if (!validTimeZone(timeZone)) return reply.code(400).send({ error: "timeZone must be an IANA time zone name" });
+    return getChatStats(Number(days), timeZone);
   });
 
   app.get<{ Params: { id: string } }>("/api/admin/chat-logs/:id/review", requires("chat-logs:view"), async (request, reply) => {

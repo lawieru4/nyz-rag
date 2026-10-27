@@ -5,6 +5,7 @@ import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@nyz-
 import DetailSection from "../components/DetailSection.vue";
 import MetaRow from "../components/MetaRow.vue";
 import { chatLogOwner, ratingLabel, type ChatLog } from "./chat-logs";
+import { fallbackReasonLabels } from "./chat-stats";
 import ChatReviewPanel from "./ChatReviewPanel.vue";
 
 defineProps<{ log: ChatLog | null }>();
@@ -22,7 +23,7 @@ const emit = defineEmits<{ (e: "close"): void; (e: "saved"): void }>();
         <MetaRow>
           <span>{{ new Date(log.createdAt).toLocaleString() }}</span>
           <span>{{ ratingLabel(log.rating) }}</span>
-          <span>{{ log.answerMode === 'generated' ? `模型生成 · ${log.model}` : '原文摘录' }}</span>
+          <span>{{ log.answerMode === 'generated' ? `模型生成 · ${log.model}` : log.fallbackReason ? `原文摘录 · ${fallbackReasonLabels[log.fallbackReason]}` : '原文摘录' }}</span>
           <span>{{ chatLogOwner(log) }}</span>
           <span :title="log.sessionId">{{ log.sessionId ? `会话 ${log.sessionId.slice(0, 8)}` : '单次问答' }}</span>
           <span v-if="log.supersededAt">已被重新生成替换（{{ new Date(log.supersededAt).toLocaleString() }}）</span>

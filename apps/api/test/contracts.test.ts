@@ -402,6 +402,29 @@ test("POST /api/search — valid query → 200 with results array", async () => 
 
 // ─── Admin: documents ────────────────────────────────────────────────────────
 
+test("GET /api/admin/chat-stats — days out of range or offset time zone → 400", async () => {
+  const app = buildTestApp();
+  app.get("/api/admin/chat-stats", async () => assert.fail("handler should not run"));
+  await app.ready();
+
+  for (const query of ["days=0", "days=91", "days=7.5", "timeZone=%2B08:00", "timeZone=UTC%27", "extra=1"]) {
+    assertError(await app.inject({ method: "GET", url: `/api/admin/chat-stats?${query}` }), 400);
+  }
+});
+
+test("GET /api/admin/chat-stats — valid query → 200 with every fallback reason", async () => {
+  const summary = {
+    questions: 2, extractive: 1, fallbacks: { no_chat_model: 0, no_context: 1, model_error: 0, citation_rejected: 0, empty_answer: 0 }, negative: 0,
+    totalMsP50: 120, totalMsP95: null, firstTokenMsP50: null, firstTokenMsP95: null, promptTokens: 30, completionTokens: 10, rewritePromptTokens: 0, rewriteCompletionTokens: 0,
+  };
+  const app = buildTestApp();
+  app.get("/api/admin/chat-stats", async () => ({ timeZone: "Asia/Shanghai", days: [{ date: "2026-10-27", ...summary }], total: summary }));
+  await app.ready();
+
+  const res = await app.inject({ method: "GET", url: "/api/admin/chat-stats?days=90&timeZone=America/Argentina/Buenos_Aires" });
+  assertOk(res, (b) => assert.deepEqual(b, { timeZone: "Asia/Shanghai", days: [{ date: "2026-10-27", ...summary }], total: summary }));
+});
+
 test("GET /api/admin/documents — invalid status enum → 400", async () => {
   const app = buildTestApp();
   app.get("/api/admin/documents", async () => ({ documents: [], total: 0 }));

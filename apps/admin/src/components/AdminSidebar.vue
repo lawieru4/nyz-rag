@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, type Component } from "vue";
 import { RouterLink, useRouter } from "vue-router";
-import { Database, FileText, KeyRound, Library, LogOut, MessagesSquare, ScrollText, Settings2, Shield, User, Users } from "@lucide/vue";
+import { ChartColumn, Database, FileText, KeyRound, Library, LogOut, MessagesSquare, ScrollText, Settings2, Shield, User, Users } from "@lucide/vue";
 import type { AdminSession } from "@nyz-rag/types";
 import { Button } from "@nyz-rag/ui/components/button";
 import { homePath, routeVisible } from "../router";
@@ -19,6 +19,7 @@ const allModules: Array<{ name: string; icon: Component }> = [
   { name: "文档管理", icon: FileText },
   { name: "知识库", icon: Library },
   { name: "问答记录", icon: MessagesSquare },
+  { name: "问答统计", icon: ChartColumn },
   { name: "用户管理", icon: Users },
   { name: "模型配置", icon: Settings2 },
   { name: "管理员管理", icon: Shield },
