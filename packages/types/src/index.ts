@@ -190,6 +190,12 @@ export interface ChatSourceExcerpt {
 /** generated：由 Chat 模型生成；extractive：未配置或调用失败时直接摘录原文片段。 */
 export type ChatAnswerMode = "generated" | "extractive";
 
+/**
+ * 回答降级为原文摘录的原因（只记录在问答记录中）：no_chat_model 未配置 Chat 模型或密钥不可用；no_context 没有召回片段；
+ * model_error 模型调用失败；citation_rejected 引用校验未通过（含空回答）；empty_answer 关闭引用校验时模型返回空回答。
+ */
+export type ChatFallbackReason = "no_chat_model" | "no_context" | "model_error" | "citation_rejected" | "empty_answer";
+
 export interface ChatSuccessResponse {
   messageId: string;
   answer: string;
@@ -624,6 +630,8 @@ export interface ChatLogRecord {
   question: string;
   answer: string;
   answerMode: ChatAnswerMode;
+  /** 降级为摘录的原因；模型生成的回答与记录该字段之前的问答省略。 */
+  fallbackReason?: ChatFallbackReason;
   knowledgeBaseId?: string;
   model?: string;
   /** 追问时改写后实际用于检索的问题；未改写时省略。 */
@@ -648,6 +656,35 @@ export interface ChatLogRecord {
 export interface ChatLogListResponse {
   logs: ChatLogRecord[];
   total: number;
+}
+
+/** 一段时间内问答的汇总；耗时分位数只统计有记录的问答，没有时为空。 */
+export interface ChatStatsSummary {
+  questions: number;
+  extractive: number;
+  /** 各降级原因的次数；extractive 减去它们之和为未记录原因的历史问答。 */
+  fallbacks: Record<ChatFallbackReason, number>;
+  negative: number;
+  totalMsP50: number | null;
+  totalMsP95: number | null;
+  firstTokenMsP50: number | null;
+  firstTokenMsP95: number | null;
+  promptTokens: number;
+  completionTokens: number;
+  rewritePromptTokens: number;
+  rewriteCompletionTokens: number;
+}
+
+export interface ChatStatsDay extends ChatStatsSummary {
+  /** 所选时区的日期，YYYY-MM-DD。 */
+  date: string;
+}
+
+/** GET /api/admin/chat-stats：最近若干天（含今天）的逐日统计，没有问答的日期也列出。 */
+export interface ChatStatsResponse {
+  timeZone: string;
+  days: ChatStatsDay[];
+  total: ChatStatsSummary;
 }
 
 export interface ChatFeedbackRequest {

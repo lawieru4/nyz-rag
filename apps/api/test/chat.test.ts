@@ -100,6 +100,7 @@ test("single-answer and SSE use the same citation presence/ID gate and exact ref
       assert.equal(saved.length, 1);
       assert.equal(saved[0].answer, result.answer);
       assert.equal(saved[0].model, accepted ? "mock-chat" : undefined);
+      assert.equal(saved[0].fallbackReason, accepted ? undefined : "citation_rejected");
       // An out-of-range citation stops reading the provider stream, so its trailing usage never arrives.
       assert.equal(saved[0].promptTokens, /\[[02]\]/.test(text) ? undefined : 20, "provider usage is retained when output is rejected after completion");
       assert.equal(typeof saved[0].firstTokenMs, sse ? "number" : "undefined");
@@ -124,6 +125,7 @@ test("provider failure after streamed tokens is replaced by cautious evidence in
       const response = await send(app, sse);
       assert.equal(response.statusCode, 200);
       assert.equal(saved[0].answerMode, "extractive");
+      assert.equal(saved[0].fallbackReason, "model_error");
       assert.match(saved[0].answer, /未验证其是否足以回答问题/);
       if (sse) {
         assert.equal(tokens(response.body), "REJECTED_PARTIAL [1]", "streamed text is not followed by fallback tokens");
@@ -173,6 +175,7 @@ test("an out-of-range citation stops generation before it is streamed", async ()
     assert.equal(requested, 4, "provider stream is not read after the invalid citation");
     assert.ok(closed, "provider stream is closed");
     assert.equal(saved[0].answerMode, "extractive");
+    assert.equal(saved[0].fallbackReason, "citation_rejected");
     assert.equal(events(response.body).find((event) => event.event === "done")!.data.answer, saved[0].answer);
   } finally { await app.close(); }
 });
@@ -199,6 +202,8 @@ test("with citation check off, non-empty answers are accepted as before and stre
       const result = sse ? events(response.body).find((event) => event.event === "done")!.data : response.json();
       const context = processing.buildAnswerContext([{ ...hit, keywordScore: 1 }], 6000);
       assert.equal(result.answerMode, accepted ? "generated" : "extractive");
+      assert.equal(saved[0].fallbackReason, accepted ? undefined : "empty_answer");
+      assert.equal("fallbackReason" in result, false, "the reason is only kept in the chat log");
       assert.equal(result.answer, accepted ? text : processing.extractiveAnswer(context, false));
       assert.match(processing.extractiveAnswer(context, false), /未经模型生成/);
       assert.equal(saved[0].promptTokens, 20, "the provider stream is read to the end");
@@ -217,6 +222,7 @@ test("no context or no configured model keeps the extractive path without callin
     try {
       const response = await send(app, true);
       assert.equal(saved[0].answerMode, "extractive");
+      assert.equal(saved[0].fallbackReason, noContext ? "no_context" : "no_chat_model");
       assert.equal(tokens(response.body), saved[0].answer);
       if (noContext) assert.equal(saved[0].answer, processing.NO_MATCH_ANSWER);
     } finally { await app.close(); }

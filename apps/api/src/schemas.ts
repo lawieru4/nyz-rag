@@ -21,7 +21,7 @@
  *    common.ts pageParams already handles parseInt.
  */
 
-import { ADMIN_PERMISSIONS } from "@nyz-rag/processing";
+import { ADMIN_PERMISSIONS, CHAT_FALLBACK_REASONS } from "@nyz-rag/processing";
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
@@ -705,6 +705,7 @@ const chatLogRecordSchema = {
     question: { type: "string" },
     answer: { type: "string" },
     answerMode: { type: "string", enum: ["generated", "extractive"] },
+    fallbackReason: { type: "string", enum: CHAT_FALLBACK_REASONS },
     knowledgeBaseId: { type: "string" },
     model: { type: "string" },
     retrievalQuery: { type: "string" },
@@ -724,6 +725,50 @@ const chatLogRecordSchema = {
   },
   required: ["id", "ownerType", "question", "answer", "answerMode", "sources", "chunks", "createdAt"],
   additionalProperties: false,
+} as const;
+
+const nullableMs = { type: "number", nullable: true } as const;
+const chatStatsSummaryProperties = {
+  questions: { type: "number" },
+  extractive: { type: "number" },
+  fallbacks: {
+    type: "object",
+    properties: Object.fromEntries(CHAT_FALLBACK_REASONS.map((reason) => [reason, { type: "number" }])),
+    required: [...CHAT_FALLBACK_REASONS],
+    additionalProperties: false,
+  },
+  negative: { type: "number" },
+  totalMsP50: nullableMs,
+  totalMsP95: nullableMs,
+  firstTokenMsP50: nullableMs,
+  firstTokenMsP95: nullableMs,
+  promptTokens: { type: "number" },
+  completionTokens: { type: "number" },
+  rewritePromptTokens: { type: "number" },
+  rewriteCompletionTokens: { type: "number" },
+} as const;
+const chatStatsSummarySchema = {
+  type: "object",
+  properties: chatStatsSummaryProperties,
+  required: Object.keys(chatStatsSummaryProperties),
+  additionalProperties: false,
+} as const;
+
+const chatStatsResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      timeZone: { type: "string" },
+      days: {
+        type: "array",
+        items: { ...chatStatsSummarySchema, properties: { date: { type: "string" }, ...chatStatsSummaryProperties }, required: ["date", ...chatStatsSummarySchema.required] },
+      },
+      total: chatStatsSummarySchema,
+    },
+    required: ["timeZone", "days", "total"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
 } as const;
 
 const chatLogsListResponseSchema = {
@@ -1234,6 +1279,18 @@ export const routeSchemas: Record<string, RouteSchema> = {
   },
 
   // ── Admin: chat logs ────────────────────────────────────────────────────────
+  "GET /api/admin/chat-stats": {
+    querystring: {
+      type: "object",
+      properties: {
+        days: { type: "string", pattern: "^([1-9]|[1-8][0-9]|90)$" },
+        // IANA 名称；不接受 "+08:00" 这类偏移写法。
+        timeZone: { type: "string", maxLength: 64, pattern: "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$" },
+      },
+      additionalProperties: false,
+    },
+    response: chatStatsResponseSchema,
+  },
   "GET /api/admin/chat-logs": {
     querystring: chatLogsQuerySchema,
     response: chatLogsListResponseSchema,

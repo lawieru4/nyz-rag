@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { boolean, check, customType, type AnyPgColumn, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import type {
   ChatFeedbackReason, ChatReviewInput,
-  AdminAuditResult, ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
+  AdminAuditResult, ArticleMetadata, ArticleSourceSyncState, ChatAnswerMode, ChatFallbackReason, ChatFeedbackRating, CrawlTaskRecord, DataSourceRecord, DocumentChunkRecord, DocumentProcessingStatus, DocumentStatus, EmbeddingStatus, ModelCapability,
 } from "@nyz-rag/types";
 
 // pgvector 列不限维度，以支持不同 Embedding 模型；drizzle 内置 vector 类型要求固定维度，因此自定义。
@@ -362,6 +362,8 @@ export const chatMessages = pgTable("chat_messages", {
   question: text().notNull(),
   answer: text().notNull(),
   answerMode: text().$type<ChatAnswerMode>().notNull().default("extractive"),
+  // 降级为摘录的原因；生成的回答与记录该字段之前的问答为空。
+  fallbackReason: text().$type<ChatFallbackReason>(),
   // 知识库可能被删除，不设外键。
   knowledgeBaseId: text(),
   model: text(),
@@ -393,6 +395,8 @@ export const chatMessages = pgTable("chat_messages", {
   check("chat_messages_single_owner_check", sql`${table.userId} IS NULL OR ${table.visitorHash} IS NULL`),
   check("chat_messages_rating_check", sql`${table.rating} IN ('positive', 'negative')`),
   check("chat_messages_answer_mode_check", sql`${table.answerMode} IN ('generated', 'extractive')`),
+  check("chat_messages_fallback_reason_check", sql`${table.fallbackReason} IS NULL OR (${table.answerMode} = 'extractive'
+    AND ${table.fallbackReason} IN ('no_chat_model', 'no_context', 'model_error', 'citation_rejected', 'empty_answer'))`),
 ]);
 
 // 文档删除后仍保留问答记录中的引用标题与链接，因此 document_id 不设外键。
