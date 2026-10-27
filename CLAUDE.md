@@ -78,3 +78,5 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 ## 验证
 
 修改后运行 `pnpm verify`（等价于 `pnpm build`、`pnpm typecheck` 与各包测试）；涉及 API/队列/Worker 链路时在本地基础设施可用时加跑集成测试。
+
+GitHub Actions（`.github/workflows/ci.yml`）在每个 PR 和推送到 main 时运行两个任务：`verify` 执行 `pnpm verify`；`integration` 用 pgvector 与 Redis 服务容器，设置 `NYZ_INTEGRATION_TEST`、`NYZ_AUTH_REDIS_TEST`、`NYZ_RATE_LIMIT_REDIS_TEST` 后执行 `pnpm test`。测试不读取 `.env`，新增依赖环境变量的测试须在测试内设置或同步到工作流。
