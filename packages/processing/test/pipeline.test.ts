@@ -535,9 +535,13 @@ test("API + queue + worker persist vectors, retry failures and clean stale rows"
     }
     const filterSession = await (await fetch(`${apiBase}/api/chat/sessions`, { method: "POST", headers: json, body: "{}" })).json();
     const filteredStream = await stream(filterSession.id, { question: "文章", filters: { tags: ["not-present"] } });
-    assert.deepEqual(filteredStream.map((item) => item.event), ["done"]);
-    const filteredRegenerate = await stream(filterSession.id, { regenerate: filteredStream[0].data.id, filters: { tags: ["not-present"] } });
-    assert.deepEqual(filteredRegenerate[0].data.sources, []);
+    // 没有召回时不发 source，摘录回答（无匹配提示）作为 token 发出，与 done 中的回答一致。
+    assert.deepEqual(filteredStream.map((item) => item.event), ["token", "done"]);
+    const filteredDone = filteredStream[1].data;
+    assert.equal(filteredStream[0].data.content, filteredDone.answer);
+    assert.equal(filteredDone.answerMode, "extractive");
+    const filteredRegenerate = await stream(filterSession.id, { regenerate: filteredDone.id, filters: { tags: ["not-present"] } });
+    assert.deepEqual(filteredRegenerate.at(-1)!.data.sources, []);
     assert.equal((await fetch(`${apiBase}/api/chat/sessions/${filterSession.id}/stream`, { method: "POST", headers: json, body: JSON.stringify({ question: "文章", filters: { tags: "invalid" } }) })).status, 400);
     const includedStream = await stream(filterSession.id, { question: "文章一", filters: { tags: ["钠电"], sourceId: articleSource.id } });
     assert.ok(includedStream.some((item) => item.event === "source" && item.data.documentId === synced[0].id));
