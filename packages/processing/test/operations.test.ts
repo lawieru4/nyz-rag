@@ -6,7 +6,7 @@ import pg from "pg";
 import { closeDatabase, getPool, migrate, withTransaction } from "../src/db.js";
 import {
   activeOperation, adoptLegacyJob, claimOperation, completeOperation, failOperation, insertOperation, LeaseLostError, listDueOperations, listStaleDispatched,
-  markDispatched, operationJobId, pruneOperations, recoverExpiredOperations, renewLease, requeueOperation, saveOwnedSyncState, touchDispatched,
+  getOperationBacklog, markDispatched, operationJobId, pruneOperations, recoverExpiredOperations, renewLease, requeueOperation, saveOwnedSyncState, touchDispatched,
 } from "../src/operations.js";
 import { processDocument } from "../src/process.js";
 import { createSource, createTask, deleteDocument, getSourceSyncState, markSourceSynced, requestDocumentOperation, scheduleDueSources, scheduleEmbeddings, updateSourceStatus, updateTask, upsertDocument } from "../src/repository.js";
@@ -124,6 +124,14 @@ test("operations: outbox writes, dispatch, claims, leases, retries, recovery and
     await withTransaction((tx) => scheduleEmbeddings(tx, [other]));
     assert.equal((await row("SELECT count(*)::int AS count FROM operations WHERE target_id = $1 AND status = 'pending'", [other])).count, 1);
     assert.equal((await row("SELECT embedding_status FROM documents WHERE id = $1", [other])).embedding_status, "queued");
+
+    // 积压：到期未开始的为排队，延后的为等待重试；失败只统计 24 小时内的（上面的同步、向量化与重新处理各失败一次）。
+    const due = await row("SELECT run_after FROM operations WHERE target_id = $1 AND status = 'pending'", [other]);
+    assert.deepEqual(await getOperationBacklog(), { queued: 1, running: 0, delayed: 0, failedLastDay: 3, oldestQueuedAt: due.run_after.toISOString() });
+    await getPool().query("UPDATE operations SET run_after = now() + interval '1 minute' WHERE target_id = $1 AND status = 'pending'", [other]);
+    await getPool().query("UPDATE operations SET finished_at = now() - interval '25 hours' WHERE id = $1", [sync.id]);
+    assert.deepEqual(await getOperationBacklog(), { queued: 0, running: 0, delayed: 1, failedLastDay: 2, oldestQueuedAt: null });
+    await getPool().query("UPDATE operations SET run_after = now() WHERE target_id = $1 AND status = 'pending'", [other]);
 
     // 调度只运行已启用且频率可识别的来源；并发 Worker 与手动同步复用同一个事务/outbox。
     const scheduled = await createSource({ name: "Scheduled", url: ARTICLE_LIST_URL, kind: "文章 API", frequency: "每小时" });

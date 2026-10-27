@@ -37,13 +37,14 @@
  *
  * A FastifyPluginAsync that registers infrastructure routes that belong at the
  * root level:
- *  - GET /health
+ *  - GET /health (liveness: the process is serving requests)
+ *  - GET /ready (readiness: database and Redis respond)
  *  - GET /api/knowledge
  *  - GET /api/admin/knowledge (authenticated operational overview)
  */
 
 import type { FastifyError, FastifyInstance, FastifyPluginAsync } from "fastify";
-import { AdmissionError, getStats } from "@nyz-rag/processing";
+import { AdmissionError, getPool, getStats } from "@nyz-rag/processing";
 import { loadOverview } from "./knowledge-events.js";
 import { routeSchemas } from "./schemas.js";
 import { requires } from "./admin-auth.js";
@@ -121,18 +122,51 @@ export function configureCommon(app: FastifyInstance): void {
 
 // ─── commonRoutes ─────────────────────────────────────────────────────────────
 
+/** 就绪检查的各项依赖；测试注入假实现。 */
+export interface ReadinessChecks {
+  database(): Promise<unknown>;
+  redis(): Promise<unknown>;
+}
+
+const READINESS_TIMEOUT_MS = 2000;
+
+export const databaseReadiness = () => getPool().query("SELECT 1");
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error("Readiness check timed out"), { code: "TIMEOUT" })), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+const errorCode = (error: unknown) => (error as { code?: unknown } | null)?.code ?? (error instanceof Error ? error.name : "unknown");
+
 /**
  * Registers infrastructure routes that belong at the root level:
  *  - GET /health
+ *  - GET /ready
  *  - GET /api/knowledge
  *  - GET /api/admin/knowledge
  */
-export const commonRoutes: FastifyPluginAsync = async (app) => {
+export const commonRoutes: FastifyPluginAsync<{ readiness: ReadinessChecks }> = async (app, { readiness }) => {
   app.get("/health", async () => ({
     status: "ok",
     service: "nyz-rag-api",
     timestamp: new Date().toISOString(),
   }));
+
+  // 存活检查（/health）只说明进程在响应；就绪检查确认数据库与 Redis 可用，供部署探测与告警使用。
+  app.get("/ready", async (request, reply) => {
+    const names = Object.keys(readiness) as (keyof ReadinessChecks)[];
+    const results = await Promise.allSettled(names.map((name) => withTimeout(readiness[name](), READINESS_TIMEOUT_MS)));
+    const failed = names.filter((name, index) => {
+      const result = results[index]!;
+      // 只记错误名称与代码：数据库与 Redis 的错误信息可能含连接地址。
+      if (result.status === "rejected") request.log.warn({ check: name, error: errorCode(result.reason) }, "Readiness check failed");
+      return result.status === "rejected";
+    });
+    if (failed.length) return reply.code(503).send({ error: `Not ready: ${failed.join(", ")}` });
+    return { status: "ready", checks: { database: "ok", redis: "ok" } };
+  });
 
   app.get("/api/knowledge", async () => {
     return { stats: await getStats() };

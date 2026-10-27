@@ -12,6 +12,7 @@ import {
   touchDispatched, updateTask, upsertDocument, withDocumentWork, withTransaction, type ClaimedOperation, type Database, type Executor, type OperationRef,
 } from "@nyz-rag/processing";
 import type { DataSourceRecord } from "@nyz-rag/types";
+import { writeHeartbeat } from "./heartbeat.js";
 
 modelAdmissionConfig();
 const connection = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", { maxRetriesPerRequest: null });
@@ -336,7 +337,12 @@ const worker = new Worker(queueName, async (job) => {
 worker.on("completed", (job) => console.info(`Job ${job.id} completed`));
 worker.on("failed", (job, error) => console.error(`Job ${job?.id} failed`, error.message));
 
-every(DISPATCH_INTERVAL_MS, "Operation dispatch", dispatchDue);
+// 投递成功、Redis 可用且队列消费者在运行时写入心跳（容器健康检查读取）。
+every(DISPATCH_INTERVAL_MS, "Operation dispatch", async () => {
+  await dispatchDue();
+  await connection.ping();
+  if (worker.isRunning()) await writeHeartbeat();
+});
 every(SOURCE_SCHEDULE_INTERVAL_MS, "Source scheduling", () => scheduleDueSources());
 every(sweepIntervalMs, "Operation sweep", sweep);
 every(PRUNE_INTERVAL_MS, "Operation pruning", () => pruneOperations(10, 30 * 24 * 60 * 60_000));

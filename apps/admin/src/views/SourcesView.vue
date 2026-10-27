@@ -14,7 +14,8 @@ import PageHeading from "../components/PageHeading.vue";
 import SourceCreateDialog from "../components/SourceCreateDialog.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import { usePending } from "../composables/usePending";
-import { can, client, errorMessage, isSourceFrequency, loadKnowledge, refreshAfterWrite, sourceFrequencies, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
+import { can, client, errorMessage, isSourceFrequency, loadKnowledge, operations, refreshAfterWrite, sourceFrequencies, sources, tasks, watchKnowledge, type Source, type Task } from "../workspace";
+import { backlogStatus } from "./sources";
 
 defineProps<{ title: string }>();
 
@@ -57,6 +58,8 @@ const summary = computed<Array<{ label: string; value: number | string; unit?: s
   { label: "执行中任务", value: tasks.value.filter((task) => task.status === "运行中").length, hint: "队列与抓取进度", icon: RefreshCw },
   { label: "最近同步", ...lastSync.value, icon: Clock },
 ]);
+
+const backlog = computed(() => operations.value && backlogStatus(operations.value, now.value));
 
 /** 入库进度：已入库 / 接口总数，以及首次全量同步是否完成。 */
 function coverage(source: Source) {
@@ -144,13 +147,20 @@ function startCrawl(source: Source) {
     <Button v-if="can('sources:manage')" @click="dialogOpen = true"><Plus /> 添加数据源</Button>
   </PageHeading>
 
-  <Card class="mb-8 grid grid-cols-2 gap-0 py-0 lg:grid-cols-4" aria-label="数据源概览">
+  <Card :class="['grid grid-cols-2 gap-0 py-0 lg:grid-cols-4', backlog ? 'mb-3' : 'mb-8']" aria-label="数据源概览">
     <article v-for="item in summary" :key="item.label" class="relative flex min-h-26 flex-col px-5 py-4 max-lg:odd:border-r max-lg:[&:nth-child(-n+2)]:border-b lg:border-r lg:last:border-r-0">
       <span class="text-xs text-muted-foreground">{{ item.label }}</span>
       <strong class="mt-2 text-[28px] leading-tight font-semibold text-foreground tabular-nums">{{ item.value }}<span v-if="item.unit" class="ml-1 text-xs font-normal text-muted-foreground">{{ item.unit }}</span></strong>
       <small class="mt-0.5 text-xs text-muted-foreground">{{ item.hint }}</small>
       <component :is="item.icon" class="absolute top-4 right-4 size-4 text-link/70" aria-hidden="true" />
     </article>
+  </Card>
+
+  <Card v-if="backlog" class="mb-8 flex-row flex-wrap items-center gap-x-5 gap-y-2 px-5 py-3 text-xs text-muted-foreground" aria-label="后台任务">
+    <b class="font-semibold text-foreground">后台任务</b>
+    <span v-for="item in backlog.items" :key="item.label" :class="item.danger && 'text-destructive'">{{ item.label }} <b class="font-semibold tabular-nums" :class="item.danger ? 'text-destructive' : 'text-foreground'">{{ item.value }}</b></span>
+    <span v-if="backlog.stalled" class="flex items-center gap-1.5 text-destructive" role="status"><TriangleAlert class="size-3.5" />{{ backlog.stalled }}</span>
+    <span v-else class="max-md:hidden">同步、重新处理与向量化由 Worker 依次执行，失败详情见抓取任务与文档列表</span>
   </Card>
 
   <ArticleTokenSettings />

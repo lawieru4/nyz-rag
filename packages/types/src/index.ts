@@ -494,11 +494,25 @@ export interface KnowledgeStats {
   lastUpdated: string | null;
 }
 
+/** 后台操作（同步、重新处理、向量化）的积压情况，用于判断 Worker 是否在正常消费。 */
+export interface OperationBacklog {
+  /** 已到期、等待 Worker 开始执行（含已投递到队列）的操作数。 */
+  queued: number;
+  running: number;
+  /** 等待稍后重试（如向量化临时错误）的操作数。 */
+  delayed: number;
+  /** 最近 24 小时内失败的操作数。 */
+  failedLastDay: number;
+  /** 等待最久的操作的到期时间；没有排队的操作时为空。 */
+  oldestQueuedAt: string | null;
+}
+
 /** Administrative overview returned only by /api/admin/knowledge. */
 export interface KnowledgeOverview {
   sources: DataSourceRecord[];
   tasks: CrawlTaskRecord[];
   stats: KnowledgeStats;
+  operations: OperationBacklog;
 }
 
 export interface CreateSourceRequest {

@@ -36,6 +36,7 @@ export function memoryAuthStore(now = Date.now): AuthStore {
       data.set(key, { value: String(value), expires: value === 1 ? now() + ttl * 1000 : data.get(key)!.expires });
       return value;
     },
+    async ping() {},
     async close() {},
   };
 }

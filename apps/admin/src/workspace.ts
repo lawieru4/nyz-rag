@@ -25,7 +25,7 @@ export const can = (...required: AdminPermission[]) => required.some((permission
 
 /** 数据源与任务由多个模块共用（文档筛选、来源名称），退出登录时清空。 */
 const overview = createKnowledgeOverview((signal) => client.request<KnowledgeOverview>("/api/admin/knowledge", { signal }));
-export const { sources, tasks } = overview;
+export const { sources, tasks, operations } = overview;
 export const loadKnowledge = overview.load;
 export const resetKnowledge = overview.reset;
 

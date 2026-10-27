@@ -59,6 +59,17 @@ test("a pushed snapshot received while a request is in flight supersedes its res
   assert.deepEqual(names(), ["fresh"]);
 });
 
+test("the operation backlog follows the latest overview and is cleared on reset", () => {
+  const { store } = setup();
+  const operations = { queued: 1, running: 0, delayed: 0, failedLastDay: 0, oldestQueuedAt: "2026-10-27T12:00:00.000Z" };
+  store.applySnapshot(JSON.stringify(overview("valid")), store.generation());
+  assert.equal(store.operations.value, null);
+  store.applySnapshot(JSON.stringify({ ...overview("valid"), operations }), store.generation());
+  assert.deepEqual(store.operations.value, operations);
+  store.reset();
+  assert.equal(store.operations.value, null);
+});
+
 test("malformed snapshots are ignored", () => {
   const { store, names } = setup();
   store.applySnapshot(JSON.stringify(overview("valid")), store.generation());
