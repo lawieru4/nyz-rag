@@ -814,6 +814,25 @@ const healthResponseSchema = {
   ...errorResponses,
 } as const;
 
+// 就绪检查：依赖不可用时返回 503（{ error }，只列出失败的检查项名称）。
+const readyResponseSchema = {
+  "200": {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["ready"] },
+      checks: {
+        type: "object",
+        properties: { database: { type: "string", enum: ["ok"] }, redis: { type: "string", enum: ["ok"] } },
+        required: ["database", "redis"],
+        additionalProperties: false,
+      },
+    },
+    required: ["status", "checks"],
+    additionalProperties: false,
+  },
+  ...errorResponses,
+} as const;
+
 // ─── Knowledge overview ───────────────────────────────────────────────────────
 
 const crawlTaskRecordSchema = {
@@ -846,6 +865,19 @@ const knowledgeStatsSchema = {
   additionalProperties: false,
 } as const;
 
+const operationBacklogSchema = {
+  type: "object",
+  properties: {
+    queued: { type: "integer" },
+    running: { type: "integer" },
+    delayed: { type: "integer" },
+    failedLastDay: { type: "integer" },
+    oldestQueuedAt: { type: "string", nullable: true },
+  },
+  required: ["queued", "running", "delayed", "failedLastDay", "oldestQueuedAt"],
+  additionalProperties: false,
+} as const;
+
 const knowledgeOverviewResponseSchema = {
   "200": {
     type: "object",
@@ -853,8 +885,9 @@ const knowledgeOverviewResponseSchema = {
       sources: { type: "array", items: dataSourceRecordSchema },
       tasks: { type: "array", items: crawlTaskRecordSchema },
       stats: knowledgeStatsSchema,
+      operations: operationBacklogSchema,
     },
-    required: ["sources", "tasks", "stats"],
+    required: ["sources", "tasks", "stats", "operations"],
     additionalProperties: false,
   },
   ...errorResponses,
@@ -1132,6 +1165,9 @@ export const routeSchemas: Record<string, RouteSchema> = {
   // ── Health ──────────────────────────────────────────────────────────────────
   "GET /health": {
     response: healthResponseSchema,
+  },
+  "GET /ready": {
+    response: readyResponseSchema,
   },
 
   // ── Knowledge overview ──────────────────────────────────────────────────────

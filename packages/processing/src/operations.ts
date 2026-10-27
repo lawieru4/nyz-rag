@@ -5,7 +5,7 @@ import { and, asc, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import { getDb, withTransaction, type Executor } from "./db.js";
 import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import { crawlTasks, dataSources, documents, operations, type OperationKind } from "./schema.js";
-import type { ArticleSourceSyncState } from "@nyz-rag/types";
+import type { ArticleSourceSyncState, OperationBacklog } from "@nyz-rag/types";
 
 export interface OperationRef {
   id: string;
@@ -150,6 +150,29 @@ export async function saveOwnedSyncState(operation: ClaimedOperation, sourceId: 
     .where(and(eq(dataSources.id, sourceId), sql`EXISTS (SELECT 1 FROM ${operations} WHERE ${owned(operation)})`))
     .returning({ id: dataSources.id });
   if (!rows.length) throw new LeaseLostError();
+}
+
+// ---- 积压 ----
+
+/**
+ * 操作积压：排队（已到期未开始）、执行中、延后重试、24 小时内失败的数量与最早的排队时间。
+ * 返回到期时间而不是等待时长，管理端推送只在内容变化时发送。
+ */
+export async function getOperationBacklog(db: Executor = getDb()): Promise<OperationBacklog> {
+  const { rows: [row] } = await db.execute<{ queued: number; running: number; delayed: number; failed: number; oldest: string | null }>(sql`
+    SELECT
+      count(*) FILTER (WHERE status IN ('pending', 'dispatched') AND run_after <= now())::int AS queued,
+      count(*) FILTER (WHERE status = 'running')::int AS running,
+      count(*) FILTER (WHERE status = 'pending' AND run_after > now())::int AS delayed,
+      count(*) FILTER (WHERE status = 'failed')::int AS failed,
+      min(run_after) FILTER (WHERE status IN ('pending', 'dispatched') AND run_after <= now()) AS oldest
+    FROM ${operations}
+    WHERE status IN ('pending', 'dispatched', 'running') OR (status = 'failed' AND finished_at >= now() - interval '24 hours')`);
+  return {
+    queued: row.queued, running: row.running, delayed: row.delayed, failedLastDay: row.failed,
+    // 原始 SQL 不经过列映射，时间为数据库字符串。
+    oldestQueuedAt: row.oldest ? new Date(row.oldest).toISOString() : null,
+  };
 }
 
 // ---- 回收与清理 ----

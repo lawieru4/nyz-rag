@@ -52,6 +52,32 @@ test("the application registers all domains and rejects bad requests before acce
   }
 });
 
+test("readiness reports failed dependencies without exposing their errors", async () => {
+  const healthy = { database: async () => {}, redis: async () => {} };
+  const app = buildApp({ adminAuth, authStore: memoryAuthStore(), userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(), readiness: healthy });
+  try {
+    const ready = await app.inject({ method: "GET", url: "/ready" });
+    assert.equal(ready.statusCode, 200);
+    assert.deepEqual(ready.json(), { status: "ready", checks: { database: "ok", redis: "ok" } });
+  } finally {
+    await app.close();
+  }
+
+  const broken = buildApp({
+    adminAuth, authStore: memoryAuthStore(), userAuth, userAuthStore: memoryAuthStore(), mailer: memoryMailer(),
+    readiness: { database: async () => {}, redis: async () => { throw new Error("connect ECONNREFUSED redis://secret@10.0.0.1:6379"); } },
+  });
+  try {
+    const result = await broken.inject({ method: "GET", url: "/ready" });
+    assert.equal(result.statusCode, 503);
+    assert.deepEqual(result.json(), { error: "Not ready: redis" });
+    // 存活检查不受依赖影响。
+    assert.equal((await broken.inject("/health")).statusCode, 200);
+  } finally {
+    await broken.close();
+  }
+});
+
 test("every route schema declares the shared error responses", () => {
   // 错误响应（含权限不足的 403）只输出 { error }，不能把其他字段带给客户端。
   for (const [route, schema] of Object.entries(routeSchemas) as [string, { response?: Record<string, { properties?: object }> }][]) {

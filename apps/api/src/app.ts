@@ -4,7 +4,7 @@ import { createRedisAdmissionLimiter, type AdmissionLimiter } from "@nyz-rag/pro
 import { adminAccountRoutes } from "./admin-accounts.js";
 import { auditLogRoutes } from "./audit-logs.js";
 import { chatRoutes } from "./chat.js";
-import { commonRoutes, configureCommon } from "./common.js";
+import { commonRoutes, configureCommon, databaseReadiness, type ReadinessChecks } from "./common.js";
 import { crawlTaskRoutes } from "./crawl-tasks.js";
 import { dataSourceRoutes } from "./data-sources.js";
 import { documentRoutes } from "./documents.js";
@@ -26,10 +26,12 @@ export function buildApp(options: {
   userAuth?: UserAuthConfig; userAuthStore?: AuthStore; mailer?: Mailer | null; users?: UserRepository;
   limiter?: AdmissionLimiter; rateLimits?: ReturnType<typeof rateLimitConfig>;
   overviewEvents?: OverviewEventsOptions;
+  readiness?: ReadinessChecks;
 } = {}) {
   const auth = options.adminAuth ?? adminAuthConfig();
   const userAuth = options.userAuth ?? userAuthConfig();
   const limits = options.rateLimits ?? rateLimitConfig();
+  const adminStore = options.authStore ?? createAdminAuthStore();
   const app = Fastify({ logger: options.logger ?? false, trustProxy: trustedProxies(), ajv: { customOptions: { coerceTypes: false, removeAdditional: false } } });
   configureCommon(app);
   app.register(cors, {
@@ -42,7 +44,7 @@ export function buildApp(options: {
   });
   app.after(() => {
     configureRateLimits(app, options.limiter ?? createRedisAdmissionLimiter(), limits);
-    configureAdminAuth(app, auth, options.authStore ?? createAdminAuthStore(), options.admins ?? databaseAdmins);
+    configureAdminAuth(app, auth, adminStore, options.admins ?? databaseAdmins);
     configureUserAuth(app, {
       config: userAuth,
       store: options.userAuthStore ?? createAuthStore("user-auth"),
@@ -50,7 +52,8 @@ export function buildApp(options: {
       users: options.users ?? databaseUsers,
     });
   });
-  app.register(commonRoutes);
+  // Redis 就绪以管理员会话存储的连接为准（与用户会话、限流使用同一个 Redis）。
+  app.register(commonRoutes, { readiness: options.readiness ?? { database: databaseReadiness, redis: () => adminStore.ping() } });
   app.register(async (instance) => knowledgeEventRoutes(instance, options.overviewEvents));
   app.register(chatRoutes);
   app.register(searchRoutes);

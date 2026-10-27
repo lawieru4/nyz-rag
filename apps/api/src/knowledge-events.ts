@@ -3,7 +3,7 @@
 import type { ServerResponse } from "node:http";
 import type { FastifyInstance } from "fastify";
 import type { KnowledgeOverview } from "@nyz-rag/types";
-import { getStats, listSources, listTasks } from "@nyz-rag/processing";
+import { getOperationBacklog, getStats, listSources, listTasks } from "@nyz-rag/processing";
 import { requires } from "./admin-auth.js";
 
 export interface OverviewEventsOptions {
@@ -16,8 +16,8 @@ export interface OverviewEventsOptions {
 }
 
 export async function loadOverview(): Promise<KnowledgeOverview> {
-  const [sources, tasks, stats] = await Promise.all([listSources(), listTasks(), getStats()]);
-  return { sources, tasks, stats };
+  const [sources, tasks, stats, operations] = await Promise.all([listSources(), listTasks(), getStats(), getOperationBacklog()]);
+  return { sources, tasks, stats, operations };
 }
 
 type Listener = (payload: string) => void;

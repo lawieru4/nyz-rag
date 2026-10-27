@@ -1,5 +1,5 @@
 import { ref } from "vue";
-import type { KnowledgeOverview } from "@nyz-rag/types";
+import type { KnowledgeOverview, OperationBacklog } from "@nyz-rag/types";
 
 export type Source = { id: string; name: string; url: string; kind: string; frequency: string; status: "运行中" | "已暂停"; pages: number; remoteTotal: number | null; backfillDone: boolean; failedCount: number; updated: string; syncedAt: string | null };
 export type Task = {
@@ -15,6 +15,7 @@ export type Task = {
 export function createKnowledgeOverview(fetchOverview: (signal: AbortSignal) => Promise<KnowledgeOverview>) {
   const sources = ref<Source[]>([]);
   const tasks = ref<Task[]>([]);
+  const operations = ref<OperationBacklog | null>(null);
   let generation = 0;
   let snapshots = 0;
   let request: AbortController | undefined;
@@ -22,6 +23,8 @@ export function createKnowledgeOverview(fetchOverview: (signal: AbortSignal) => 
   function apply(data: KnowledgeOverview) {
     sources.value = data.sources.map((source) => ({ ...source, pages: source.documentCount, syncedAt: source.updatedAt, updated: source.updatedAt ? new Date(source.updatedAt).toLocaleString() : "尚未同步" }));
     tasks.value = data.tasks.map(({ sourceName, createdAt, ...task }) => ({ ...task, source: sourceName, started: new Date(createdAt).toLocaleString() }));
+    // 升级前的 API 不返回积压。
+    operations.value = data.operations ?? null;
   }
 
   /** 读取概览；被更新的请求、推送或退出取代时静默结束，只有当前请求失败才抛出。 */
@@ -61,7 +64,8 @@ export function createKnowledgeOverview(fetchOverview: (signal: AbortSignal) => 
     request = undefined;
     sources.value = [];
     tasks.value = [];
+    operations.value = null;
   }
 
-  return { sources, tasks, load, applySnapshot, reset, generation: () => generation };
+  return { sources, tasks, operations, load, applySnapshot, reset, generation: () => generation };
 }

@@ -8,6 +8,8 @@ export interface AuthStore {
   set(key: string, value: string, ttlSeconds: number): Promise<void>;
   delete(key: string): Promise<void>;
   increment(key: string, ttlSeconds: number): Promise<number>;
+  /** 就绪检查用；连接不可用时抛出。 */
+  ping(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -32,6 +34,7 @@ export function createAuthStore(scope: string): AuthStore {
         1, prefix + key, ttl,
       ));
     },
+    async ping() { await redis.ping(); },
     async close() { redis.disconnect(); },
   };
 }
