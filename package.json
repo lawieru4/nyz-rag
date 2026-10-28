@@ -10,6 +10,7 @@
     "verify": "pnpm build && pnpm -r typecheck && pnpm -r --if-present --no-bail --workspace-concurrency=1 test",
     "db:migrate": "pnpm --filter @nyz-rag/processing db:migrate",
     "db:reindex-search": "pnpm --filter @nyz-rag/processing db:reindex-search",
+    "db:restore-drill": "pnpm --filter @nyz-rag/processing db:restore-drill",
     "evaluate:retrieval": "pnpm --filter @nyz-rag/processing evaluate:retrieval",
     "evaluate:generate": "pnpm --filter @nyz-rag/processing evaluate:generate",
     "evaluate:multiturn": "pnpm --filter @nyz-rag/processing evaluate:multiturn",

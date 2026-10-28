@@ -174,7 +174,8 @@
 - [x] 供应商与模型解耦：供应商只管连接，业务模型为 Chat / Embedding / Rerank 分别选择供应商与模型；模型配置页支持服务类型预设、测试连接与从模型列表选择模型
 - [ ] 审计日志
 - [x] 文档处理互斥：改用 PostgreSQL 会话级咨询锁（`withDocumentWork` / `lockDocument`，键 `nyz-rag:document:<id>`），未采用 Redis 锁。锁随数据库连接释放，Worker 崩溃不残留，无需 TTL 与续期，并与行锁、`processing_version` 校验在同一系统内；持锁期间占用一个连接，提高 Worker 并发时需相应调大连接池
-- [ ] 成本统计（问答记录已有 Token 用量，可按天/模型汇总）、监控告警、数据备份
+- [ ] 成本统计（问答记录已有 Token 用量，可按天/模型汇总）、监控告警
+- [x] 数据备份与恢复演练（2026-10-27，[backup-restore.md](backup-restore.md)）：pg_dump 整库备份（排除评估实验 schema），`NYZ_SECRET_KEY` 单独留存，Redis 不备份；`pnpm db:restore-drill` 把备份恢复到临时库，核对迁移记录、各表行数、切片与向量、主密钥能否解密已保存的密钥后删除临时库。定时备份与异地存放由部署方配置
 
 ## 暂不实施
 

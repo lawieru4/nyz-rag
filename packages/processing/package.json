@@ -16,6 +16,7 @@
     "test": "tsx --test test/*.test.ts",
     "db:migrate": "tsx --env-file-if-exists=../../.env src/cli/migrate.ts",
     "db:reindex-search": "tsx --env-file-if-exists=../../.env src/cli/reindex-search.ts",
+    "db:restore-drill": "tsx --env-file-if-exists=../../.env src/cli/restore-drill.ts",
     "evaluate:retrieval": "tsx --env-file-if-exists=../../.env src/cli/evaluate-retrieval.ts",
     "evaluate:generate": "tsx --env-file-if-exists=../../.env src/cli/evaluate-generate.ts",
     "evaluate:multiturn": "tsx --env-file-if-exists=../../.env src/cli/evaluate-multiturn.ts",
