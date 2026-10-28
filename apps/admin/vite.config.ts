@@ -10,6 +10,6 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue(), tailwindcss()],
     envDir,
-    server: { port: Number(env.ADMIN_PORT ?? 5176), strictPort: true },
+    server: { port: Number(env.ADMIN_PORT ?? 5011), strictPort: true },
   };
 });

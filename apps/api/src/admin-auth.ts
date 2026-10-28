@@ -86,7 +86,7 @@ export const databaseAdmins: AdminRepository = {
 };
 
 export function adminAuthConfig(): AdminAuthConfig {
-  const origins = (process.env.ADMIN_ORIGINS ?? `http://localhost:${process.env.ADMIN_PORT ?? "5176"},http://127.0.0.1:${process.env.ADMIN_PORT ?? "5176"}`)
+  const origins = (process.env.ADMIN_ORIGINS ?? `http://localhost:${process.env.ADMIN_PORT ?? "5011"},http://127.0.0.1:${process.env.ADMIN_PORT ?? "5011"}`)
     .split(",").map((origin) => origin.trim()).filter(Boolean);
   for (const origin of origins) {
     const parsed = new URL(origin);

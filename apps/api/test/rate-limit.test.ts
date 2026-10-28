@@ -56,7 +56,7 @@ test("real app rejects admission before auth/database; health and preflight stay
   const app = buildApp({ limiter, authStore: memoryAuthStore(), userAuthStore: memoryAuthStore(), mailer: null });
   try {
     for (const url of ["/api/search", "/api/chat", "/api/chat/sessions/00000000-0000-4000-8000-000000000001/stream", "/api/admin/auth/login"]) {
-      const response = await app.inject({ method: "POST", url, headers: { origin: "http://localhost:5175" }, payload: {} });
+      const response = await app.inject({ method: "POST", url, headers: { origin: "http://localhost:5010" }, payload: {} });
       assert.equal(response.statusCode, 429, response.body);
       assert.equal(response.headers["retry-after"], "7");
       assert.equal(response.headers["access-control-expose-headers"], "Retry-After");

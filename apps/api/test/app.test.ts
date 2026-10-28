@@ -44,9 +44,9 @@ test("the application registers all domains and rejects bad requests before acce
     const notFound = await app.inject({ method: "GET", url: "/missing" });
     assert.equal(notFound.statusCode, 404);
     assert.deepEqual(Object.keys(notFound.json()), ["error"]);
-    const cors = await app.inject({ method: "OPTIONS", url: "/api/search", headers: { origin: "http://localhost:5175", "access-control-request-method": "POST" } });
+    const cors = await app.inject({ method: "OPTIONS", url: "/api/search", headers: { origin: "http://localhost:5010", "access-control-request-method": "POST" } });
     assert.equal(cors.statusCode, 204);
-    assert.equal(cors.headers["access-control-allow-origin"], "http://localhost:5175");
+    assert.equal(cors.headers["access-control-allow-origin"], "http://localhost:5010");
   } finally {
     await app.close();
   }
