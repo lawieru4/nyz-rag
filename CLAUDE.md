@@ -8,8 +8,9 @@ NYZ 文章问答（RAG）系统，pnpm workspace monorepo（`apps/*`、`packages
 
 ```sh
 pnpm install
-pnpm dev                 # 先构建 processing，再并行启动 api / web / worker（不含 admin）
+pnpm dev                 # 先构建 processing，再并行启动 api / web / worker / 微信小程序编译监听（不含 admin）
 pnpm --filter @nyz-rag/admin dev
+pnpm --filter @nyz-rag/weixin dev # 单独启动微信小程序编译监听，开发者工具导入 apps/weixin/dist/dev/mp-weixin
 pnpm build               # pnpm -r build
 pnpm typecheck           # 先构建 processing，再 pnpm -r typecheck
 pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev|build|typecheck
@@ -20,9 +21,10 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 - 检索评估（`docs/evaluation-plan.md`）：数据集格式与指标在 `evaluation.ts`（schemaVersion 2，兼容读取 v1），合成题的抽样、提示与程序校验在 `synthetic-questions.ts`（修改提示或校验规则时提升 `SYNTHETIC_PROMPT_VERSION`）。`pnpm evaluate:generate --name=<名称> [--limit=N]` 用 Chat 模型生成、「审核」模型（业务模型 `review`）审核，会调用模型产生费用，工作文件在 `.nyz-data/evaluation/<名称>/`，可断点续跑，`--freeze` 导出数据集。语料读取两条命令共用 `src/cli/evaluation-corpus.ts`。`pnpm evaluate:retrieval --mode=hybrid --dataset=<路径> --split=dev --name=<运行名>` 调用问答使用的 `retrieve()`（最近创建的知识库参数与业务模型配置中的 Embedding、Rerank），按 `--variant`（keyword、vector、summary、fused、rerank）消融，`--context`（topk、budget、section）选择回答上下文的组装方式，变体裁剪、指标与对比的纯逻辑在 `evaluation-run.ts`，运行记录保存到 `.nyz-data/eval-runs/`；`pnpm evaluate:compare <运行A> <运行B>` 对比两次运行（`offline`/`db` 模式只是关键词冒烟测试）。切片规则的实验用 `pnpm evaluate:index --schema=eval_<名称> --chunker=3|2`（规则 1 当前为版本 3）在 `nyzrag` 库的单独 schema 中复制文章与模型配置并重新切片、向量化（调用 Embedding，不经过队列，不改业务 schema），评估时加 `--schema=eval_<名称>`。回答层评估 `pnpm evaluate:answer --dataset=<路径> --split=dev --name=<运行名> [--context=topk|budget]` 按问答的方式检索并调用 Chat 模型回答（不保存问答记录），统计来源文章引用，由审核模型评审忠实度、完整度与引用，会产生费用；纯逻辑在 `evaluation-answer.ts`（修改评审提示或统计规则时提升 `ANSWER_EVAL_VERSION`），工作文件在 `.nyz-data/eval-answers/<运行名>/`，可断点续跑，`--compare <A> <B>` 逐题对比。多轮追问评估（`docs/evaluation-plan.md` 第 8.10 节）：`pnpm evaluate:multiturn --name=<名称> --from=<单轮数据集> [--split=dev] [--limit=N]` 从单轮合成集派生追问题（Chat 模型生成、审核模型审核，会产生费用，工作文件在 `.nyz-data/evaluation/<名称>/`，可断点续跑，`--freeze` 导出，另配对同等数量的换话题题），纯逻辑在 `multiturn-questions.ts`（修改提示或校验规则时提升 `MULTITURN_PROMPT_VERSION`）；含带历史题目的数据集在 `evaluate:retrieval --mode=hybrid` 与 `evaluate:answer` 中必须指定 `--rewrite=none|concat|llm|standalone`（`evaluation-rewrite.ts`，llm 与问答共用改写模型，会调用模型），指标另按对话（`turn`）分组。失败题复判 `pnpm evaluate:adjudicate <运行> [--variant=rerank,fused] [--ids=…] [--dry-run]` 由审核模型判断排在来源文章之前（前 10 篇内）的文章能否回答，宽松 Hit@K / MRR 写回运行记录的 `adjudication` 字段（`evaluate:compare` 并列输出），会产生费用；纯逻辑在 `evaluation-adjudication.ts`（修改复判提示时提升 `ADJUDICATION_VERSION`，证据校验在使用时重算），结论按「题目 + 文章」缓存在 `.nyz-data/eval-adjudications/`，各运行共用。
 - 集成测试 `test/pipeline.test.ts` 默认跳过；设置 `NYZ_INTEGRATION_TEST=1` 并提供 `DATABASE_URL`、`REDIS_URL` 启用。它用 tsx 直接拉起 API 和 Worker 源码，使用临时 PostgreSQL schema（连接串 `options=-c search_path=<schema>,public`，结束后删除）、唯一队列名和本地模拟 Embedding 服务。
 - 数据库（Drizzle）：修改 `packages/processing/src/schema.ts` 后运行 `pnpm db:generate` 生成迁移（会去掉外键里写死的 `"public".`，使表可建在任意 schema）；`pnpm db:migrate` 手动执行迁移（API/Worker 启动时也会自动执行）；`pnpm db:reindex-search` 按当前词项规则重建全部切片与文档元数据的关键词检索词项（修改 `search-terms.ts` 后执行）。
+- 备份恢复（`docs/backup-restore.md`）：`pg_dump -Fc --exclude-schema='eval_*'` 整库备份，`NYZ_SECRET_KEY` 单独留存，Redis 不备份。`pnpm db:restore-drill --dump=<文件> [--pg-restore="<命令>"]` 用 `NYZ_RESTORE_ADMIN_URL`（能建库并创建 `vector` 扩展的账号，不用 `DATABASE_URL`）新建临时库 `nyzrag_restore_drill_*` 恢复备份，核对迁移记录（按 `created_at`，不比较随 CRLF 变化的 hash）、各表行数、已向量化文档的切片与向量、当前主密钥能否解密已保存的密钥，结束（含失败、中断）后删除临时库。纯逻辑在 `restore-drill.ts`；新增表须在其 `TABLE_RECOVERY` 中归类（测试校验）并同步文档第一节。
 - 没有配置 lint。`turbo.json` 存在但根脚本未使用 Turborepo。
 - `@nyz-rag/processing` 通过 `dist/` 导出：单独启动/类型检查 API 或 Worker 前须先 `pnpm --filter @nyz-rag/processing build`，修改 processing 后也要重新构建。`@nyz-rag/types`、`@nyz-rag/api-client`、`@nyz-rag/ui` 直接导出源码，无需构建。
-- 容器方式：`docker compose up -d --build --wait`（只启动 api/worker/web/admin）。Docker 构建只安装、构建 `apps/*` 与 `packages/*` 中除 `@nyz-rag/weixin` 外的包。生产部署（1Panel 服务器，`docs/deploy-1panel.md`）不在服务器上构建：`scripts/package-images.ps1` 本地构建并导出镜像到 `release/`，服务器用 `deploy/compose.yml`（自带 pgvector 与 Redis、固定网段兼作 `TRUSTED_PROXIES`、各容器内存上限）启动。不要同时运行本机 Worker 和容器 Worker。API 的 `/health` 只表示进程存活，`/ready` 检查数据库与 Redis（2 秒超时，失败返回 503 并只写出失败项名称），Compose 的 API 健康检查用后者；Worker 的投递器每轮成功（数据库、Redis 可用且队列消费者在运行）后写心跳文件（`NYZ_WORKER_HEARTBEAT_FILE`，默认在系统临时目录），健康检查 `node apps/worker/dist/healthcheck.js` 判断 30 秒内是否有心跳。
+- 容器方式：`docker compose up -d --build --wait`（只启动 api/worker/web/admin）。Docker 构建只安装、构建 `apps/*` 与 `packages/*` 中除 `@nyz-rag/weixin` 外的包。生产部署（1Panel 服务器，`docs/deploy-1panel.md`）不在服务器上构建：`scripts/package-images.ps1` 本地构建并导出镜像到 `release/`，服务器用 `deploy/compose.yml`（只含 api/worker/web/admin、各容器内存上限）启动；PostgreSQL 与 Redis 用 1Panel 应用商店中各项目共用的实例（api/worker 加入 `1panel-network`，`DATABASE_URL`/`REDIS_URL` 写在服务器 `.env`，`TRUSTED_PROXIES` 为本项目与该网络的两个网段），PostgreSQL 重装为与本地相同的 `pgvector/pgvector:pg18`（服务器拉不到时打包脚本加 `-IncludePgvector` 导出）。不要同时运行本机 Worker 和容器 Worker。API 的 `/health` 只表示进程存活，`/ready` 检查数据库与 Redis（2 秒超时，失败返回 503 并只写出失败项名称），Compose 的 API 健康检查用后者；Worker 的投递器每轮成功（数据库、Redis 可用且队列消费者在运行）后写心跳文件（`NYZ_WORKER_HEARTBEAT_FILE`，默认在系统临时目录），健康检查 `node apps/worker/dist/healthcheck.js` 判断 30 秒内是否有心跳。
 
 ## 架构
 
@@ -69,9 +71,8 @@ pnpm --filter @nyz-rag/<api|web|admin|worker|types|processing|api-client|ui> dev
 
 ## 环境与基础设施
 
-- API、Worker 和两个 Vite 应用都读取根目录 `.env`（gitignored，模板为 `.env.example`；默认端口 API 3001、web 5175、admin 5176）。只有 `VITE_` 前缀变量会暴露给浏览器，不要给密钥加此前缀。
-- 本地复用共享的 PostgreSQL 18/pgvector（`localhost:5432`）和 Redis 8（`localhost:6379`），只使用专用 `nyzrag` 数据库/账号；API 与 Worker 必须设置相同的 `DOCUMENT_QUEUE_NAME=nyz-rag-document-processing`。不要改动或停止 booth-ai 等共享服务，禁止对共享 Redis 执行 `FLUSHALL`/`FLUSHDB`。`vector` 扩展需由管理员为非超级用户的应用账号预先创建。
-- 可选独立基础设施：`docker compose --profile standalone up -d postgres redis`，端口 55433/56380。
+- API、Worker 和两个 Vite 应用都读取根目录 `.env`（gitignored，模板为 `.env.example`；默认端口 API 3010、web 5010、admin 5011）。只有 `VITE_` 前缀变量会暴露给浏览器，不要给密钥加此前缀。
+- 本地使用共用基础设施 `D:/baolf/infra`（独立的 Compose 项目，agent-template、booth-ai 与本项目共用，不属于任何项目）：PostgreSQL 18/pgvector（`infra-postgres`，`localhost:5432`，超级用户 `postgres`）和带密码的 Redis 8（`infra-redis`，`localhost:6379`）。本项目只使用专用 `nyzrag` 数据库/非超级用户账号与 Redis 逻辑库 1（`REDIS_URL` 末尾 `/1`；agent-template 为 0、booth-ai 为 2，其测试用 15）；API 与 Worker 必须设置相同的 `DOCUMENT_QUEUE_NAME=nyz-rag-document-processing`。不要停止或改动 infra，禁止对共用 Redis 执行 `FLUSHALL`。`vector` 扩展由超级用户为应用账号预先创建。线上对应 1Panel 应用商店中的 PostgreSQL（`pgvector/pgvector:pg18`）与 Redis，约定相同（`docs/deploy-1panel.md`）。
 - 容器启动器 `docker/start.mjs` 会把连接串中的 loopback 主机改写为 `host.docker.internal`，并设置 `NYZ_LOOPBACK_HOST`，使 `providerUrl` 同样改写模型供应商地址中的本机地址（本机模型/代理在后台填 `127.0.0.1`，容器内外都可用）。发布端口只绑定 127.0.0.1。
 - `.nyz-data/`（gitignored）现在只存放旧版快照和 `scripts/nyz-articles/` 的样本数据，应用运行不再依赖它。`.nyz-data/nyz-articles/raw/` 中 200 篇原始详情可用于回归检查解析器和切片。
 - nyzdata token 与模型 API Key 只在管理端填写（加密入库），不要写入代码、来源地址、日志或提交；`NYZ_SECRET_KEY` 只放在 `.env` 或环境变量里。
