@@ -1,12 +1,12 @@
 # Build the production images locally and export them for upload to the server (see docs/deploy-1panel.md).
-# Usage: ./scripts/package-images.ps1 -Version 20261027-01 [-Platform linux/arm64] [-IncludeInfra]
+# Usage: ./scripts/package-images.ps1 -Version 20261027-01 [-Platform linux/arm64] [-IncludePgvector]
 [CmdletBinding()]
 param(
     [string]$Version = (Get-Date -Format 'yyyyMMdd-HHmm'),
     [ValidateSet('linux/amd64', 'linux/arm64')]
     [string]$Platform = 'linux/amd64',
-    # Also export pgvector and Redis (first deployment, or when the server cannot pull from Docker Hub).
-    [switch]$IncludeInfra
+    # Also export pgvector/pgvector:pg18 for the shared PostgreSQL app in 1Panel (when the server cannot pull from Docker Hub).
+    [switch]$IncludePgvector
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,19 +39,18 @@ if ($LASTEXITCODE -ne 0) { throw 'Image export failed.' }
 Write-Host "Images: $($images -join ', ') (revision $revision)"
 Write-Host "Archive: $archive"
 
-if ($IncludeInfra) {
-    $infra = @('pgvector/pgvector:pg18', 'redis:8-alpine')
-    foreach ($image in $infra) {
-        & docker pull --platform $Platform $image
-        if ($LASTEXITCODE -eq 0) { continue }
+if ($IncludePgvector) {
+    $pgImage = 'pgvector/pgvector:pg18'
+    & docker pull --platform $Platform $pgImage
+    if ($LASTEXITCODE -ne 0) {
         # Docker Hub is often unreachable; fall back to a local copy of the image.
-        & docker image inspect --platform $Platform $image *> $null
-        if ($LASTEXITCODE -ne 0) { throw "Pull failed and no local copy: $image" }
-        Write-Warning "Pull failed: $image. Exporting the local copy, which may not be the latest."
+        & docker image inspect --platform $Platform $pgImage *> $null
+        if ($LASTEXITCODE -ne 0) { throw "Pull failed and no local copy: $pgImage" }
+        Write-Warning "Pull failed: $pgImage. Exporting the local copy, which may not be the latest."
     }
-    $infraArchive = Join-Path $releasePath 'nyz-rag-infra.tar'
-    & docker save --platform $Platform -o $infraArchive @infra
-    if ($LASTEXITCODE -ne 0) { throw 'Infrastructure image export failed.' }
-    Write-Host "Infrastructure archive: $infraArchive"
+    $pgArchive = Join-Path $releasePath 'pgvector-pg18.tar'
+    & docker save --platform $Platform -o $pgArchive $pgImage
+    if ($LASTEXITCODE -ne 0) { throw 'pgvector image export failed.' }
+    Write-Host "pgvector archive: $pgArchive"
 }
 Write-Host "Set NYZ_VERSION=$Version in the server .env after loading the archive."

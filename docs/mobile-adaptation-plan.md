@@ -222,8 +222,8 @@ pnpm verify
 真机访问的现状与前置配置：
 
 - 暴露范围：容器端口只绑定 127.0.0.1，手机无法直接访问；本机开发模式则不同，web、admin 的 `dev` 脚本为 `vite --host 0.0.0.0`，API 也监听 `0.0.0.0`，只要防火墙放行，同一局域网内的设备就能访问管理端和 API。真机测试只在可信网络进行，测试结束后恢复防火墙规则，不公开数据库或 Redis。
-- API 地址：`.env.example` 中 `VITE_API_URL=http://localhost:3001`，手机上的 localhost 指向手机本身，必须改为本机局域网地址（如 `http://192.168.x.x:3001`）后重启 Vite。Vite 未配置 `/api` 代理。
-- 允许来源：`WEB_ORIGINS`、`ADMIN_ORIGINS` 默认只包含 localhost 与 127.0.0.1，须加入局域网来源（如 `http://192.168.x.x:5175`、`:5176`）并重启 API，否则携带 Cookie 的请求会被拒绝。
+- API 地址：`.env.example` 中 `VITE_API_URL=http://localhost:3010`，手机上的 localhost 指向手机本身，必须改为本机局域网地址（如 `http://192.168.x.x:3010`）后重启 Vite。Vite 未配置 `/api` 代理。
+- 允许来源：`WEB_ORIGINS`、`ADMIN_ORIGINS` 默认只包含 localhost 与 127.0.0.1，须加入局域网来源（如 `http://192.168.x.x:5010`、`:5011`）并重启 API，否则携带 Cookie 的请求会被拒绝。
 - Cookie：非生产环境默认不带 `Secure`（`USER_COOKIE_SECURE`、`ADMIN_COOKIE_SECURE` 未设置时取决于 `NODE_ENV`），HTTP 局域网地址可以正常登录；同一 IP 不同端口属于同站，`SameSite=Strict` 不受影响。
 
 复用已有测试服务时记录访问方式与上述配置改动，不在文档中写入秘密值，测试后还原 `.env`。

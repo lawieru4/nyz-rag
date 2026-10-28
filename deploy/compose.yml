@@ -1,5 +1,6 @@
 # 生产部署（1Panel 服务器）：使用本地打包、上传导入的镜像，不在服务器上构建。步骤见 docs/deploy-1panel.md。
-# 与本文件同目录放 .env（模板 deploy/.env.example）；连接串、可信代理由下面拼出，不写在 .env 里。
+# 与本文件同目录放 .env（模板 deploy/.env.example）。
+# PostgreSQL（含 pgvector）与 Redis 用 1Panel 应用商店中各项目共用的实例，api 与 worker 经 1Panel 的网络访问它们。
 name: nyz-rag
 
 x-logging: &logging
@@ -12,13 +13,14 @@ x-backend: &backend
     NODE_ENV: production
     API_PORT: 3000
     DOCUMENT_QUEUE_NAME: ${DOCUMENT_QUEUE_NAME:-nyz-rag-document-processing}
-    # 密码只用字母数字（openssl rand -hex 生成），无需 URL 编码。
-    DATABASE_URL: postgresql://nyzrag:${NYZ_POSTGRES_PASSWORD:?set NYZ_POSTGRES_PASSWORD in .env}@postgres:5432/nyzrag
-    REDIS_URL: redis://:${NYZ_REDIS_PASSWORD:?set NYZ_REDIS_PASSWORD in .env}@redis:6379
-    # OpenResty（host 网络）经端口映射进入容器时，来源是本网络的网关；web/admin 的 Nginx 也在本网络内。
-    TRUSTED_PROXIES: ${NYZ_SUBNET:?set NYZ_SUBNET in .env}
+    DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+    REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env}
+    # OpenResty（host 网络）经端口映射进入容器时，来源是某个所在网络的网关（容器在两个网络中，由 Docker 选择），
+    # 所以两个网段都要信任；web/admin 的 Nginx 在本项目网络内。
+    TRUSTED_PROXIES: ${NYZ_SUBNET:?set NYZ_SUBNET in .env},${NYZ_SHARED_SUBNET:?set NYZ_SHARED_SUBNET in .env}
     # 服务器内存小：让 V8 早些回收，避免触及容器内存上限。
     NODE_OPTIONS: --max-old-space-size=256
+  networks: [default, shared]
   extra_hosts:
     - "host.docker.internal:host-gateway"
   init: true
@@ -27,17 +29,14 @@ x-backend: &backend
   stop_grace_period: 60s
   mem_limit: 384m
   logging: *logging
-  depends_on:
-    postgres: { condition: service_healthy }
-    redis: { condition: service_healthy }
 
 services:
   api:
     <<: *backend
     image: nyz-rag-api:${NYZ_VERSION:?set NYZ_VERSION in .env}
     ports:
-      - "127.0.0.1:${NYZ_API_PORT:-3001}:3000"
-    # /ready 确认数据库与 Redis 可用（/health 只说明进程在响应）。
+      - "127.0.0.1:${NYZ_API_PORT:-3010}:3000"
+    # /ready 确认数据库与 Redis 可用（/health 只说明进程在响应）；共用实例不可用时 API 不健康，web/admin 随之不启动。
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
@@ -60,7 +59,7 @@ services:
     image: nyz-rag-web:${NYZ_VERSION:?set NYZ_VERSION in .env}
     pull_policy: never
     ports:
-      - "127.0.0.1:${NYZ_WEB_PORT:-5175}:8080"
+      - "127.0.0.1:${NYZ_WEB_PORT:-5010}:8080"
     depends_on:
       api: { condition: service_healthy }
     restart: unless-stopped
@@ -71,62 +70,11 @@ services:
     image: nyz-rag-admin:${NYZ_VERSION:?set NYZ_VERSION in .env}
     pull_policy: never
     ports:
-      - "127.0.0.1:${NYZ_ADMIN_PORT:-5176}:8080"
+      - "127.0.0.1:${NYZ_ADMIN_PORT:-5011}:8080"
     depends_on:
       api: { condition: service_healthy }
     restart: unless-stopped
     mem_limit: 64m
-    logging: *logging
-
-  # 应用账号 nyzrag 是该实例的超级用户，迁移可自行创建 vector 扩展；不发布端口。
-  postgres:
-    image: pgvector/pgvector:pg18
-    pull_policy: missing
-    environment:
-      POSTGRES_DB: nyzrag
-      POSTGRES_USER: nyzrag
-      POSTGRES_PASSWORD: ${NYZ_POSTGRES_PASSWORD:?set NYZ_POSTGRES_PASSWORD in .env}
-    # 按小内存服务器调小；API 与 Worker 各一个连接池（默认最多 10 个连接）。
-    command:
-      - postgres
-      - -c
-      - shared_buffers=64MB
-      - -c
-      - effective_cache_size=256MB
-      - -c
-      - work_mem=4MB
-      - -c
-      - maintenance_work_mem=64MB
-      - -c
-      - max_connections=40
-    volumes:
-      - postgres_data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nyzrag -d nyzrag"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-    stop_grace_period: 60s
-    mem_limit: 384m
-    logging: *logging
-
-  # BullMQ 要求 noeviction；appendonly 使队列在重启后保留。不发布端口。
-  redis:
-    image: redis:8-alpine
-    pull_policy: missing
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction", "--requirepass", "${NYZ_REDIS_PASSWORD:?set NYZ_REDIS_PASSWORD in .env}"]
-    environment:
-      REDISCLI_AUTH: ${NYZ_REDIS_PASSWORD:?set NYZ_REDIS_PASSWORD in .env}
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-    mem_limit: 128m
     logging: *logging
 
 networks:
@@ -134,7 +82,7 @@ networks:
     ipam:
       config:
         - subnet: ${NYZ_SUBNET:?set NYZ_SUBNET in .env}
-
-volumes:
-  postgres_data:
-  redis_data:
+  # 1Panel 应用（PostgreSQL、Redis）所在的网络，由 1Panel 创建。
+  shared:
+    external: true
+    name: ${NYZ_SHARED_NETWORK:-1panel-network}

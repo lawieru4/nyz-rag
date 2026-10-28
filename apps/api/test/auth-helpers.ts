@@ -14,11 +14,11 @@ export function buildTestApp(options: Parameters<typeof buildApp>[0] = {}) {
 
 export const adminAuth: AdminAuthConfig = {
   legacyUsername: "admin",
-  origins: ["http://localhost:5176"], secureCookie: false,
+  origins: ["http://localhost:5011"], secureCookie: false,
 };
 export const adminHeaders = { "x-nyz-admin": "1", origin: adminAuth.origins[0]! };
 
-export const userAuth: UserAuthConfig = { origins: ["http://localhost:5175"], secureCookie: false };
+export const userAuth: UserAuthConfig = { origins: ["http://localhost:5010"], secureCookie: false };
 export const userHeaders = { "x-nyz-client": "1" };
 
 export function memoryAuthStore(now = Date.now): AuthStore {

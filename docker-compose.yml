@@ -1,3 +1,5 @@
+# 本地容器方式：只含 api/worker/web/admin。PostgreSQL 与 Redis 用本机共用的基础设施（D:/baolf/infra，见 README），
+# 连接串写在根目录 .env（localhost 由 docker/start.mjs 改写为 host.docker.internal）。
 name: nyz-rag
 
 x-backend: &backend
@@ -19,7 +21,7 @@ services:
       context: .
       target: api
     ports:
-      - "127.0.0.1:${API_PORT:-3001}:3000"
+      - "127.0.0.1:${API_PORT:-3010}:3000"
     # /ready 确认数据库与 Redis 可用（/health 只说明进程在响应）。
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
@@ -46,7 +48,7 @@ services:
       context: .
       target: web
     ports:
-      - "127.0.0.1:${WEB_PORT:-5175}:8080"
+      - "127.0.0.1:${WEB_PORT:-5010}:8080"
     depends_on:
       api:
         condition: service_healthy
@@ -57,43 +59,8 @@ services:
       context: .
       target: admin
     ports:
-      - "127.0.0.1:${ADMIN_PORT:-5176}:8080"
+      - "127.0.0.1:${ADMIN_PORT:-5011}:8080"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
-
-  postgres:
-    profiles: [standalone]
-    image: pgvector/pgvector:pg18
-    environment:
-      POSTGRES_DB: nyzrag
-      POSTGRES_USER: nyzrag
-      POSTGRES_PASSWORD: nyzrag
-    ports:
-      - "127.0.0.1:55433:5432"
-    volumes:
-      - postgres18_data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nyzrag -d nyzrag"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  redis:
-    profiles: [standalone]
-    image: redis:8-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
-    ports:
-      - "127.0.0.1:56380:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-volumes:
-  postgres18_data:
-  redis_data:

@@ -52,7 +52,7 @@ test("deployment config defaults to secure production cookies and rejects unsafe
   const previous = keys.map((key) => process.env[key]);
   try {
     for (const key of keys) delete process.env[key];
-    assert.deepEqual(userAuthConfig(), { origins: ["http://localhost:5175", "http://127.0.0.1:5175"], secureCookie: false });
+    assert.deepEqual(userAuthConfig(), { origins: ["http://localhost:5010", "http://127.0.0.1:5010"], secureCookie: false });
     process.env.NODE_ENV = "production";
     assert.equal(userAuthConfig().secureCookie, true);
     for (const [key, value] of [["WEB_ORIGINS", "https://web.example/path"], ["WEB_ORIGINS", "*"], ["USER_COOKIE_SECURE", "yes"]]) {

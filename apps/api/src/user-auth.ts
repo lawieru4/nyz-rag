@@ -26,7 +26,7 @@ export interface UserAuthConfig {
 }
 
 export function userAuthConfig(): UserAuthConfig {
-  const port = process.env.WEB_PORT ?? "5175";
+  const port = process.env.WEB_PORT ?? "5010";
   const origins = (process.env.WEB_ORIGINS ?? `http://localhost:${port},http://127.0.0.1:${port}`)
     .split(",").map((origin) => origin.trim()).filter(Boolean);
   for (const origin of origins) {
