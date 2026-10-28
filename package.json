@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@12.11.2",
   "scripts": {
-    "dev": "pnpm --filter @nyz-rag/processing build && pnpm --parallel --filter @nyz-rag/api --filter @nyz-rag/web --filter @nyz-rag/worker dev",
+    "dev": "pnpm --filter @nyz-rag/processing build && pnpm --parallel --filter @nyz-rag/api --filter @nyz-rag/web --filter @nyz-rag/worker --filter @nyz-rag/weixin dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm --filter @nyz-rag/processing build && pnpm -r typecheck",
     "test": "pnpm --filter @nyz-rag/processing build && pnpm -r --if-present --no-bail --workspace-concurrency=1 test",

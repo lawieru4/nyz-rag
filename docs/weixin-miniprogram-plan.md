@@ -142,14 +142,14 @@ components/
 
 ### 4.3 网络与域名
 
-- 开发：开发者工具勾选“不校验合法域名”（`manifest.json` 已设 `urlCheck: false`），可以访问 `http://127.0.0.1:3001`；真机预览需要局域网 IP 或内网穿透，并打开调试模式。
+- 开发：开发者工具勾选“不校验合法域名”（`manifest.json` 已设 `urlCheck: false`），可以访问 `http://127.0.0.1:3010`；真机预览需要局域网 IP 或内网穿透，并打开调试模式。
 - 正式：API 地址为 **`https://ragapi.baolinfeng.cn`**。需要：
   - 在小程序后台把它配置为 **request 合法域名**；域名要已 ICP 备案，证书链完整，支持 TLS 1.2 及以上；
   - 打开原文外链（`webview`）时还要配置**业务域名**（需在域名根目录放校验文件）；
   - 该子域名专供 nyz-rag API，反向代理把 `/api/` 转发到 API 服务（容器方式为 `127.0.0.1:${API_PORT}`）；
   - 反向代理对流式接口关闭缓冲（第 4.1 节）。
 - API 地址的注入：
-  - 在 `apps/weixin` 下放 `.env.development`（`VITE_API_URL=http://127.0.0.1:3001`）和 `.env.production`（`VITE_API_URL=https://ragapi.baolinfeng.cn`）；
+  - 在 `apps/weixin` 下放 `.env.development`（`VITE_API_URL=http://127.0.0.1:3010`）和 `.env.production`（`VITE_API_URL=https://ragapi.baolinfeng.cn`）；
   - 不与根目录 `.env` 共用，因为根目录的 `.env` 有密钥，小程序代码包会被下载，只能放公开信息；
   - `dev` 默认读取 development，`build` 默认读取 production。
 
