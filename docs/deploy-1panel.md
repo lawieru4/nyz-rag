@@ -25,7 +25,7 @@ Docker 网络 1panel-network（1Panel 创建，网段 NYZ_SHARED_SUBNET）：api
 | PostgreSQL 18 | `1Panel-postgresql-XXXX`（第 4.1 节重装后会变） | `pgvector/pgvector:pg18`（第 4.1 节重装） | 库 `nyzrag`，账号 `nyzrag`（非超级用户） |
 | Redis 7.4 | `1Panel-redis-xCYH` | `redis:7.4.10` | 逻辑库 `1`；键另带 `DOCUMENT_QUEUE_NAME` 前缀 |
 
-本地开发的共用基础设施 `D:/baolf/infra` 与这里约定相同，各项目的库、账号与 Redis 编号见其 `README.md`：agent-template `app` / 0，nyz-rag `nyzrag` / 1，booth-ai `booth` / 2（测试 15）。以后的项目照此办理：PostgreSQL 新建自己的库与账号（第 4.2 节），Redis 选一个未用的逻辑库编号，容器加入 `1panel-network`。重装 1Panel 应用后容器名的后缀会变，以 `docker ps` 为准。
+本地开发的共用基础设施 `D:/baolf/infra` 与这里约定相同，各项目的库、账号与 Redis 编号见其 `README.md`：booth-ai `booth` / 0（测试 15），nyz-rag `nyzrag` / 1，agent-template `app` / 2。以后的项目照此办理：PostgreSQL 新建自己的库与账号（第 4.2 节），Redis 选一个未用的逻辑库编号，容器加入 `1panel-network`。重装 1Panel 应用后容器名的后缀会变，以 `docker ps` 为准。
 
 ### 为什么本地打包
 
